@@ -23,6 +23,100 @@ re_resolution_tuple = re.compile(r"[\(\[]\s*(\d+)\s*[,\*xX]\s*(\d+)\s*[\)\]]")
 re_number = re.compile(r"[+-]?\d*\.?\d+(?:[eE][+-]?\d+)?")
 
 
+class LoadStatus:
+    SUCCESS = 'success'
+    GENERATING_BLOCKED = 'generating_blocked'
+    UNRECOGNIZED_FORMAT = 'unrecognized_format'
+    FIELD_DAMAGED = 'field_damaged'
+    PARTIAL_SUCCESS = 'partial_success'
+
+
+class LoadResult:
+    def __init__(self):
+        self.status = LoadStatus.SUCCESS
+        self.skipped_fields = []
+        self.loaded_fields = []
+        self.error_details = []
+        self.metadata_source = None
+
+    def add_skipped(self, field_name: str, reason: str = ''):
+        self.skipped_fields.append((field_name, reason))
+        if self.status == LoadStatus.SUCCESS:
+            self.status = LoadStatus.PARTIAL_SUCCESS
+
+    def add_loaded(self, field_name: str):
+        self.loaded_fields.append(field_name)
+
+    def add_error(self, field_name: str, error_msg: str):
+        self.error_details.append((field_name, error_msg))
+        self.status = LoadStatus.FIELD_DAMAGED
+        self.skipped_fields.append((field_name, error_msg))
+
+    def set_status(self, status: str):
+        self.status = status
+
+    def set_source(self, source: str):
+        self.metadata_source = source
+
+    def has_issues(self) -> bool:
+        return self.status not in [LoadStatus.SUCCESS, LoadStatus.GENERATING_BLOCKED]
+
+    def to_html(self) -> str:
+        if self.status == LoadStatus.GENERATING_BLOCKED:
+            return (
+                '<div style="padding: 8px 12px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; color: #856404; margin: 8px 0;">'
+                '⚠️  <strong>参数加载已跳过</strong>：生成正在进行中，请等待生成完成后再加载参数。'
+                '</div>'
+            )
+
+        if self.status == LoadStatus.UNRECOGNIZED_FORMAT:
+            return (
+                '<div style="padding: 8px 12px; background: #f8d7da; border: 1px solid #dc3545; border-radius: 4px; color: #721c24; margin: 8px 0;">'
+                '❌  <strong>参数加载失败</strong>：无法识别粘贴的参数格式。'
+                '<br/>请确认粘贴的内容是 Fooocus JSON 或 A1111 风格的参数文本。'
+                '</div>'
+            )
+
+        if self.status == LoadStatus.SUCCESS and len(self.loaded_fields) > 0:
+            source_info = f'（来自{self.metadata_source}）' if self.metadata_source else ''
+            return (
+                f'<div style="padding: 8px 12px; background: #d4edda; border: 1px solid #28a745; border-radius: 4px; color: #155724; margin: 8px 0;">'
+                f'✅  <strong>参数加载成功</strong>{source_info}：共加载 {len(self.loaded_fields)} 个字段。'
+                f'</div>'
+            )
+
+        if self.status == LoadStatus.PARTIAL_SUCCESS or self.status == LoadStatus.FIELD_DAMAGED:
+            loaded_count = len(self.loaded_fields)
+            skipped_count = len(self.skipped_fields)
+            source_info = f'（来自{self.metadata_source}）' if self.metadata_source else ''
+
+            skipped_html = ''
+            if skipped_count > 0:
+                items = []
+                for field, reason in self.skipped_fields[:8]:
+                    if reason:
+                        items.append(f'<li><code>{field}</code>: {reason}</li>')
+                    else:
+                        items.append(f'<li><code>{field}</code></li>')
+                more = f'<li>... 还有 {skipped_count - 8} 个字段</li>' if skipped_count > 8 else ''
+                skipped_html = f'<br/><strong>已跳过的字段：</strong><ul style="margin: 4px 0; padding-left: 20px;">{"".join(items)}{more}</ul>'
+
+            status_icon = '⚠️' if self.status == LoadStatus.PARTIAL_SUCCESS else '❌'
+            status_title = '部分参数加载' if self.status == LoadStatus.PARTIAL_SUCCESS else '字段损坏'
+            status_color = '#856404' if self.status == LoadStatus.PARTIAL_SUCCESS else '#721c24'
+            border_color = '#ffc107' if self.status == LoadStatus.PARTIAL_SUCCESS else '#dc3545'
+            bg_color = '#fff3cd' if self.status == LoadStatus.PARTIAL_SUCCESS else '#f8d7da'
+
+            return (
+                f'<div style="padding: 8px 12px; background: {bg_color}; border: 1px solid {border_color}; border-radius: 4px; color: {status_color}; margin: 8px 0;">'
+                f'{status_icon}  <strong>{status_title}</strong>{source_info}：已加载 {loaded_count} 个字段，跳过 {skipped_count} 个字段。'
+                f'{skipped_html}'
+                f'</div>'
+            )
+
+        return ''
+
+
 def safe_parse_list(value: Any) -> Optional[List[Any]]:
     if isinstance(value, list):
         return value
@@ -138,7 +232,46 @@ def safe_parse_int(value: Any) -> Optional[int]:
     return None
 
 
-def load_parameter_button_click(raw_metadata: dict | str, is_generating: bool, inpaint_mode: str):
+def load_parameter_button_click(raw_metadata: dict | str, is_generating: bool, inpaint_mode: str,
+                                source: str = '手动粘贴'):
+    load_result = LoadResult()
+    load_result.set_source(source)
+
+    def get_result_count():
+        n = 1
+        n += 1
+        n += 2
+        n += 1
+        n += 1
+        n += 1
+        n += 1
+        n += 3
+        n += 1
+        n += 1
+        n += 3
+        n += 1
+        n += 1
+        n += 1
+        n += 1
+        n += 1
+        n += 1
+        n += 1
+        n += 1
+        n += 1
+        n += 1
+        n += 1
+        n += 2
+        n += 1
+        n += modules.config.default_enhance_tabs
+        n += 1
+        n += 1
+        n += 5
+        n += modules.config.default_max_lora_number * 3
+        n += 1
+        return n
+
+    TOTAL_CONTROLS = get_result_count()
+
     try:
         loaded_parameter_dict = raw_metadata
         if isinstance(raw_metadata, str):
@@ -146,201 +279,288 @@ def load_parameter_button_click(raw_metadata: dict | str, is_generating: bool, i
         assert isinstance(loaded_parameter_dict, dict)
     except Exception as e:
         print(f"[Load Parameters] Failed to parse metadata: {e}")
+        load_result.set_status(LoadStatus.UNRECOGNIZED_FORMAT)
+        load_result.add_error('metadata', f'解析失败: {e}')
         loaded_parameter_dict = {}
 
     if is_generating:
         print("[Load Parameters] Skipping parameter load during generation")
-        result_count = 1
-        result_count += 1
-        result_count += 2
-        result_count += 1
-        result_count += 1
-        result_count += 1
-        result_count += 1
-        result_count += 3
-        result_count += 1
-        result_count += 1
-        result_count += 3
-        result_count += 1
-        result_count += 1
-        result_count += 1
-        result_count += 1
-        result_count += 1
-        result_count += 1
-        result_count += 1
-        result_count += 1
-        result_count += 1
-        result_count += 1
-        result_count += 2
-        result_count += 1
-        result_count += modules.config.default_enhance_tabs
-        result_count += 1
-        result_count += 1
-        result_count += 5
-        result_count += modules.config.default_max_lora_number * 3
-        return [gr.update()] * result_count
+        load_result.set_status(LoadStatus.GENERATING_BLOCKED)
+        controls = [gr.update()] * TOTAL_CONTROLS
+        controls[-1] = load_result.to_html()
+        return controls
+
+    if len(loaded_parameter_dict) == 0:
+        load_result.set_status(LoadStatus.UNRECOGNIZED_FORMAT)
+        controls = [gr.update()] * TOTAL_CONTROLS
+        controls[-1] = load_result.to_html()
+        return controls
+
+    def mark_loaded_or_skipped(field_name: str, before_len: int, after_len: int, skipped_reason: str = ''):
+        added = results[before_len:after_len]
+        all_skipped = all(isinstance(x, gr.update) or (isinstance(x, dict) and 'value' not in x) for x in added)
+        if all_skipped:
+            load_result.add_skipped(field_name, skipped_reason)
+        else:
+            load_result.add_loaded(field_name)
 
     results = [len(loaded_parameter_dict) > 0]
 
+    pos = len(results)
     try:
         get_image_number('image_number', 'Image Number', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('image_number', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load image_number: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load image_number: {err}")
         results.append(1)
+        load_result.add_skipped('image_number', err)
 
+    pos = len(results)
     try:
         get_str('prompt', 'Prompt', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('prompt', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load prompt: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load prompt: {err}")
         results.append(gr.update())
+        load_result.add_skipped('prompt', err)
 
+    pos = len(results)
     try:
         get_str('negative_prompt', 'Negative Prompt', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('negative_prompt', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load negative_prompt: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load negative_prompt: {err}")
         results.append(gr.update())
+        load_result.add_skipped('negative_prompt', err)
 
+    pos = len(results)
     try:
         get_list('styles', 'Styles', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('styles', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load styles: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load styles: {err}")
         results.append(gr.update())
+        load_result.add_skipped('styles', err)
 
     performance = None
+    pos = len(results)
     try:
         performance = get_str('performance', 'Performance', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('performance', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load performance: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load performance: {err}")
         results.append(gr.update())
+        load_result.add_skipped('performance', err)
 
+    pos = len(results)
     try:
         get_steps('steps', 'Steps', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('steps', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load steps: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load steps: {err}")
         results.append(-1)
+        load_result.add_skipped('steps', err)
 
+    pos = len(results)
     try:
         get_number('overwrite_switch', 'Overwrite Switch', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('overwrite_switch', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load overwrite_switch: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load overwrite_switch: {err}")
         results.append(gr.update())
+        load_result.add_skipped('overwrite_switch', err)
 
+    pos = len(results)
     try:
         get_resolution('resolution', 'Resolution', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('resolution', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load resolution: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load resolution: {err}")
         results.append(gr.update())
         results.append(gr.update())
         results.append(gr.update())
+        load_result.add_skipped('resolution', err)
 
+    pos = len(results)
     try:
         get_number('guidance_scale', 'Guidance Scale', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('guidance_scale', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load guidance_scale: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load guidance_scale: {err}")
         results.append(gr.update())
+        load_result.add_skipped('guidance_scale', err)
 
+    pos = len(results)
     try:
         get_number('sharpness', 'Sharpness', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('sharpness', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load sharpness: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load sharpness: {err}")
         results.append(gr.update())
+        load_result.add_skipped('sharpness', err)
 
+    pos = len(results)
     try:
         get_adm_guidance('adm_guidance', 'ADM Guidance', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('adm_guidance', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load adm_guidance: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load adm_guidance: {err}")
         results.append(gr.update())
         results.append(gr.update())
         results.append(gr.update())
+        load_result.add_skipped('adm_guidance', err)
 
+    pos = len(results)
     try:
         get_str('refiner_swap_method', 'Refiner Swap Method', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('refiner_swap_method', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load refiner_swap_method: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load refiner_swap_method: {err}")
         results.append(gr.update())
+        load_result.add_skipped('refiner_swap_method', err)
 
+    pos = len(results)
     try:
         get_number('adaptive_cfg', 'CFG Mimicking from TSNR', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('adaptive_cfg', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load adaptive_cfg: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load adaptive_cfg: {err}")
         results.append(gr.update())
+        load_result.add_skipped('adaptive_cfg', err)
 
+    pos = len(results)
     try:
         get_number('clip_skip', 'CLIP Skip', loaded_parameter_dict, results, cast_type=int)
+        mark_loaded_or_skipped('clip_skip', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load clip_skip: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load clip_skip: {err}")
         results.append(gr.update())
+        load_result.add_skipped('clip_skip', err)
 
+    pos = len(results)
     try:
         get_str('base_model', 'Base Model', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('base_model', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load base_model: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load base_model: {err}")
         results.append(gr.update())
+        load_result.add_skipped('base_model', err)
 
+    pos = len(results)
     try:
         get_str('refiner_model', 'Refiner Model', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('refiner_model', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load refiner_model: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load refiner_model: {err}")
         results.append(gr.update())
+        load_result.add_skipped('refiner_model', err)
 
+    pos = len(results)
     try:
         get_number('refiner_switch', 'Refiner Switch', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('refiner_switch', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load refiner_switch: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load refiner_switch: {err}")
         results.append(gr.update())
+        load_result.add_skipped('refiner_switch', err)
 
+    pos = len(results)
     try:
         get_str('sampler', 'Sampler', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('sampler', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load sampler: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load sampler: {err}")
         results.append(gr.update())
+        load_result.add_skipped('sampler', err)
 
+    pos = len(results)
     try:
         get_str('scheduler', 'Scheduler', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('scheduler', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load scheduler: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load scheduler: {err}")
         results.append(gr.update())
+        load_result.add_skipped('scheduler', err)
 
+    pos = len(results)
     try:
         get_str('vae', 'VAE', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('vae', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load vae: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load vae: {err}")
         results.append(gr.update())
+        load_result.add_skipped('vae', err)
 
+    pos = len(results)
     try:
         get_seed('seed', 'Seed', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('seed', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load seed: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load seed: {err}")
         results.append(gr.update())
         results.append(gr.update())
+        load_result.add_skipped('seed', err)
 
+    pos = len(results)
     try:
         get_inpaint_engine_version('inpaint_engine_version', 'Inpaint Engine Version', loaded_parameter_dict, results, inpaint_mode)
+        mark_loaded_or_skipped('inpaint_engine_version', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load inpaint_engine_version: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load inpaint_engine_version: {err}")
         results.append(gr.update())
         results.append('empty')
+        load_result.add_skipped('inpaint_engine_version', err)
 
+    pos = len(results)
     try:
         get_inpaint_method('inpaint_method', 'Inpaint Mode', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('inpaint_method', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load inpaint_method: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load inpaint_method: {err}")
         results.append(gr.update())
         for i in range(modules.config.default_enhance_tabs):
             results.append(gr.update())
+        load_result.add_skipped('inpaint_method', err)
 
     results.append(gr.update(visible=True))
     results.append(gr.update(visible=False))
 
+    pos = len(results)
     try:
         get_freeu('freeu', 'FreeU', loaded_parameter_dict, results)
+        mark_loaded_or_skipped('freeu', pos, len(results))
     except Exception as e:
-        print(f"[Load Parameters] Failed to load freeu: {e}")
+        err = str(e)
+        print(f"[Load Parameters] Failed to load freeu: {err}")
         results.append(False)
         results.append(gr.update())
         results.append(gr.update())
         results.append(gr.update())
         results.append(gr.update())
+        load_result.add_skipped('freeu', err)
 
     performance_filename = None
     try:
@@ -351,14 +571,21 @@ def load_parameter_button_click(raw_metadata: dict | str, is_generating: bool, i
         print(f"[Load Parameters] Failed to resolve performance LoRA: {e}")
 
     for i in range(modules.config.default_max_lora_number):
+        pos = len(results)
+        lora_key = f'lora_combined_{i + 1}'
+        lora_label = f'LoRA {i + 1}'
         try:
-            get_lora(f'lora_combined_{i + 1}', f'LoRA {i + 1}', loaded_parameter_dict, results, performance_filename)
+            get_lora(lora_key, lora_label, loaded_parameter_dict, results, performance_filename)
+            mark_loaded_or_skipped(lora_key, pos, len(results))
         except Exception as e:
-            print(f"[Load Parameters] Failed to load lora_combined_{i + 1}: {e}")
+            err = str(e)
+            print(f"[Load Parameters] Failed to load {lora_key}: {err}")
             results.append(True)
             results.append('None')
             results.append(1)
+            load_result.add_skipped(lora_key, err)
 
+    results.append(load_result.to_html())
     return results
 
 

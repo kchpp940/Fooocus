@@ -182,6 +182,7 @@ with shared.gradio_root:
                     load_parameter_button = gr.Button(label="Load Parameters", value="Load Parameters", elem_classes='type_row', elem_id='load_parameter_button', visible=False)
                     skip_button = gr.Button(label="Skip", value="Skip", elem_classes='type_row_half', elem_id='skip_button', visible=False)
                     stop_button = gr.Button(label="Stop", value="Stop", elem_classes='type_row_half', elem_id='stop_button', visible=False)
+                    load_status_notice = gr.HTML(value='', elem_id='load_status_notice', visible=True)
 
                     def stop_clicked(currentTask):
                         import ldm_patched.modules.model_management as model_management
@@ -895,13 +896,14 @@ with shared.gradio_root:
                              base_model, refiner_model, refiner_switch, sampler_name, scheduler_name, vae_name,
                              seed_random, image_seed, inpaint_engine, inpaint_engine_state,
                              inpaint_mode] + enhance_inpaint_mode_ctrls + [generate_button,
-                             load_parameter_button] + freeu_ctrls + lora_ctrls
+                             load_parameter_button] + freeu_ctrls + lora_ctrls + [load_status_notice]
 
         if not args_manager.args.disable_preset_selection:
             def preset_selection_change(preset, is_generating, inpaint_mode):
+                source = f'预设「{preset}」'
                 if is_generating:
                     print("[Preset Change] Skipping preset change during generation")
-                    return modules.meta_parser.load_parameter_button_click({}, is_generating, inpaint_mode)
+                    return modules.meta_parser.load_parameter_button_click({}, is_generating, inpaint_mode, source)
                 
                 try:
                     preset_content = modules.config.try_get_preset_content(preset) if preset != 'initial' else {}
@@ -921,10 +923,10 @@ with shared.gradio_root:
                     if 'prompt' in preset_prepared and preset_prepared.get('prompt') == '':
                         del preset_prepared['prompt']
 
-                    return modules.meta_parser.load_parameter_button_click(json.dumps(preset_prepared), is_generating, inpaint_mode)
+                    return modules.meta_parser.load_parameter_button_click(json.dumps(preset_prepared), is_generating, inpaint_mode, source)
                 except Exception as e:
                     print(f"[Preset Change] Failed to apply preset: {e}")
-                    return modules.meta_parser.load_parameter_button_click({}, is_generating, inpaint_mode)
+                    return modules.meta_parser.load_parameter_button_click({}, is_generating, inpaint_mode, source)
 
 
             def inpaint_engine_state_change(inpaint_engine_version, *args):
@@ -1017,50 +1019,70 @@ with shared.gradio_root:
 
         def parse_meta(raw_prompt_txt, is_generating):
             if is_generating:
-                return gr.update(), gr.update(), gr.update()
-            
+                load_result = modules.meta_parser.LoadResult()
+                load_result.set_source('粘贴参数')
+                load_result.set_status(modules.meta_parser.LoadStatus.GENERATING_BLOCKED)
+                return gr.update(), gr.update(), gr.update(), load_result.to_html()
+
             loaded_json = None
+            load_result = modules.meta_parser.LoadResult()
+            load_result.set_source('粘贴参数')
+
             try:
                 if is_json(raw_prompt_txt):
                     loaded_json = json.loads(raw_prompt_txt)
             except Exception as e:
                 print(f"[Parse Meta] Failed to parse JSON from prompt: {e}")
                 loaded_json = None
+                load_result.set_status(modules.meta_parser.LoadStatus.UNRECOGNIZED_FORMAT)
+                load_result.add_error('metadata', f'JSON 解析失败: {e}')
 
             if loaded_json is None:
-                return gr.update(), gr.update(visible=True), gr.update(visible=False)
+                return gr.update(), gr.update(visible=True), gr.update(visible=False), load_result.to_html()
 
             try:
-                return json.dumps(loaded_json), gr.update(visible=False), gr.update(visible=True)
+                return json.dumps(loaded_json), gr.update(visible=False), gr.update(visible=True), ''
             except Exception as e:
                 print(f"[Parse Meta] Failed to serialize JSON: {e}")
-                return gr.update(), gr.update(visible=True), gr.update(visible=False)
+                load_result.set_status(modules.meta_parser.LoadStatus.UNRECOGNIZED_FORMAT)
+                load_result.add_error('metadata', f'JSON 序列化失败: {e}')
+                return gr.update(), gr.update(visible=True), gr.update(visible=False), load_result.to_html()
 
-        prompt.input(parse_meta, inputs=[prompt, state_is_generating], outputs=[prompt, generate_button, load_parameter_button], queue=False, show_progress=False)
+        prompt.input(parse_meta, inputs=[prompt, state_is_generating], outputs=[prompt, generate_button, load_parameter_button, load_status_notice], queue=False, show_progress=False)
 
         load_parameter_button.click(modules.meta_parser.load_parameter_button_click, inputs=[prompt, state_is_generating, inpaint_mode], outputs=load_data_outputs, queue=False, show_progress=False)
 
         def trigger_metadata_import(file, state_is_generating):
+            source = '图片 metadata'
             if state_is_generating:
                 print("[Metadata Import] Skipping import during generation")
-                return modules.meta_parser.load_parameter_button_click({}, state_is_generating, inpaint_mode)
-            
+                return modules.meta_parser.load_parameter_button_click({}, state_is_generating, inpaint_mode, source)
+
             parsed_parameters = {}
+            load_result = modules.meta_parser.LoadResult()
+            load_result.set_source(source)
+
             try:
                 parameters, metadata_scheme = modules.meta_parser.read_info_from_image(file)
                 if parameters is None:
                     print('Could not find metadata in the image!')
+                    load_result.set_status(modules.meta_parser.LoadStatus.UNRECOGNIZED_FORMAT)
+                    load_result.add_error('metadata', '图片中未找到可识别的 metadata')
                 else:
                     metadata_parser = modules.meta_parser.get_metadata_parser(metadata_scheme)
                     parsed_parameters = metadata_parser.to_json(parameters)
                     if not isinstance(parsed_parameters, dict):
                         print(f"[Metadata Import] Expected dict but got {type(parsed_parameters)}")
+                        load_result.set_status(modules.meta_parser.LoadStatus.UNRECOGNIZED_FORMAT)
+                        load_result.add_error('metadata', f'解析结果类型错误: {type(parsed_parameters)}')
                         parsed_parameters = {}
             except Exception as e:
                 print(f"[Metadata Import] Failed to parse metadata: {e}")
+                load_result.set_status(modules.meta_parser.LoadStatus.UNRECOGNIZED_FORMAT)
+                load_result.add_error('metadata', f'解析异常: {e}')
                 parsed_parameters = {}
 
-            return modules.meta_parser.load_parameter_button_click(parsed_parameters, state_is_generating, inpaint_mode)
+            return modules.meta_parser.load_parameter_button_click(parsed_parameters, state_is_generating, inpaint_mode, source)
 
         metadata_import_button.click(trigger_metadata_import, inputs=[metadata_input_image, state_is_generating], outputs=load_data_outputs, queue=False, show_progress=True) \
             .then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)
