@@ -685,179 +685,359 @@ class A1111MetadataParser(MetadataParser):
         'version': 'Version'
     }
 
+    a1111_to_fooocus = {v: k for k, v in fooocus_to_a1111.items()}
+
     def to_json(self, metadata: str) -> dict:
+        data = {}
+        try:
+            metadata_str = str(metadata).strip()
+            if not metadata_str:
+                return data
+        except Exception as e:
+            print(f"[A1111 to_json] Invalid metadata input: {e}")
+            return data
+
         metadata_prompt = ''
         metadata_negative_prompt = ''
-
         done_with_prompt = False
 
-        *lines, lastline = metadata.strip().split("\n")
-        if len(re_param.findall(lastline)) < 3:
-            lines.append(lastline)
+        try:
+            all_lines = metadata_str.split("\n")
+            if len(all_lines) == 0:
+                return data
+            if len(all_lines) == 1:
+                lines = []
+                lastline = all_lines[0]
+            else:
+                *lines, lastline = all_lines
+
+            if len(re_param.findall(lastline)) < 3:
+                lines.append(lastline)
+                lastline = ''
+        except Exception as e:
+            print(f"[A1111 to_json] Failed to split metadata lines: {e}")
+            lines = []
             lastline = ''
 
         for line in lines:
-            line = line.strip()
-            if line.startswith(f"{self.fooocus_to_a1111['negative_prompt']}:"):
-                done_with_prompt = True
-                line = line[len(f"{self.fooocus_to_a1111['negative_prompt']}:"):].strip()
-            if done_with_prompt:
-                metadata_negative_prompt += ('' if metadata_negative_prompt == '' else "\n") + line
-            else:
-                metadata_prompt += ('' if metadata_prompt == '' else "\n") + line
+            try:
+                line = line.strip() if isinstance(line, str) else ''
+                if not line:
+                    continue
+                neg_label = self.fooocus_to_a1111['negative_prompt']
+                if line.startswith(f"{neg_label}:"):
+                    done_with_prompt = True
+                    line = line[len(neg_label):].lstrip(':').strip()
+                if done_with_prompt:
+                    metadata_negative_prompt += ('' if metadata_negative_prompt == '' else "\n") + line
+                else:
+                    metadata_prompt += ('' if metadata_prompt == '' else "\n") + line
+            except Exception as e:
+                print(f"[A1111 to_json] Skipping prompt line: {e}")
 
-        found_styles, prompt, negative_prompt = extract_styles_from_prompt(metadata_prompt, metadata_negative_prompt)
+        try:
+            found_styles, prompt, negative_prompt = extract_styles_from_prompt(metadata_prompt, metadata_negative_prompt)
+        except Exception as e:
+            print(f"[A1111 to_json] Failed to extract styles from prompt: {e}")
+            found_styles = []
+            prompt = metadata_prompt
+            negative_prompt = metadata_negative_prompt
 
-        data = {
-            'prompt': prompt,
-            'negative_prompt': negative_prompt
-        }
+        data['prompt'] = prompt
+        data['negative_prompt'] = negative_prompt
 
         for k, v in re_param.findall(lastline):
             try:
-                if v != '' and v[0] == '"' and v[-1] == '"':
-                    v = unquote(v)
+                fooocus_key = self.a1111_to_fooocus.get(k)
+                if fooocus_key is None:
+                    continue
 
-                m = re_imagesize.match(v)
-                if m is not None:
-                    data['resolution'] = str((m.group(1), m.group(2)))
-                else:
-                    data[list(self.fooocus_to_a1111.keys())[list(self.fooocus_to_a1111.values()).index(k)]] = v
-            except Exception:
-                print(f"Error parsing \"{k}: {v}\"")
+                v_clean = v
+                if isinstance(v_clean, str) and v_clean != '' and v_clean[0] == '"' and v_clean[-1] == '"':
+                    v_clean = unquote(v_clean)
 
-        # workaround for multiline prompts
-        if 'raw_prompt' in data:
-            data['prompt'] = data['raw_prompt']
-            raw_prompt = data['raw_prompt'].replace("\n", ', ')
-            if metadata_prompt != raw_prompt and modules.sdxl_styles.fooocus_expansion not in found_styles:
-                found_styles.append(modules.sdxl_styles.fooocus_expansion)
+                if fooocus_key == 'resolution':
+                    m = re_imagesize.match(v_clean.strip())
+                    if m is not None:
+                        w = int(m.group(1))
+                        h = int(m.group(2))
+                        data['resolution'] = [w, h]
+                    continue
 
-        if 'raw_negative_prompt' in data:
-            data['negative_prompt'] = data['raw_negative_prompt']
+                if fooocus_key in ['freeu']:
+                    parsed = safe_parse_float_tuple(v_clean, 4)
+                    if parsed is not None:
+                        data[fooocus_key] = list(parsed)
+                    continue
 
-        data['styles'] = str(found_styles)
+                if fooocus_key in ['adm_guidance']:
+                    parsed = safe_parse_float_tuple(v_clean, 3)
+                    if parsed is not None:
+                        data[fooocus_key] = list(parsed)
+                    continue
 
-        # try to load performance based on steps, fallback for direct A1111 imports
-        if 'steps' in data and data.get('performance') in [None, '']:
-            try:
+                if fooocus_key in ['styles']:
+                    parsed = safe_parse_list(v_clean)
+                    if parsed is not None:
+                        data[fooocus_key] = parsed
+                    continue
+
+                if fooocus_key == 'seed':
+                    parsed = safe_parse_int(v_clean)
+                    if parsed is not None:
+                        data[fooocus_key] = parsed
+                    continue
+
+                if fooocus_key in ['steps', 'clip_skip']:
+                    parsed = safe_parse_int(v_clean)
+                    if parsed is not None:
+                        data[fooocus_key] = parsed
+                    else:
+                        data[fooocus_key] = v_clean
+                    continue
+
+                if fooocus_key in ['guidance_scale', 'sharpness', 'adaptive_cfg', 'refiner_switch', 'overwrite_switch']:
+                    parsed = safe_parse_float(v_clean)
+                    if parsed is not None:
+                        data[fooocus_key] = parsed
+                    else:
+                        data[fooocus_key] = v_clean
+                    continue
+
+                data[fooocus_key] = v_clean
+
+            except Exception as e:
+                print(f"[A1111 to_json] Error parsing \"{k}: {v}\": {e}")
+                continue
+
+        try:
+            if 'raw_prompt' in data and isinstance(data['raw_prompt'], str) and data['raw_prompt'] != '':
+                data['prompt'] = data['raw_prompt']
+                raw_prompt_compact = data['raw_prompt'].replace("\n", ', ')
+                if metadata_prompt != raw_prompt_compact and modules.sdxl_styles.fooocus_expansion not in found_styles:
+                    found_styles.append(modules.sdxl_styles.fooocus_expansion)
+        except Exception as e:
+            print(f"[A1111 to_json] Failed to apply raw_prompt workaround: {e}")
+
+        try:
+            if 'raw_negative_prompt' in data and isinstance(data['raw_negative_prompt'], str) and data['raw_negative_prompt'] != '':
+                data['negative_prompt'] = data['raw_negative_prompt']
+        except Exception as e:
+            print(f"[A1111 to_json] Failed to apply raw_negative_prompt workaround: {e}")
+
+        data['styles'] = found_styles
+
+        try:
+            if 'steps' in data and data.get('performance') in [None, '']:
                 steps_val = safe_parse_int(data['steps'])
                 if steps_val is not None:
                     data['performance'] = Performance.by_steps(steps_val).value
-            except (ValueError, KeyError):
-                pass
+        except (ValueError, KeyError, Exception) as e:
+            print(f"[A1111 to_json] Failed to infer performance: {e}")
 
-        if 'sampler' in data:
-            data['sampler'] = data['sampler'].replace(' Karras', '')
-            # get key
-            for k, v in SAMPLERS.items():
-                if v == data['sampler']:
-                    data['sampler'] = k
-                    break
+        try:
+            if 'sampler' in data and isinstance(data['sampler'], str):
+                sampler_str = data['sampler'].replace(' Karras', '').strip()
+                scheduler_inferred = None
+                if 'scheduler' not in data or data.get('scheduler') in [None, '']:
+                    if data['sampler'].endswith(' Karras'):
+                        scheduler_inferred = 'karras'
+                for sk, sv in SAMPLERS.items():
+                    if sv == sampler_str:
+                        data['sampler'] = sk
+                        break
+                if scheduler_inferred is not None and 'scheduler' not in data:
+                    data['scheduler'] = scheduler_inferred
+        except Exception as e:
+            print(f"[A1111 to_json] Failed to normalize sampler: {e}")
 
         for key in ['base_model', 'refiner_model', 'vae']:
-            if key in data:
-                if key == 'vae':
-                    self.add_extension_to_filename(data, modules.config.vae_filenames, 'vae')
-                else:
-                    self.add_extension_to_filename(data, modules.config.model_filenames, key)
+            try:
+                if key in data and data[key] not in [None, '', 'None']:
+                    filenames = modules.config.vae_filenames if key == 'vae' else modules.config.model_filenames
+                    self.add_extension_to_filename(data, filenames, key)
+            except Exception as e:
+                print(f"[A1111 to_json] Failed to resolve {key}: {e}")
+                continue
 
         lora_data = ''
-        if 'lora_weights' in data and data['lora_weights'] != '':
-            lora_data = data['lora_weights']
-        elif 'lora_hashes' in data and data['lora_hashes'] != '' and data['lora_hashes'].split(', ')[0].count(':') == 2:
-            lora_data = data['lora_hashes']
+        try:
+            lw = data.get('lora_weights')
+            lh = data.get('lora_hashes')
+            if isinstance(lw, str) and lw != '':
+                lora_data = lw
+            elif isinstance(lh, str) and lh != '' and lh.split(', ')[0].count(':') == 2:
+                lora_data = lh
+        except Exception as e:
+            print(f"[A1111 to_json] Failed to extract lora data: {e}")
+            lora_data = ''
 
-        if lora_data != '':
+        if isinstance(lora_data, str) and lora_data != '':
             for li, lora in enumerate(lora_data.split(', ')):
-                lora_split = lora.split(': ')
-                lora_name = lora_split[0]
-                lora_weight = lora_split[2] if len(lora_split) == 3 else lora_split[1]
-                for filename in modules.config.lora_filenames:
-                    path = Path(filename)
-                    if lora_name == path.stem:
-                        data[f'lora_combined_{li + 1}'] = f'{filename} : {lora_weight}'
-                        break
+                try:
+                    lora_items = [item.strip() for item in lora.split(':') if item.strip() != '']
+                    if len(lora_items) < 2:
+                        continue
+                    lora_name = lora_items[0]
+                    lora_weight = lora_items[-1]
+                    matched_filename = None
+                    for filename in modules.config.lora_filenames:
+                        path = Path(filename)
+                        if lora_name == path.stem:
+                            matched_filename = filename
+                            break
+                    if matched_filename is not None:
+                        parsed_w = safe_parse_float(lora_weight)
+                        final_w = parsed_w if parsed_w is not None else lora_weight
+                        data[f'lora_combined_{li + 1}'] = f'{matched_filename} : {final_w}'
+                except Exception as e:
+                    print(f"[A1111 to_json] Skipping LoRA entry #{li}: {e}")
+                    continue
 
         return data
 
-    def to_string(self, metadata: dict) -> str:
-        data = {k: v for _, k, v in metadata}
+    def to_string(self, metadata: list) -> str:
+        try:
+            data = {k: v for _, k, v in metadata}
+        except Exception as e:
+            print(f"[A1111 to_string] Failed to build metadata dict: {e}")
+            data = {}
 
-        resolution = safe_parse_resolution(data['resolution'])
-        if resolution is None:
-            raise ValueError(f"Invalid resolution: {data['resolution']}")
-        width, height = resolution
+        width = 1024
+        height = 1024
+        try:
+            resolution = safe_parse_resolution(data.get('resolution'))
+            if resolution is not None:
+                width, height = resolution
+        except Exception as e:
+            print(f"[A1111 to_string] Invalid resolution, using default 1024x1024: {e}")
 
-        sampler = data['sampler']
-        scheduler = data['scheduler']
+        sampler = data.get('sampler', '')
+        scheduler = data.get('scheduler', '')
 
-        if sampler in SAMPLERS and SAMPLERS[sampler] != '':
-            sampler = SAMPLERS[sampler]
-            if sampler not in CIVITAI_NO_KARRAS and scheduler == 'karras' and not sampler.endswith(' Karras'):
-                sampler += f' Karras'
+        try:
+            if isinstance(sampler, str) and sampler in SAMPLERS and SAMPLERS[sampler] != '':
+                sampler = SAMPLERS[sampler]
+                if sampler not in CIVITAI_NO_KARRAS and scheduler == 'karras' and not sampler.endswith(' Karras'):
+                    sampler += f' Karras'
+        except Exception as e:
+            print(f"[A1111 to_string] Failed to process sampler/scheduler: {e}")
 
-        generation_params = {
-            self.fooocus_to_a1111['steps']: self.steps,
-            self.fooocus_to_a1111['sampler']: sampler,
-            self.fooocus_to_a1111['seed']: data['seed'],
-            self.fooocus_to_a1111['resolution']: f'{width}x{height}',
-            self.fooocus_to_a1111['guidance_scale']: data['guidance_scale'],
-            self.fooocus_to_a1111['sharpness']: data['sharpness'],
-            self.fooocus_to_a1111['adm_guidance']: data['adm_guidance'],
-            self.fooocus_to_a1111['base_model']: Path(data['base_model']).stem,
-            self.fooocus_to_a1111['base_model_hash']: self.base_model_hash,
+        generation_params = {}
+        try:
+            generation_params[self.fooocus_to_a1111['steps']] = self.steps
+            generation_params[self.fooocus_to_a1111['sampler']] = sampler
+            generation_params[self.fooocus_to_a1111['seed']] = data.get('seed', 0)
+            generation_params[self.fooocus_to_a1111['resolution']] = f'{width}x{height}'
+            generation_params[self.fooocus_to_a1111['guidance_scale']] = data.get('guidance_scale', 7.0)
+            generation_params[self.fooocus_to_a1111['sharpness']] = data.get('sharpness', 2.0)
+            generation_params[self.fooocus_to_a1111['adm_guidance']] = str(data.get('adm_guidance', ''))
+            generation_params[self.fooocus_to_a1111['base_model']] = Path(str(data.get('base_model', ''))).stem
+            generation_params[self.fooocus_to_a1111['base_model_hash']] = self.base_model_hash
 
-            self.fooocus_to_a1111['performance']: data['performance'],
-            self.fooocus_to_a1111['scheduler']: scheduler,
-            self.fooocus_to_a1111['vae']: Path(data['vae']).stem,
-            # workaround for multiline prompts
-            self.fooocus_to_a1111['raw_prompt']: self.raw_prompt,
-            self.fooocus_to_a1111['raw_negative_prompt']: self.raw_negative_prompt,
-        }
+            generation_params[self.fooocus_to_a1111['performance']] = data.get('performance', '')
+            generation_params[self.fooocus_to_a1111['scheduler']] = scheduler
+            generation_params[self.fooocus_to_a1111['vae']] = Path(str(data.get('vae', ''))).stem
+            generation_params[self.fooocus_to_a1111['raw_prompt']] = self.raw_prompt
+            generation_params[self.fooocus_to_a1111['raw_negative_prompt']] = self.raw_negative_prompt
+        except Exception as e:
+            print(f"[A1111 to_string] Error building base generation_params: {e}")
 
-        if self.refiner_model_name not in ['', 'None']:
-            generation_params |= {
-                self.fooocus_to_a1111['refiner_model']: self.refiner_model_name,
-                self.fooocus_to_a1111['refiner_model_hash']: self.refiner_model_hash
-            }
+        try:
+            if self.refiner_model_name not in ['', 'None']:
+                generation_params[self.fooocus_to_a1111['refiner_model']] = self.refiner_model_name
+                generation_params[self.fooocus_to_a1111['refiner_model_hash']] = self.refiner_model_hash
+        except Exception as e:
+            print(f"[A1111 to_string] Failed to add refiner: {e}")
 
         for key in ['adaptive_cfg', 'clip_skip', 'overwrite_switch', 'refiner_swap_method', 'freeu']:
-            if key in data:
-                generation_params[self.fooocus_to_a1111[key]] = data[key]
+            try:
+                if key in data:
+                    generation_params[self.fooocus_to_a1111[key]] = data[key]
+            except Exception as e:
+                print(f"[A1111 to_string] Skipping optional field {key}: {e}")
+                continue
 
-        if len(self.loras) > 0:
-            lora_hashes = []
-            lora_weights = []
-            for index, (lora_name, lora_weight, lora_hash) in enumerate(self.loras):
-                # workaround for Fooocus not knowing LoRA name in LoRA metadata
-                lora_hashes.append(f'{lora_name}: {lora_hash}')
-                lora_weights.append(f'{lora_name}: {lora_weight}')
-            lora_hashes_string = ', '.join(lora_hashes)
-            lora_weights_string = ', '.join(lora_weights)
-            generation_params[self.fooocus_to_a1111['lora_hashes']] = lora_hashes_string
-            generation_params[self.fooocus_to_a1111['lora_weights']] = lora_weights_string
+        try:
+            if len(self.loras) > 0:
+                lora_hashes = []
+                lora_weights = []
+                for index, lora_entry in enumerate(self.loras):
+                    try:
+                        if len(lora_entry) >= 3:
+                            lora_name, lora_weight, lora_hash = lora_entry[0], lora_entry[1], lora_entry[2]
+                            lora_hashes.append(f'{lora_name}: {lora_hash}')
+                            lora_weights.append(f'{lora_name}: {lora_weight}')
+                    except Exception as e:
+                        print(f"[A1111 to_string] Skipping LoRA #{index}: {e}")
+                        continue
+                lora_hashes_string = ', '.join(lora_hashes)
+                lora_weights_string = ', '.join(lora_weights)
+                generation_params[self.fooocus_to_a1111['lora_hashes']] = lora_hashes_string
+                generation_params[self.fooocus_to_a1111['lora_weights']] = lora_weights_string
+        except Exception as e:
+            print(f"[A1111 to_string] Failed to process LoRA list: {e}")
 
-        generation_params[self.fooocus_to_a1111['version']] = data['version']
+        try:
+            generation_params[self.fooocus_to_a1111['version']] = data.get('version', fooocus_version.version)
+        except Exception as e:
+            print(f"[A1111 to_string] Failed to add version: {e}")
 
-        if modules.config.metadata_created_by != '':
-            generation_params[self.fooocus_to_a1111['created_by']] = modules.config.metadata_created_by
+        try:
+            if modules.config.metadata_created_by != '':
+                generation_params[self.fooocus_to_a1111['created_by']] = modules.config.metadata_created_by
+        except Exception as e:
+            print(f"[A1111 to_string] Failed to add created_by: {e}")
 
-        generation_params_text = ", ".join(
-            [k if k == v else f'{k}: {quote(v)}' for k, v in generation_params.items() if
-             v is not None])
-        positive_prompt_resolved = ', '.join(self.full_prompt)
-        negative_prompt_resolved = ', '.join(self.full_negative_prompt)
-        negative_prompt_text = f"\nNegative prompt: {negative_prompt_resolved}" if negative_prompt_resolved else ""
-        return f"{positive_prompt_resolved}{negative_prompt_text}\n{generation_params_text}".strip()
+        try:
+            gen_items = []
+            for k, v in generation_params.items():
+                if v is None:
+                    continue
+                if k == v:
+                    gen_items.append(str(k))
+                else:
+                    try:
+                        gen_items.append(f'{k}: {quote(v)}')
+                    except Exception:
+                        gen_items.append(f'{k}: {quote(str(v))}')
+            generation_params_text = ", ".join(gen_items)
+        except Exception as e:
+            print(f"[A1111 to_string] Failed to serialize generation_params: {e}")
+            generation_params_text = ''
+
+        try:
+            positive_prompt_resolved = ', '.join(self.full_prompt) if isinstance(self.full_prompt, list) else str(self.full_prompt)
+            negative_prompt_resolved = ', '.join(self.full_negative_prompt) if isinstance(self.full_negative_prompt, list) else str(self.full_negative_prompt)
+        except Exception as e:
+            print(f"[A1111 to_string] Failed to join prompts: {e}")
+            positive_prompt_resolved = str(self.full_prompt)
+            negative_prompt_resolved = str(self.full_negative_prompt)
+
+        negative_prompt_text = ''
+        try:
+            if negative_prompt_resolved:
+                negative_prompt_text = f"\nNegative prompt: {negative_prompt_resolved}"
+        except Exception as e:
+            print(f"[A1111 to_string] Failed to build negative prompt text: {e}")
+
+        result = f"{positive_prompt_resolved}{negative_prompt_text}\n{generation_params_text}".strip()
+        return result
 
     @staticmethod
     def add_extension_to_filename(data, filenames, key):
-        for filename in filenames:
-            path = Path(filename)
-            if data[key] == path.stem:
-                data[key] = filename
-                break
+        try:
+            current_val = data.get(key)
+            if current_val is None:
+                return
+            current_str = str(current_val)
+            for filename in filenames:
+                path = Path(filename)
+                if current_str == path.stem:
+                    data[key] = filename
+                    return
+        except Exception as e:
+            print(f"[add_extension_to_filename] Failed for {key}: {e}")
 
 
 class FooocusMetadataParser(MetadataParser):
@@ -865,30 +1045,78 @@ class FooocusMetadataParser(MetadataParser):
         return MetadataScheme.FOOOCUS
 
     def to_json(self, metadata: dict) -> dict:
+        result = {}
         for key, value in metadata.items():
-            if value in ['', 'None']:
+            if value is None:
                 continue
-            if key in ['base_model', 'refiner_model']:
-                metadata[key] = self.replace_value_with_filename(key, value, modules.config.model_filenames)
-            elif key.startswith('lora_combined_'):
-                metadata[key] = self.replace_value_with_filename(key, value, modules.config.lora_filenames)
-            elif key == 'vae':
-                metadata[key] = self.replace_value_with_filename(key, value, modules.config.vae_filenames)
-            else:
+            if isinstance(value, str) and value in ['', 'None']:
                 continue
+            try:
+                if key in ['base_model', 'refiner_model']:
+                    replaced = self.replace_value_with_filename(key, value, modules.config.model_filenames)
+                    result[key] = replaced if replaced is not None else value
+                elif key.startswith('lora_combined_'):
+                    replaced = self.replace_value_with_filename(key, value, modules.config.lora_filenames)
+                    result[key] = replaced if replaced is not None else value
+                elif key == 'vae':
+                    replaced = self.replace_value_with_filename(key, value, modules.config.vae_filenames)
+                    result[key] = replaced if replaced is not None else value
+                else:
+                    result[key] = value
+            except Exception as e:
+                print(f"[Fooocus to_json] Skipping field {key} due to error: {e}")
+                if key not in result and not (isinstance(value, str) and value in ['', 'None']) and value is not None:
+                    result[key] = value
 
-        return metadata
+        return result
 
     def to_string(self, metadata: list) -> str:
-        for li, (label, key, value) in enumerate(metadata):
-            # remove model folder paths from metadata
-            if key.startswith('lora_combined_'):
-                name, weight = value.split(' : ')
-                name = Path(name).stem
-                value = f'{name} : {weight}'
-                metadata[li] = (label, key, value)
+        res = {}
+        for label, key, value in metadata:
+            try:
+                if key.startswith('lora_combined_'):
+                    value_str = str(value) if not isinstance(value, str) else value
+                    if ' : ' in value_str:
+                        parts = [p.strip() for p in value_str.split(' : ')]
+                        if len(parts) >= 2:
+                            lora_name = parts[0] if len(parts) == 2 else parts[1]
+                            lora_weight = parts[1] if len(parts) == 2 else parts[2]
+                            lora_name = Path(lora_name).stem
+                            if len(parts) == 3:
+                                res[key] = f'{parts[0]} : {lora_name} : {lora_weight}'
+                            else:
+                                res[key] = f'{lora_name} : {lora_weight}'
+                            continue
+                    res[key] = value
+                    continue
 
-        res = {k: v for _, k, v in metadata}
+                if key == 'resolution':
+                    parsed = safe_parse_resolution(value)
+                    if parsed is not None:
+                        res[key] = [parsed[0], parsed[1]]
+                        continue
+
+                if key == 'styles':
+                    parsed = safe_parse_list(value)
+                    if parsed is not None:
+                        res[key] = parsed
+                        continue
+
+                if key == 'freeu':
+                    parsed = safe_parse_float_tuple(value, 4)
+                    if parsed is not None:
+                        res[key] = [parsed[0], parsed[1], parsed[2], parsed[3]]
+                        continue
+
+                if key == 'adm_guidance':
+                    parsed = safe_parse_float_tuple(value, 3)
+                    if parsed is not None:
+                        res[key] = [parsed[0], parsed[1], parsed[2]]
+                        continue
+
+                res[key] = value
+            except Exception as e:
+                print(f"[Fooocus to_string] Skipping field {key} ({label}) due to error: {e}")
 
         res['full_prompt'] = self.full_prompt
         res['full_negative_prompt'] = self.full_negative_prompt
@@ -906,19 +1134,28 @@ class FooocusMetadataParser(MetadataParser):
         if modules.config.metadata_created_by != '':
             res['created_by'] = modules.config.metadata_created_by
 
-        return json.dumps(dict(sorted(res.items())))
+        return json.dumps(dict(sorted(res.items())), ensure_ascii=False)
 
     @staticmethod
     def replace_value_with_filename(key, value, filenames):
-        for filename in filenames:
-            path = Path(filename)
-            if key.startswith('lora_combined_'):
-                name, weight = value.split(' : ')
-                if name == path.stem:
-                    return f'{filename} : {weight}'
-            elif value == path.stem:
-                return filename
-
+        try:
+            value_str = str(value) if not isinstance(value, str) else value
+            for filename in filenames:
+                path = Path(filename)
+                if key.startswith('lora_combined_'):
+                    if ' : ' in value_str:
+                        parts = [p.strip() for p in value_str.split(' : ')]
+                        if len(parts) >= 2:
+                            name = parts[0] if len(parts) == 2 else parts[1]
+                            weight = parts[1] if len(parts) == 2 else parts[2]
+                            if name == path.stem:
+                                if len(parts) == 3:
+                                    return f'{parts[0]} : {filename} : {weight}'
+                                return f'{filename} : {weight}'
+                elif value_str == path.stem:
+                    return filename
+        except Exception as e:
+            print(f"[replace_value_with_filename] Error for {key}: {e}")
         return None
 
 
