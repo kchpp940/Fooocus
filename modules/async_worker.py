@@ -906,7 +906,7 @@ def worker():
             inpaint_mask = process_mask(
                 raw_mask,
                 invert=async_task.invert_mask_checkbox,
-                erode_or_dilate=async_task.inpaint_erode_or_dilate,
+                morphic_px=async_task.inpaint_erode_or_dilate,
                 target_size=(W, H)
             )
 
@@ -1422,7 +1422,7 @@ def worker():
                 mask = process_mask(
                     raw_mask,
                     invert=enhance_mask_invert,
-                    erode_or_dilate=enhance_inpaint_erode_or_dilate,
+                    morphic_px=enhance_inpaint_erode_or_dilate,
                     target_size=(img.shape[1], img.shape[0])
                 )
 
