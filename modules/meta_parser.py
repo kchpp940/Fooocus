@@ -259,9 +259,18 @@ def safe_parse_int(value: Any) -> Optional[int]:
 
 
 def load_parameter_button_click(raw_metadata: dict | str, is_generating: bool, inpaint_mode: str,
-                                source: str = '手动粘贴'):
+                                source: str = '手动粘贴',
+                                parser_damaged_fields: list[tuple[str, str]] | None = None):
     load_result = LoadResult()
     load_result.set_source(source)
+
+    parser_fatal_error = None
+    if parser_damaged_fields:
+        for field_name, reason in parser_damaged_fields:
+            if field_name == 'metadata':
+                parser_fatal_error = reason
+            else:
+                load_result.add_damaged(field_name, reason)
 
     def get_result_count():
         n = 1
@@ -317,10 +326,17 @@ def load_parameter_button_click(raw_metadata: dict | str, is_generating: bool, i
         return controls
 
     if len(loaded_parameter_dict) == 0:
-        load_result.set_status(LoadStatus.UNRECOGNIZED_FORMAT)
+        if not load_result.has_damage() and parser_fatal_error is None:
+            load_result.set_status(LoadStatus.UNRECOGNIZED_FORMAT)
+        if parser_fatal_error is not None:
+            load_result.set_status(LoadStatus.UNRECOGNIZED_FORMAT)
+            load_result.add_error('metadata', parser_fatal_error)
         controls = [gr.update()] * TOTAL_CONTROLS
         controls[-1] = load_result.to_html()
         return controls
+
+    if parser_fatal_error is not None:
+        load_result.add_damaged('metadata', parser_fatal_error)
 
     results = [len(loaded_parameter_dict) > 0]
 
@@ -736,6 +752,15 @@ class MetadataParser(ABC):
         self.refiner_model_hash: str = ''
         self.loras: list = []
         self.vae_name: str = ''
+        self.damaged_fields: list[tuple[str, str]] = []
+
+    def add_damaged(self, field_name: str, reason: str):
+        self.damaged_fields.append((field_name, reason))
+
+    def get_and_clear_damaged(self) -> list[tuple[str, str]]:
+        result = list(self.damaged_fields)
+        self.damaged_fields.clear()
+        return result
 
     @abstractmethod
     def get_scheme(self) -> MetadataScheme:
@@ -886,30 +911,40 @@ class A1111MetadataParser(MetadataParser):
                         w = int(m.group(1))
                         h = int(m.group(2))
                         data['resolution'] = [w, h]
+                    else:
+                        self.add_damaged(fooocus_key, f'A1111 Size 无法解析: {repr(v_clean)[:50]}')
                     continue
 
                 if fooocus_key in ['freeu']:
                     parsed = safe_parse_float_tuple(v_clean, 4)
                     if parsed is not None:
                         data[fooocus_key] = list(parsed)
+                    else:
+                        self.add_damaged(fooocus_key, f'A1111 FreeU 无法解析: {repr(v_clean)[:50]}')
                     continue
 
                 if fooocus_key in ['adm_guidance']:
                     parsed = safe_parse_float_tuple(v_clean, 3)
                     if parsed is not None:
                         data[fooocus_key] = list(parsed)
+                    else:
+                        self.add_damaged(fooocus_key, f'A1111 ADM Guidance 无法解析: {repr(v_clean)[:50]}')
                     continue
 
                 if fooocus_key in ['styles']:
                     parsed = safe_parse_list(v_clean)
                     if parsed is not None:
                         data[fooocus_key] = parsed
+                    else:
+                        self.add_damaged(fooocus_key, f'A1111 Styles 无法解析: {repr(v_clean)[:50]}')
                     continue
 
                 if fooocus_key == 'seed':
                     parsed = safe_parse_int(v_clean)
                     if parsed is not None:
                         data[fooocus_key] = parsed
+                    else:
+                        self.add_damaged(fooocus_key, f'A1111 Seed 无法解析: {repr(v_clean)[:50]}')
                     continue
 
                 if fooocus_key in ['steps', 'clip_skip']:
@@ -932,6 +967,8 @@ class A1111MetadataParser(MetadataParser):
 
             except Exception as e:
                 print(f"[A1111 to_json] Error parsing \"{k}: {v}\": {e}")
+                fooocus_key_err = self.a1111_to_fooocus.get(k, k)
+                self.add_damaged(fooocus_key_err, f'A1111 解析异常: {e}')
                 continue
 
         try:
@@ -1001,6 +1038,7 @@ class A1111MetadataParser(MetadataParser):
                 try:
                     lora_items = [item.strip() for item in lora.split(':') if item.strip() != '']
                     if len(lora_items) < 2:
+                        self.add_damaged(f'lora_combined_{li + 1}', f'A1111 LoRA 格式错误，期望 name:weight，原始值: {repr(lora)[:50]}')
                         continue
                     lora_name = lora_items[0]
                     lora_weight = lora_items[-1]
@@ -1010,12 +1048,17 @@ class A1111MetadataParser(MetadataParser):
                         if lora_name == path.stem:
                             matched_filename = filename
                             break
-                    if matched_filename is not None:
-                        parsed_w = safe_parse_float(lora_weight)
-                        final_w = parsed_w if parsed_w is not None else lora_weight
-                        data[f'lora_combined_{li + 1}'] = f'{matched_filename} : {final_w}'
+                    if matched_filename is None:
+                        self.add_damaged(f'lora_combined_{li + 1}', f'A1111 LoRA 未在本地找到: {repr(lora_name)}')
+                        continue
+                    parsed_w = safe_parse_float(lora_weight)
+                    if parsed_w is None:
+                        self.add_damaged(f'lora_combined_{li + 1}', f'A1111 LoRA 权重解析失败: {repr(lora_weight)}')
+                        continue
+                    data[f'lora_combined_{li + 1}'] = f'{matched_filename} : {parsed_w}'
                 except Exception as e:
                     print(f"[A1111 to_json] Skipping LoRA entry #{li}: {e}")
+                    self.add_damaged(f'lora_combined_{li + 1}', f'A1111 LoRA 解析异常: {e}')
                     continue
 
         return data
@@ -1178,17 +1221,24 @@ class FooocusMetadataParser(MetadataParser):
             try:
                 if key in ['base_model', 'refiner_model']:
                     replaced = self.replace_value_with_filename(key, value, modules.config.model_filenames)
+                    if replaced is None:
+                        self.add_damaged(key, f'Fooocus 模型文件未找到: {repr(str(value)[:50])}')
                     result[key] = replaced if replaced is not None else value
                 elif key.startswith('lora_combined_'):
                     replaced = self.replace_value_with_filename(key, value, modules.config.lora_filenames)
+                    if replaced is None:
+                        self.add_damaged(key, f'Fooocus LoRA 文件未找到: {repr(str(value)[:50])}')
                     result[key] = replaced if replaced is not None else value
                 elif key == 'vae':
                     replaced = self.replace_value_with_filename(key, value, modules.config.vae_filenames)
+                    if replaced is None:
+                        self.add_damaged(key, f'Fooocus VAE 文件未找到: {repr(str(value)[:50])}')
                     result[key] = replaced if replaced is not None else value
                 else:
                     result[key] = value
             except Exception as e:
                 print(f"[Fooocus to_json] Skipping field {key} due to error: {e}")
+                self.add_damaged(key, f'Fooocus 字段解析异常: {e}')
                 if key not in result and not (isinstance(value, str) and value in ['', 'None']) and value is not None:
                     result[key] = value
 

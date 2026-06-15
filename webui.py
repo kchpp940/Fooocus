@@ -1059,30 +1059,33 @@ with shared.gradio_root:
                 return modules.meta_parser.load_parameter_button_click({}, state_is_generating, inpaint_mode, source)
 
             parsed_parameters = {}
-            load_result = modules.meta_parser.LoadResult()
-            load_result.set_source(source)
+            parser_damaged = []
+            import_fatal_error = None
 
             try:
                 parameters, metadata_scheme = modules.meta_parser.read_info_from_image(file)
                 if parameters is None:
                     print('Could not find metadata in the image!')
-                    load_result.set_status(modules.meta_parser.LoadStatus.UNRECOGNIZED_FORMAT)
-                    load_result.add_error('metadata', '图片中未找到可识别的 metadata')
+                    import_fatal_error = ('metadata', '图片中未找到可识别的 metadata')
                 else:
                     metadata_parser = modules.meta_parser.get_metadata_parser(metadata_scheme)
                     parsed_parameters = metadata_parser.to_json(parameters)
+                    parser_damaged = metadata_parser.get_and_clear_damaged()
                     if not isinstance(parsed_parameters, dict):
                         print(f"[Metadata Import] Expected dict but got {type(parsed_parameters)}")
-                        load_result.set_status(modules.meta_parser.LoadStatus.UNRECOGNIZED_FORMAT)
-                        load_result.add_error('metadata', f'解析结果类型错误: {type(parsed_parameters)}')
+                        import_fatal_error = ('metadata', f'解析结果类型错误: {type(parsed_parameters)}')
                         parsed_parameters = {}
             except Exception as e:
                 print(f"[Metadata Import] Failed to parse metadata: {e}")
-                load_result.set_status(modules.meta_parser.LoadStatus.UNRECOGNIZED_FORMAT)
-                load_result.add_error('metadata', f'解析异常: {e}')
+                import_fatal_error = ('metadata', f'解析异常: {e}')
                 parsed_parameters = {}
 
-            return modules.meta_parser.load_parameter_button_click(parsed_parameters, state_is_generating, inpaint_mode, source)
+            if import_fatal_error is not None:
+                parser_damaged.append(import_fatal_error)
+
+            return modules.meta_parser.load_parameter_button_click(
+                parsed_parameters, state_is_generating, inpaint_mode, source, parser_damaged
+            )
 
         metadata_import_button.click(trigger_metadata_import, inputs=[metadata_input_image, state_is_generating], outputs=load_data_outputs, queue=False, show_progress=True) \
             .then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)
