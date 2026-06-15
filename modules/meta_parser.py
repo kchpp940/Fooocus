@@ -34,23 +34,28 @@ class LoadStatus:
 class LoadResult:
     def __init__(self):
         self.status = LoadStatus.SUCCESS
-        self.skipped_fields = []
+        self.missing_fields = []
+        self.damaged_fields = []
         self.loaded_fields = []
         self.error_details = []
         self.metadata_source = None
 
-    def add_skipped(self, field_name: str, reason: str = ''):
-        self.skipped_fields.append((field_name, reason))
-        if self.status == LoadStatus.SUCCESS:
-            self.status = LoadStatus.PARTIAL_SUCCESS
+    def add_missing(self, field_name: str):
+        self.missing_fields.append(field_name)
 
     def add_loaded(self, field_name: str):
         self.loaded_fields.append(field_name)
 
+    def add_damaged(self, field_name: str, error_msg: str):
+        self.damaged_fields.append((field_name, error_msg))
+        self.error_details.append((field_name, error_msg))
+        if self.status == LoadStatus.SUCCESS:
+            self.status = LoadStatus.PARTIAL_SUCCESS
+
     def add_error(self, field_name: str, error_msg: str):
+        self.damaged_fields.append((field_name, error_msg))
         self.error_details.append((field_name, error_msg))
         self.status = LoadStatus.FIELD_DAMAGED
-        self.skipped_fields.append((field_name, error_msg))
 
     def set_status(self, status: str):
         self.status = status
@@ -61,6 +66,9 @@ class LoadResult:
     def has_issues(self) -> bool:
         return self.status not in [LoadStatus.SUCCESS, LoadStatus.GENERATING_BLOCKED]
 
+    def has_damage(self) -> bool:
+        return len(self.damaged_fields) > 0
+
     def to_html(self) -> str:
         if self.status == LoadStatus.GENERATING_BLOCKED:
             return (
@@ -70,47 +78,65 @@ class LoadResult:
             )
 
         if self.status == LoadStatus.UNRECOGNIZED_FORMAT:
+            source_info = f'（来自{self.metadata_source}）' if self.metadata_source else ''
+            err_detail = ''
+            if len(self.error_details) > 0:
+                err_detail = f'<br/>错误原因：{self.error_details[0][1]}'
             return (
                 '<div style="padding: 8px 12px; background: #f8d7da; border: 1px solid #dc3545; border-radius: 4px; color: #721c24; margin: 8px 0;">'
-                '❌  <strong>参数加载失败</strong>：无法识别粘贴的参数格式。'
-                '<br/>请确认粘贴的内容是 Fooocus JSON 或 A1111 风格的参数文本。'
+                f'❌  <strong>参数加载失败</strong>{source_info}：无法识别参数格式。'
+                f'{err_detail}'
+                '<br/>请确认内容是 Fooocus JSON 或 A1111 风格的参数文本。'
                 '</div>'
             )
 
-        if self.status == LoadStatus.SUCCESS and len(self.loaded_fields) > 0:
-            source_info = f'（来自{self.metadata_source}）' if self.metadata_source else ''
+        total_loaded = len(self.loaded_fields)
+        total_damaged = len(self.damaged_fields)
+        source_info = f'（来自{self.metadata_source}）' if self.metadata_source else ''
+
+        if total_loaded > 0 and total_damaged == 0:
             return (
                 f'<div style="padding: 8px 12px; background: #d4edda; border: 1px solid #28a745; border-radius: 4px; color: #155724; margin: 8px 0;">'
-                f'✅  <strong>参数加载成功</strong>{source_info}：共加载 {len(self.loaded_fields)} 个字段。'
+                f'✅  <strong>参数加载成功</strong>{source_info}：共加载 {total_loaded} 个字段。'
                 f'</div>'
             )
 
-        if self.status == LoadStatus.PARTIAL_SUCCESS or self.status == LoadStatus.FIELD_DAMAGED:
-            loaded_count = len(self.loaded_fields)
-            skipped_count = len(self.skipped_fields)
-            source_info = f'（来自{self.metadata_source}）' if self.metadata_source else ''
-
-            skipped_html = ''
-            if skipped_count > 0:
+        if total_loaded > 0 and total_damaged > 0:
+            damaged_html = ''
+            if total_damaged > 0:
                 items = []
-                for field, reason in self.skipped_fields[:8]:
-                    if reason:
-                        items.append(f'<li><code>{field}</code>: {reason}</li>')
-                    else:
-                        items.append(f'<li><code>{field}</code></li>')
-                more = f'<li>... 还有 {skipped_count - 8} 个字段</li>' if skipped_count > 8 else ''
-                skipped_html = f'<br/><strong>已跳过的字段：</strong><ul style="margin: 4px 0; padding-left: 20px;">{"".join(items)}{more}</ul>'
+                for field, reason in self.damaged_fields[:8]:
+                    items.append(f'<li><code>{field}</code>: {reason}</li>')
+                more = f'<li>... 还有 {total_damaged - 8} 个字段损坏</li>' if total_damaged > 8 else ''
+                damaged_html = f'<br/><strong>损坏的字段（已跳过）：</strong><ul style="margin: 4px 0; padding-left: 20px;">{"".join(items)}{more}</ul>'
 
             status_icon = '⚠️' if self.status == LoadStatus.PARTIAL_SUCCESS else '❌'
-            status_title = '部分参数加载' if self.status == LoadStatus.PARTIAL_SUCCESS else '字段损坏'
+            status_title = '部分参数加载' if self.status == LoadStatus.PARTIAL_SUCCESS else '存在字段损坏'
             status_color = '#856404' if self.status == LoadStatus.PARTIAL_SUCCESS else '#721c24'
             border_color = '#ffc107' if self.status == LoadStatus.PARTIAL_SUCCESS else '#dc3545'
             bg_color = '#fff3cd' if self.status == LoadStatus.PARTIAL_SUCCESS else '#f8d7da'
 
             return (
                 f'<div style="padding: 8px 12px; background: {bg_color}; border: 1px solid {border_color}; border-radius: 4px; color: {status_color}; margin: 8px 0;">'
-                f'{status_icon}  <strong>{status_title}</strong>{source_info}：已加载 {loaded_count} 个字段，跳过 {skipped_count} 个字段。'
-                f'{skipped_html}'
+                f'{status_icon}  <strong>{status_title}</strong>{source_info}：成功加载 {total_loaded} 个字段，{total_damaged} 个字段损坏已跳过。'
+                f'{damaged_html}'
+                f'</div>'
+            )
+
+        if total_loaded == 0 and total_damaged == 0 and self.status == LoadStatus.SUCCESS:
+            return ''
+
+        if total_loaded == 0 and total_damaged > 0:
+            damaged_html = ''
+            items = []
+            for field, reason in self.damaged_fields[:8]:
+                items.append(f'<li><code>{field}</code>: {reason}</li>')
+            more = f'<li>... 还有 {total_damaged - 8} 个字段</li>' if total_damaged > 8 else ''
+            damaged_html = f'<br/><strong>损坏的字段：</strong><ul style="margin: 4px 0; padding-left: 20px;">{"".join(items)}{more}</ul>'
+            return (
+                f'<div style="padding: 8px 12px; background: #f8d7da; border: 1px solid #dc3545; border-radius: 4px; color: #721c24; margin: 8px 0;">'
+                f'❌  <strong>加载失败</strong>{source_info}：{total_damaged} 个字段损坏，未能加载任何有效参数。'
+                f'{damaged_html}'
                 f'</div>'
             )
 
@@ -296,271 +322,38 @@ def load_parameter_button_click(raw_metadata: dict | str, is_generating: bool, i
         controls[-1] = load_result.to_html()
         return controls
 
-    def mark_loaded_or_skipped(field_name: str, before_len: int, after_len: int, skipped_reason: str = ''):
-        added = results[before_len:after_len]
-        all_skipped = all(isinstance(x, gr.update) or (isinstance(x, dict) and 'value' not in x) for x in added)
-        if all_skipped:
-            load_result.add_skipped(field_name, skipped_reason)
-        else:
-            load_result.add_loaded(field_name)
-
     results = [len(loaded_parameter_dict) > 0]
 
-    pos = len(results)
-    try:
-        get_image_number('image_number', 'Image Number', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('image_number', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load image_number: {err}")
-        results.append(1)
-        load_result.add_skipped('image_number', err)
+    get_image_number('image_number', 'Image Number', loaded_parameter_dict, results, load_result)
+    get_str('prompt', 'Prompt', loaded_parameter_dict, results, load_result)
+    get_str('negative_prompt', 'Negative Prompt', loaded_parameter_dict, results, load_result)
+    get_list('styles', 'Styles', loaded_parameter_dict, results, load_result)
 
-    pos = len(results)
-    try:
-        get_str('prompt', 'Prompt', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('prompt', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load prompt: {err}")
-        results.append(gr.update())
-        load_result.add_skipped('prompt', err)
+    performance = get_str('performance', 'Performance', loaded_parameter_dict, results, load_result)
 
-    pos = len(results)
-    try:
-        get_str('negative_prompt', 'Negative Prompt', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('negative_prompt', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load negative_prompt: {err}")
-        results.append(gr.update())
-        load_result.add_skipped('negative_prompt', err)
-
-    pos = len(results)
-    try:
-        get_list('styles', 'Styles', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('styles', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load styles: {err}")
-        results.append(gr.update())
-        load_result.add_skipped('styles', err)
-
-    performance = None
-    pos = len(results)
-    try:
-        performance = get_str('performance', 'Performance', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('performance', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load performance: {err}")
-        results.append(gr.update())
-        load_result.add_skipped('performance', err)
-
-    pos = len(results)
-    try:
-        get_steps('steps', 'Steps', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('steps', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load steps: {err}")
-        results.append(-1)
-        load_result.add_skipped('steps', err)
-
-    pos = len(results)
-    try:
-        get_number('overwrite_switch', 'Overwrite Switch', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('overwrite_switch', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load overwrite_switch: {err}")
-        results.append(gr.update())
-        load_result.add_skipped('overwrite_switch', err)
-
-    pos = len(results)
-    try:
-        get_resolution('resolution', 'Resolution', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('resolution', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load resolution: {err}")
-        results.append(gr.update())
-        results.append(gr.update())
-        results.append(gr.update())
-        load_result.add_skipped('resolution', err)
-
-    pos = len(results)
-    try:
-        get_number('guidance_scale', 'Guidance Scale', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('guidance_scale', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load guidance_scale: {err}")
-        results.append(gr.update())
-        load_result.add_skipped('guidance_scale', err)
-
-    pos = len(results)
-    try:
-        get_number('sharpness', 'Sharpness', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('sharpness', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load sharpness: {err}")
-        results.append(gr.update())
-        load_result.add_skipped('sharpness', err)
-
-    pos = len(results)
-    try:
-        get_adm_guidance('adm_guidance', 'ADM Guidance', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('adm_guidance', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load adm_guidance: {err}")
-        results.append(gr.update())
-        results.append(gr.update())
-        results.append(gr.update())
-        load_result.add_skipped('adm_guidance', err)
-
-    pos = len(results)
-    try:
-        get_str('refiner_swap_method', 'Refiner Swap Method', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('refiner_swap_method', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load refiner_swap_method: {err}")
-        results.append(gr.update())
-        load_result.add_skipped('refiner_swap_method', err)
-
-    pos = len(results)
-    try:
-        get_number('adaptive_cfg', 'CFG Mimicking from TSNR', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('adaptive_cfg', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load adaptive_cfg: {err}")
-        results.append(gr.update())
-        load_result.add_skipped('adaptive_cfg', err)
-
-    pos = len(results)
-    try:
-        get_number('clip_skip', 'CLIP Skip', loaded_parameter_dict, results, cast_type=int)
-        mark_loaded_or_skipped('clip_skip', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load clip_skip: {err}")
-        results.append(gr.update())
-        load_result.add_skipped('clip_skip', err)
-
-    pos = len(results)
-    try:
-        get_str('base_model', 'Base Model', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('base_model', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load base_model: {err}")
-        results.append(gr.update())
-        load_result.add_skipped('base_model', err)
-
-    pos = len(results)
-    try:
-        get_str('refiner_model', 'Refiner Model', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('refiner_model', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load refiner_model: {err}")
-        results.append(gr.update())
-        load_result.add_skipped('refiner_model', err)
-
-    pos = len(results)
-    try:
-        get_number('refiner_switch', 'Refiner Switch', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('refiner_switch', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load refiner_switch: {err}")
-        results.append(gr.update())
-        load_result.add_skipped('refiner_switch', err)
-
-    pos = len(results)
-    try:
-        get_str('sampler', 'Sampler', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('sampler', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load sampler: {err}")
-        results.append(gr.update())
-        load_result.add_skipped('sampler', err)
-
-    pos = len(results)
-    try:
-        get_str('scheduler', 'Scheduler', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('scheduler', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load scheduler: {err}")
-        results.append(gr.update())
-        load_result.add_skipped('scheduler', err)
-
-    pos = len(results)
-    try:
-        get_str('vae', 'VAE', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('vae', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load vae: {err}")
-        results.append(gr.update())
-        load_result.add_skipped('vae', err)
-
-    pos = len(results)
-    try:
-        get_seed('seed', 'Seed', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('seed', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load seed: {err}")
-        results.append(gr.update())
-        results.append(gr.update())
-        load_result.add_skipped('seed', err)
-
-    pos = len(results)
-    try:
-        get_inpaint_engine_version('inpaint_engine_version', 'Inpaint Engine Version', loaded_parameter_dict, results, inpaint_mode)
-        mark_loaded_or_skipped('inpaint_engine_version', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load inpaint_engine_version: {err}")
-        results.append(gr.update())
-        results.append('empty')
-        load_result.add_skipped('inpaint_engine_version', err)
-
-    pos = len(results)
-    try:
-        get_inpaint_method('inpaint_method', 'Inpaint Mode', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('inpaint_method', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load inpaint_method: {err}")
-        results.append(gr.update())
-        for i in range(modules.config.default_enhance_tabs):
-            results.append(gr.update())
-        load_result.add_skipped('inpaint_method', err)
+    get_steps('steps', 'Steps', loaded_parameter_dict, results, load_result)
+    get_number('overwrite_switch', 'Overwrite Switch', loaded_parameter_dict, results, load_result)
+    get_resolution('resolution', 'Resolution', loaded_parameter_dict, results, load_result)
+    get_number('guidance_scale', 'Guidance Scale', loaded_parameter_dict, results, load_result)
+    get_number('sharpness', 'Sharpness', loaded_parameter_dict, results, load_result)
+    get_adm_guidance('adm_guidance', 'ADM Guidance', loaded_parameter_dict, results, load_result)
+    get_str('refiner_swap_method', 'Refiner Swap Method', loaded_parameter_dict, results, load_result)
+    get_number('adaptive_cfg', 'CFG Mimicking from TSNR', loaded_parameter_dict, results, load_result)
+    get_number('clip_skip', 'CLIP Skip', loaded_parameter_dict, results, load_result, cast_type=int)
+    get_str('base_model', 'Base Model', loaded_parameter_dict, results, load_result)
+    get_str('refiner_model', 'Refiner Model', loaded_parameter_dict, results, load_result)
+    get_number('refiner_switch', 'Refiner Switch', loaded_parameter_dict, results, load_result)
+    get_str('sampler', 'Sampler', loaded_parameter_dict, results, load_result)
+    get_str('scheduler', 'Scheduler', loaded_parameter_dict, results, load_result)
+    get_str('vae', 'VAE', loaded_parameter_dict, results, load_result)
+    get_seed('seed', 'Seed', loaded_parameter_dict, results, load_result)
+    get_inpaint_engine_version('inpaint_engine_version', 'Inpaint Engine Version', loaded_parameter_dict, results, inpaint_mode, load_result)
+    get_inpaint_method('inpaint_method', 'Inpaint Mode', loaded_parameter_dict, results, load_result)
 
     results.append(gr.update(visible=True))
     results.append(gr.update(visible=False))
 
-    pos = len(results)
-    try:
-        get_freeu('freeu', 'FreeU', loaded_parameter_dict, results)
-        mark_loaded_or_skipped('freeu', pos, len(results))
-    except Exception as e:
-        err = str(e)
-        print(f"[Load Parameters] Failed to load freeu: {err}")
-        results.append(False)
-        results.append(gr.update())
-        results.append(gr.update())
-        results.append(gr.update())
-        results.append(gr.update())
-        load_result.add_skipped('freeu', err)
+    get_freeu('freeu', 'FreeU', loaded_parameter_dict, results, load_result)
 
     performance_filename = None
     try:
@@ -571,89 +364,133 @@ def load_parameter_button_click(raw_metadata: dict | str, is_generating: bool, i
         print(f"[Load Parameters] Failed to resolve performance LoRA: {e}")
 
     for i in range(modules.config.default_max_lora_number):
-        pos = len(results)
         lora_key = f'lora_combined_{i + 1}'
         lora_label = f'LoRA {i + 1}'
-        try:
-            get_lora(lora_key, lora_label, loaded_parameter_dict, results, performance_filename)
-            mark_loaded_or_skipped(lora_key, pos, len(results))
-        except Exception as e:
-            err = str(e)
-            print(f"[Load Parameters] Failed to load {lora_key}: {err}")
-            results.append(True)
-            results.append('None')
-            results.append(1)
-            load_result.add_skipped(lora_key, err)
+        get_lora(lora_key, lora_label, loaded_parameter_dict, results, performance_filename, load_result)
 
     results.append(load_result.to_html())
     return results
 
 
-def get_str(key: str, fallback: str | None, source_dict: dict, results: list, default=None) -> str | None:
+def _check_field_exists(key: str, fallback: str | None, source_dict: dict, default) -> tuple[bool, Any]:
+    if key in source_dict:
+        return True, source_dict[key]
+    if fallback is not None and fallback in source_dict:
+        return True, source_dict[fallback]
+    if default is not None:
+        return True, default
+    return False, None
+
+
+def get_str(key: str, fallback: str | None, source_dict: dict, results: list, load_result: LoadResult, default=None) -> str | None:
+    exists, raw_value = _check_field_exists(key, fallback, source_dict, default)
+    if not exists:
+        load_result.add_missing(key)
+        results.append(gr.update())
+        return None
     try:
-        h = source_dict.get(key, source_dict.get(fallback, default))
-        assert isinstance(h, str)
-        results.append(h)
-        return h
-    except:
+        if not isinstance(raw_value, str):
+            raise ValueError(f'期望字符串，实际类型: {type(raw_value).__name__}')
+        load_result.add_loaded(key)
+        results.append(raw_value)
+        return raw_value
+    except Exception as e:
+        load_result.add_damaged(key, f'字符串类型校验失败: {e}')
         results.append(gr.update())
         return None
 
 
-def get_list(key: str, fallback: str | None, source_dict: dict, results: list, default=None):
+def get_list(key: str, fallback: str | None, source_dict: dict, results: list, load_result: LoadResult, default=None):
+    exists, raw_value = _check_field_exists(key, fallback, source_dict, default)
+    if not exists:
+        load_result.add_missing(key)
+        results.append(gr.update())
+        return
     try:
-        h = source_dict.get(key, source_dict.get(fallback, default))
-        h = safe_parse_list(h)
-        assert h is not None and isinstance(h, list)
-        results.append(h)
-    except:
+        parsed = safe_parse_list(raw_value)
+        if parsed is None:
+            raise ValueError(f'无法解析为列表，原始值: {repr(raw_value)[:50]}')
+        if not isinstance(parsed, list):
+            raise ValueError(f'解析结果类型错误: {type(parsed).__name__}')
+        load_result.add_loaded(key)
+        results.append(parsed)
+    except Exception as e:
+        load_result.add_damaged(key, f'列表格式解析失败: {e}')
         results.append(gr.update())
 
 
-def get_number(key: str, fallback: str | None, source_dict: dict, results: list, default=None, cast_type=float):
+def get_number(key: str, fallback: str | None, source_dict: dict, results: list, load_result: LoadResult, default=None, cast_type=float):
+    exists, raw_value = _check_field_exists(key, fallback, source_dict, default)
+    if not exists:
+        load_result.add_missing(key)
+        results.append(gr.update())
+        return
     try:
-        h = source_dict.get(key, source_dict.get(fallback, default))
-        assert h is not None
-        h = cast_type(h)
-        results.append(h)
-    except:
+        if raw_value is None:
+            raise ValueError('值为 None')
+        parsed = cast_type(raw_value)
+        load_result.add_loaded(key)
+        results.append(parsed)
+    except Exception as e:
+        load_result.add_damaged(key, f'数值解析失败: {e}')
         results.append(gr.update())
 
 
-def get_image_number(key: str, fallback: str | None, source_dict: dict, results: list, default=None):
+def get_image_number(key: str, fallback: str | None, source_dict: dict, results: list, load_result: LoadResult, default=None):
+    exists, raw_value = _check_field_exists(key, fallback, source_dict, default)
+    if not exists:
+        load_result.add_missing(key)
+        results.append(1)
+        return
     try:
-        h = source_dict.get(key, source_dict.get(fallback, default))
-        assert h is not None
-        h = int(h)
-        h = min(h, modules.config.default_max_image_number)
-        results.append(h)
-    except:
+        if raw_value is None:
+            raise ValueError('值为 None')
+        parsed = int(raw_value)
+        parsed = min(parsed, modules.config.default_max_image_number)
+        load_result.add_loaded(key)
+        results.append(parsed)
+    except Exception as e:
+        load_result.add_damaged(key, f'图片数量解析失败: {e}')
         results.append(1)
 
 
-def get_steps(key: str, fallback: str | None, source_dict: dict, results: list, default=None):
+def get_steps(key: str, fallback: str | None, source_dict: dict, results: list, load_result: LoadResult, default=None):
+    exists, raw_value = _check_field_exists(key, fallback, source_dict, default)
+    if not exists:
+        load_result.add_missing(key)
+        results.append(-1)
+        return
     try:
-        h = source_dict.get(key, source_dict.get(fallback, default))
-        assert h is not None
-        h = int(h)
-        # if not in steps or in steps and performance is not the same
+        if raw_value is None:
+            raise ValueError('值为 None')
+        h = int(raw_value)
         performance_name = source_dict.get('performance', '').replace(' ', '_').replace('-', '_').casefold()
-        performance_candidates = [key for key in Steps.keys() if key.casefold() == performance_name and Steps[key] == h]
+        performance_candidates = [k for k in Steps.keys() if k.casefold() == performance_name and Steps[k] == h]
+        load_result.add_loaded(key)
         if len(performance_candidates) == 0:
             results.append(h)
             return
         results.append(-1)
-    except:
+    except Exception as e:
+        load_result.add_damaged(key, f'步数解析失败: {e}')
         results.append(-1)
 
 
-def get_resolution(key: str, fallback: str | None, source_dict: dict, results: list, default=None):
+def get_resolution(key: str, fallback: str | None, source_dict: dict, results: list, load_result: LoadResult, default=None):
+    exists, raw_value = _check_field_exists(key, fallback, source_dict, default)
+    if not exists:
+        load_result.add_missing(key)
+        results.append(gr.update())
+        results.append(gr.update())
+        results.append(gr.update())
+        return
     try:
-        h = source_dict.get(key, source_dict.get(fallback, default))
-        resolution = safe_parse_resolution(h)
-        assert resolution is not None
+        resolution = safe_parse_resolution(raw_value)
+        if resolution is None:
+            raise ValueError(f'无法解析分辨率，原始值: {repr(raw_value)[:50]}')
         width, height = resolution
         formatted = modules.config.add_ratio(f'{width}*{height}')
+        load_result.add_loaded(key)
         if formatted in modules.config.available_aspect_ratios_labels:
             results.append(formatted)
             results.append(-1)
@@ -662,81 +499,132 @@ def get_resolution(key: str, fallback: str | None, source_dict: dict, results: l
             results.append(gr.update())
             results.append(int(width))
             results.append(int(height))
-    except:
+    except Exception as e:
+        load_result.add_damaged(key, f'分辨率解析失败: {e}')
         results.append(gr.update())
         results.append(gr.update())
         results.append(gr.update())
 
 
-def get_seed(key: str, fallback: str | None, source_dict: dict, results: list, default=None):
+def get_seed(key: str, fallback: str | None, source_dict: dict, results: list, load_result: LoadResult, default=None):
+    exists, raw_value = _check_field_exists(key, fallback, source_dict, default)
+    if not exists:
+        load_result.add_missing(key)
+        results.append(gr.update())
+        results.append(gr.update())
+        return
     try:
-        h = source_dict.get(key, source_dict.get(fallback, default))
-        assert h is not None
-        h = int(h)
+        if raw_value is None:
+            raise ValueError('值为 None')
+        h = int(raw_value)
+        load_result.add_loaded(key)
         results.append(False)
         results.append(h)
-    except:
+    except Exception as e:
+        load_result.add_damaged(key, f'种子解析失败: {e}')
         results.append(gr.update())
         results.append(gr.update())
 
 
-def get_inpaint_engine_version(key: str, fallback: str | None, source_dict: dict, results: list, inpaint_mode: str, default=None) -> str | None:
+def get_inpaint_engine_version(key: str, fallback: str | None, source_dict: dict, results: list, inpaint_mode: str, load_result: LoadResult, default=None) -> str | None:
+    exists, raw_value = _check_field_exists(key, fallback, source_dict, default)
+    if not exists:
+        load_result.add_missing(key)
+        results.append(gr.update())
+        results.append('empty')
+        return None
     try:
-        h = source_dict.get(key, source_dict.get(fallback, default))
-        assert isinstance(h, str) and h in modules.flags.inpaint_engine_versions
+        if not isinstance(raw_value, str):
+            raise ValueError(f'期望字符串，实际类型: {type(raw_value).__name__}')
+        if raw_value not in modules.flags.inpaint_engine_versions:
+            raise ValueError(f'值不在有效范围内: {repr(raw_value)}')
+        load_result.add_loaded(key)
         if inpaint_mode != modules.flags.inpaint_option_detail:
-            results.append(h)
+            results.append(raw_value)
         else:
             results.append(gr.update())
-        results.append(h)
-        return h
-    except:
+        results.append(raw_value)
+        return raw_value
+    except Exception as e:
+        load_result.add_damaged(key, f'修复引擎版本解析失败: {e}')
         results.append(gr.update())
         results.append('empty')
         return None
 
 
-def get_inpaint_method(key: str, fallback: str | None, source_dict: dict, results: list, default=None) -> str | None:
-    try:
-        h = source_dict.get(key, source_dict.get(fallback, default))
-        assert isinstance(h, str) and h in modules.flags.inpaint_options
-        results.append(h)
-        for i in range(modules.config.default_enhance_tabs):
-            results.append(h)
-        return h
-    except:
+def get_inpaint_method(key: str, fallback: str | None, source_dict: dict, results: list, load_result: LoadResult, default=None) -> str | None:
+    exists, raw_value = _check_field_exists(key, fallback, source_dict, default)
+    if not exists:
+        load_result.add_missing(key)
         results.append(gr.update())
         for i in range(modules.config.default_enhance_tabs):
             results.append(gr.update())
-
-
-def get_adm_guidance(key: str, fallback: str | None, source_dict: dict, results: list, default=None):
+        return None
     try:
-        h = source_dict.get(key, source_dict.get(fallback, default))
-        parsed = safe_parse_float_tuple(h, 3)
-        assert parsed is not None
+        if not isinstance(raw_value, str):
+            raise ValueError(f'期望字符串，实际类型: {type(raw_value).__name__}')
+        if raw_value not in modules.flags.inpaint_options:
+            raise ValueError(f'值不在有效范围内: {repr(raw_value)}')
+        load_result.add_loaded(key)
+        results.append(raw_value)
+        for i in range(modules.config.default_enhance_tabs):
+            results.append(raw_value)
+        return raw_value
+    except Exception as e:
+        load_result.add_damaged(key, f'修复方法解析失败: {e}')
+        results.append(gr.update())
+        for i in range(modules.config.default_enhance_tabs):
+            results.append(gr.update())
+        return None
+
+
+def get_adm_guidance(key: str, fallback: str | None, source_dict: dict, results: list, load_result: LoadResult, default=None):
+    exists, raw_value = _check_field_exists(key, fallback, source_dict, default)
+    if not exists:
+        load_result.add_missing(key)
+        results.append(gr.update())
+        results.append(gr.update())
+        results.append(gr.update())
+        return
+    try:
+        parsed = safe_parse_float_tuple(raw_value, 3)
+        if parsed is None:
+            raise ValueError(f'无法解析为三元组，原始值: {repr(raw_value)[:50]}')
         p, n, e = parsed
+        load_result.add_loaded(key)
         results.append(float(p))
         results.append(float(n))
         results.append(float(e))
-    except:
+    except Exception as e:
+        load_result.add_damaged(key, f'ADM Guidance 解析失败: {e}')
         results.append(gr.update())
         results.append(gr.update())
         results.append(gr.update())
 
 
-def get_freeu(key: str, fallback: str | None, source_dict: dict, results: list, default=None):
+def get_freeu(key: str, fallback: str | None, source_dict: dict, results: list, load_result: LoadResult, default=None):
+    exists, raw_value = _check_field_exists(key, fallback, source_dict, default)
+    if not exists:
+        load_result.add_missing(key)
+        results.append(False)
+        results.append(gr.update())
+        results.append(gr.update())
+        results.append(gr.update())
+        results.append(gr.update())
+        return
     try:
-        h = source_dict.get(key, source_dict.get(fallback, default))
-        parsed = safe_parse_float_tuple(h, 4)
-        assert parsed is not None
+        parsed = safe_parse_float_tuple(raw_value, 4)
+        if parsed is None:
+            raise ValueError(f'无法解析为四元组，原始值: {repr(raw_value)[:50]}')
         b1, b2, s1, s2 = parsed
+        load_result.add_loaded(key)
         results.append(True)
         results.append(float(b1))
         results.append(float(b2))
         results.append(float(s1))
         results.append(float(s2))
-    except:
+    except Exception as e:
+        load_result.add_damaged(key, f'FreeU 解析失败: {e}')
         results.append(False)
         results.append(gr.update())
         results.append(gr.update())
@@ -744,18 +632,21 @@ def get_freeu(key: str, fallback: str | None, source_dict: dict, results: list, 
         results.append(gr.update())
 
 
-def get_lora(key: str, fallback: str | None, source_dict: dict, results: list, performance_filename: str | None):
+def get_lora(key: str, fallback: str | None, source_dict: dict, results: list, performance_filename: str | None, load_result: LoadResult):
+    exists, raw_value = _check_field_exists(key, fallback, source_dict, None)
+    if not exists:
+        load_result.add_missing(key)
+        results.append(True)
+        results.append('None')
+        results.append(1)
+        return
     try:
-        raw_value = source_dict.get(key, source_dict.get(fallback))
-        if raw_value is None:
-            raise ValueError(f"Missing value for {key}")
-        
         raw_str = str(raw_value).strip()
         if not raw_str or raw_str == 'None':
-            raise ValueError(f"Empty value for {key}")
-        
+            raise ValueError(f"空值")
+
         split_data = [s.strip() for s in raw_str.split(' : ')]
-        
+
         enabled = True
         name = ''
         weight = 1.0
@@ -765,32 +656,38 @@ def get_lora(key: str, fallback: str | None, source_dict: dict, results: list, p
             weight_str = split_data[1]
         elif len(split_data) == 3:
             enabled_str = split_data[0]
-            if enabled_str == 'True' or enabled_str == 'true' or enabled_str == '1':
+            if enabled_str in ['True', 'true', '1']:
                 enabled = True
-            elif enabled_str == 'False' or enabled_str == 'false' or enabled_str == '0':
+            elif enabled_str in ['False', 'false', '0']:
                 enabled = False
             else:
                 enabled = bool(enabled_str)
             name = split_data[1]
             weight_str = split_data[2]
         else:
-            raise ValueError(f"Invalid LoRA format: {raw_str}")
+            raise ValueError(f"格式错误: 期望 'name : weight' 或 'enabled : name : weight'")
 
         if name == performance_filename or (performance_filename is not None and name == Path(performance_filename).stem):
-            raise Exception("Skipping performance LoRA")
+            load_result.add_missing(key)
+            results.append(True)
+            results.append('None')
+            results.append(1)
+            return
 
         if not name or name == 'None':
-            raise ValueError(f"Invalid LoRA name: {name}")
+            raise ValueError(f"LoRA 名称无效: {name}")
 
         parsed_weight = safe_parse_float(weight_str)
         if parsed_weight is None:
-            raise ValueError(f"Invalid LoRA weight: {weight_str}")
+            raise ValueError(f"权重解析失败: {weight_str}")
         weight = parsed_weight
 
+        load_result.add_loaded(key)
         results.append(enabled)
         results.append(name)
         results.append(weight)
-    except:
+    except Exception as e:
+        load_result.add_damaged(key, str(e))
         results.append(True)
         results.append('None')
         results.append(1)
