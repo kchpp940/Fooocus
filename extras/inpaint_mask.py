@@ -45,6 +45,56 @@ def is_mask_valid(mask) -> bool:
     return bool(np.any(m > 127))
 
 
+def process_mask(mask, invert: bool = False, erode_or_dilate: int = 0,
+                 target_size=None) -> np.ndarray | None:
+    """
+    inpaint / enhance 共享的蒙版后处理入口。
+
+    执行顺序（与调用方一致）：
+        1. normalize_mask_2d: 统一为 2D uint8 [0,255]，失败返回 None
+        2. 可选 resize 到 target_size (width, height)
+        3. invert: 反选（255 - mask）
+        4. erode_or_dilate: 形态学（正=膨胀，负=腐蚀，0=跳过）
+        5. 有效性检查：全黑返回 None
+
+    参数:
+        mask: 原始蒙版（None / 2D / 3D / float / uint8）
+        invert: 是否反选
+        erode_or_dilate: 膨胀/腐蚀像素数（正膨胀，负腐蚀）
+        target_size: (width, height) 元组，需要 resize 时传入
+
+    返回:
+        处理后的 2D uint8 mask，或 None（无效/空蒙版）
+    """
+    from modules.util import erode_or_dilate as _erode_or_dilate, resample_image
+
+    m = normalize_mask_2d(mask)
+    if m is None:
+        return None
+
+    if target_size is not None:
+        tw, th = target_size
+        if m.shape[0] != th or m.shape[1] != tw:
+            m = resample_image(m, width=tw, height=th)
+            m = normalize_mask_2d(m)
+            if m is None:
+                return None
+
+    if invert:
+        m = 255 - m
+
+    if int(erode_or_dilate) != 0:
+        m = _erode_or_dilate(m, int(erode_or_dilate))
+        m = normalize_mask_2d(m)
+        if m is None:
+            return None
+
+    if not is_mask_valid(m):
+        return None
+
+    return m
+
+
 class SAMOptions:
     def __init__(self,
                  # GroundingDINO
