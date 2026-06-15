@@ -6,7 +6,7 @@ import urllib.parse
 
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
-from modules.flags import OutputFormat, MetadataScheme
+from modules.flags import OutputFormat
 from modules.meta_parser import MetadataParser, get_exif
 from modules.util import generate_temp_filename
 
@@ -21,85 +21,29 @@ def get_current_html_path(output_format=None):
     return html_name
 
 
-def _write_metadata_to_png(image: Image.Image, parameters: str, scheme: MetadataScheme) -> PngInfo | None:
-    if not parameters:
-        return None
-    try:
-        pnginfo = PngInfo()
-        params_str = str(parameters)
-        scheme_str = str(scheme.value)
-        try:
-            params_str.encode('latin-1')
-            pnginfo.add_text('parameters', params_str)
-            pnginfo.add_text('fooocus_scheme', scheme_str)
-        except (UnicodeEncodeError, UnicodeDecodeError):
-            pnginfo.add_text('parameters', params_str, zip=True)
-            pnginfo.add_text('fooocus_scheme', scheme_str, zip=True)
-        return pnginfo
-    except Exception as e:
-        print(f"[Logger] Failed to build PNG metadata: {e}")
-        return None
-
-
-def _write_metadata_to_exif(parameters: str, scheme: MetadataScheme):
-    try:
-        return get_exif(parameters, scheme.value)
-    except Exception as e:
-        print(f"[Logger] Failed to build EXIF metadata: {e}")
-        return Image.Exif()
-
-
 def log(img, metadata, metadata_parser: MetadataParser | None = None, output_format=None, task=None, persist_image=True) -> str:
     path_outputs = modules.config.temp_path if args_manager.args.disable_image_log or not persist_image else modules.config.path_outputs
     output_format = output_format if output_format else modules.config.default_output_format
     date_string, local_temp_filename, only_name = generate_temp_filename(folder=path_outputs, extension=output_format)
     os.makedirs(os.path.dirname(local_temp_filename), exist_ok=True)
 
-    parsed_parameters = ''
-    metadata_scheme = None
-    if metadata_parser is not None:
-        try:
-            parsed_parameters = metadata_parser.to_string(metadata.copy())
-        except Exception as e:
-            print(f"[Logger] Failed to serialize metadata to string: {e}")
-            parsed_parameters = ''
-        try:
-            metadata_scheme = metadata_parser.get_scheme()
-        except Exception as e:
-            print(f"[Logger] Failed to get metadata scheme: {e}")
-            metadata_scheme = None
-
+    parsed_parameters = metadata_parser.to_string(metadata.copy()) if metadata_parser is not None else ''
     image = Image.fromarray(img)
 
-    save_kwargs = {}
     if output_format == OutputFormat.PNG.value:
-        if parsed_parameters and metadata_scheme is not None:
-            pnginfo = _write_metadata_to_png(image, parsed_parameters, metadata_scheme)
-            if pnginfo is not None:
-                save_kwargs['pnginfo'] = pnginfo
+        if parsed_parameters != '':
+            pnginfo = PngInfo()
+            pnginfo.add_text('parameters', parsed_parameters)
+            pnginfo.add_text('fooocus_scheme', metadata_parser.get_scheme().value)
+        else:
+            pnginfo = None
+        image.save(local_temp_filename, pnginfo=pnginfo)
     elif output_format == OutputFormat.JPEG.value:
-        save_kwargs['quality'] = 95
-        save_kwargs['optimize'] = True
-        save_kwargs['progressive'] = True
-        if metadata_scheme is not None:
-            exif = _write_metadata_to_exif(parsed_parameters, metadata_scheme)
-            save_kwargs['exif'] = exif
+        image.save(local_temp_filename, quality=95, optimize=True, progressive=True, exif=get_exif(parsed_parameters, metadata_parser.get_scheme().value) if metadata_parser else Image.Exif())
     elif output_format == OutputFormat.WEBP.value:
-        save_kwargs['quality'] = 95
-        save_kwargs['lossless'] = False
-        if metadata_scheme is not None:
-            exif = _write_metadata_to_exif(parsed_parameters, metadata_scheme)
-            save_kwargs['exif'] = exif
-
-    try:
-        image.save(local_temp_filename, **save_kwargs)
-    except Exception as e:
-        print(f"[Logger] Failed to save image with metadata, retrying without metadata: {e}")
-        try:
-            image.save(local_temp_filename)
-        except Exception as e2:
-            print(f"[Logger] Failed to save image even without metadata: {e2}")
-            raise
+        image.save(local_temp_filename, quality=95, lossless=False, exif=get_exif(parsed_parameters, metadata_parser.get_scheme().value) if metadata_parser else Image.Exif())
+    else:
+        image.save(local_temp_filename)
 
     if args_manager.args.disable_image_log:
         return local_temp_filename

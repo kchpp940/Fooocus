@@ -867,31 +867,44 @@ def worker():
 
             if async_task.inpaint_advanced_masking_checkbox:
                 if isinstance(async_task.inpaint_mask_image_upload, dict):
-                    if (isinstance(async_task.inpaint_mask_image_upload['image'], np.ndarray)
-                            and isinstance(async_task.inpaint_mask_image_upload['mask'], np.ndarray)
-                            and async_task.inpaint_mask_image_upload['image'].ndim == 3):
-                        async_task.inpaint_mask_image_upload = np.maximum(
-                            async_task.inpaint_mask_image_upload['image'],
-                            async_task.inpaint_mask_image_upload['mask'])
+                    upload_img = async_task.inpaint_mask_image_upload.get('image')
+                    upload_mask = async_task.inpaint_mask_image_upload.get('mask')
+                    parts = []
+                    if isinstance(upload_img, np.ndarray) and upload_img.ndim == 3:
+                        parts.append(upload_img)
+                    if isinstance(upload_mask, np.ndarray):
+                        parts.append(upload_mask)
+                    if parts:
+                        merged = parts[0]
+                        for p in parts[1:]:
+                            if p.shape[:2] != merged.shape[:2]:
+                                p = resample_image(p, width=merged.shape[1], height=merged.shape[0])
+                            if p.ndim == 2 and merged.ndim == 3:
+                                p = np.repeat(p[:, :, np.newaxis], merged.shape[2], axis=2)
+                            elif p.ndim == 3 and merged.ndim == 2:
+                                merged = np.repeat(merged[:, :, np.newaxis], p.shape[2], axis=2)
+                            merged = np.maximum(merged, p)
+                        async_task.inpaint_mask_image_upload = merged
                 if isinstance(async_task.inpaint_mask_image_upload,
-                              np.ndarray) and async_task.inpaint_mask_image_upload.ndim == 3:
+                              np.ndarray) and async_task.inpaint_mask_image_upload.ndim >= 2:
                     H, W, C = inpaint_image.shape
-                    async_task.inpaint_mask_image_upload = resample_image(async_task.inpaint_mask_image_upload,
-                                                                          width=W, height=H)
-                    async_task.inpaint_mask_image_upload = np.mean(async_task.inpaint_mask_image_upload, axis=2)
-                    async_task.inpaint_mask_image_upload = (async_task.inpaint_mask_image_upload > 127).astype(
-                        np.uint8) * 255
-                    inpaint_mask = np.maximum(inpaint_mask, async_task.inpaint_mask_image_upload)
-
-            if int(async_task.inpaint_erode_or_dilate) != 0:
-                inpaint_mask = erode_or_dilate(inpaint_mask, async_task.inpaint_erode_or_dilate)
+                    upload_resized = resample_image(async_task.inpaint_mask_image_upload, width=W, height=H)
+                    if upload_resized.ndim == 3:
+                        upload_resized = np.mean(upload_resized, axis=2)
+                    upload_resized = (upload_resized > 127).astype(np.uint8) * 255
+                    if inpaint_mask.shape != upload_resized.shape:
+                        inpaint_mask = resample_image(inpaint_mask, width=W, height=H)
+                    inpaint_mask = np.maximum(inpaint_mask.astype(np.uint8), upload_resized.astype(np.uint8))
 
             if async_task.invert_mask_checkbox:
-                inpaint_mask = 255 - inpaint_mask
+                inpaint_mask = 255 - inpaint_mask.astype(np.uint8)
+
+            if int(async_task.inpaint_erode_or_dilate) != 0:
+                inpaint_mask = erode_or_dilate(inpaint_mask.astype(np.uint8), async_task.inpaint_erode_or_dilate)
 
             inpaint_image = HWC3(inpaint_image)
-            if isinstance(inpaint_image, np.ndarray) and isinstance(inpaint_mask, np.ndarray) \
-                    and (np.any(inpaint_mask > 127) or len(async_task.outpaint_selections) > 0):
+            mask_has_content = isinstance(inpaint_mask, np.ndarray) and np.any(inpaint_mask > 127)
+            if mask_has_content or len(async_task.outpaint_selections) > 0:
                 progressbar(async_task, 1, 'Downloading upscale models ...')
                 modules.config.downloading_upscale_model()
                 if inpaint_parameterized:
@@ -912,6 +925,8 @@ def worker():
                     else:
                         async_task.prompt = async_task.inpaint_additional_prompt + '\n' + async_task.prompt
                 goals.append('inpaint')
+            else:
+                print(f'[Inpaint] No valid mask after processing, skipped inpaint.')
         if async_task.current_tab == 'ip' or \
                 async_task.mixing_image_prompt_and_vary_upscale or \
                 async_task.mixing_image_prompt_and_inpaint:
@@ -1379,28 +1394,45 @@ def worker():
                         max_detections=enhance_mask_sam_max_detections,
                         model_type=enhance_mask_sam_model,
                     ))
-                if len(mask.shape) == 3:
-                    mask = mask[:, :, 0]
 
-                if int(enhance_inpaint_erode_or_dilate) != 0:
-                    mask = erode_or_dilate(mask, enhance_inpaint_erode_or_dilate)
+                print(f'[Enhance] {dino_detection_count} boxes detected')
+                print(f'[Enhance] {sam_detection_count} segments detected in boxes')
+                print(f'[Enhance] {sam_detection_on_mask_count} segments applied to mask')
+
+                if enhance_mask_model == 'sam' and (dino_detection_count == 0 or (not async_task.debugging_dino and sam_detection_on_mask_count == 0)):
+                    print(f'[Enhance] No "{enhance_mask_dino_prompt_text}" detected, skipping')
+                    async_task.enhance_stats[index] += 0
+                    done_steps_inpainting += enhance_steps
+                    continue
+
+                if mask is None:
+                    print(f'[Enhance] Mask generation returned None for model={enhance_mask_model}, skipping')
+                    done_steps_inpainting += enhance_steps
+                    continue
+
+                if isinstance(mask, np.ndarray) and mask.ndim == 3:
+                    mask = mask[:, :, 0]
+                if not isinstance(mask, np.ndarray) or mask.ndim != 2:
+                    print(f'[Enhance] Unexpected mask shape/type, skipping')
+                    done_steps_inpainting += enhance_steps
+                    continue
 
                 if enhance_mask_invert:
-                    mask = 255 - mask
+                    mask = 255 - mask.astype(np.uint8)
+
+                if int(enhance_inpaint_erode_or_dilate) != 0:
+                    mask = erode_or_dilate(mask.astype(np.uint8), enhance_inpaint_erode_or_dilate)
+
+                if not np.any(mask > 127):
+                    print(f'[Enhance] Mask is empty after processing, skipping')
+                    done_steps_inpainting += enhance_steps
+                    continue
 
                 if async_task.debugging_enhance_masks_checkbox:
                     async_task.yields.append(['preview', (current_progress, 'Loading ...', mask)])
                     yield_result(async_task, mask, current_progress, async_task.black_out_nsfw, False,
                                  async_task.disable_intermediate_results)
                     async_task.enhance_stats[index] += 1
-
-                print(f'[Enhance] {dino_detection_count} boxes detected')
-                print(f'[Enhance] {sam_detection_count} segments detected in boxes')
-                print(f'[Enhance] {sam_detection_on_mask_count} segments applied to mask')
-
-                if enhance_mask_model == 'sam' and (dino_detection_count == 0 or not async_task.debugging_dino and sam_detection_on_mask_count == 0):
-                    print(f'[Enhance] No "{enhance_mask_dino_prompt_text}" detected, skipping')
-                    continue
 
                 goals_enhance = ['inpaint']
 

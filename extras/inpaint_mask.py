@@ -10,6 +10,41 @@ from segment_anything import sam_model_registry
 from segment_anything.utils.amg import remove_small_regions
 
 
+def normalize_mask_2d(mask) -> np.ndarray | None:
+    """
+    归一化任意形式的 mask 为 2D uint8 单通道数组 [0, 255]。
+    支持: None -> None; 2D (H,W); 3D (H,W,1); 3D (H,W,3) 通过亮度通道取阈值
+    """
+    if mask is None:
+        return None
+    if not isinstance(mask, np.ndarray):
+        return None
+    m = mask.copy()
+    if m.ndim == 3:
+        if m.shape[2] == 1:
+            m = m[:, :, 0]
+        elif m.shape[2] >= 3:
+            m = np.mean(m[:, :, :3], axis=2)
+        else:
+            return None
+    if m.ndim != 2:
+        return None
+    if m.dtype != np.uint8:
+        if m.max() <= 1.0 and m.min() >= 0.0:
+            m = (m * 255.0).astype(np.uint8)
+        else:
+            m = np.clip(m, 0, 255).astype(np.uint8)
+    return m
+
+
+def is_mask_valid(mask) -> bool:
+    """判断 mask 是否存在且有有效像素（非全黑）"""
+    m = normalize_mask_2d(mask)
+    if m is None:
+        return False
+    return bool(np.any(m > 127))
+
+
 class SAMOptions:
     def __init__(self,
                  # GroundingDINO
@@ -45,6 +80,15 @@ def optimize_masks(masks: torch.Tensor) -> torch.Tensor:
 
 def generate_mask_from_image(image: np.ndarray, mask_model: str = 'sam', extras=None,
                              sam_options: SAMOptions | None = SAMOptions) -> tuple[np.ndarray | None, int | None, int | None, int | None]:
+    """
+    统一返回契约:
+      mask: np.ndarray | None - 2D uint8 (H,W) 单通道 [0,255]，无有效检测返回 None
+      dino_detection_count: int - DINO 检测框数
+      sam_detection_count: int - SAM 分割出的掩码数
+      sam_detection_on_mask_count: int - 实际合并到最终 mask 的掩码数
+
+    调用方需要自行处理: 反选、膨胀/腐蚀的执行顺序（建议先反选，再形态学）。
+    """
     dino_detection_count = 0
     sam_detection_count = 0
     sam_detection_on_mask_count = 0
@@ -55,57 +99,77 @@ def generate_mask_from_image(image: np.ndarray, mask_model: str = 'sam', extras=
     if extras is None:
         extras = {}
 
-    if 'image' in image:
+    if isinstance(image, dict) and 'image' in image:
         image = image['image']
 
     if mask_model != 'sam' or sam_options is None:
-        result = remove(
-            image,
-            session=new_session(mask_model, **extras),
-            only_mask=True,
-            **extras
+        try:
+            result = remove(
+                image,
+                session=new_session(mask_model, **extras),
+                only_mask=True,
+                **extras
+            )
+        except Exception as e:
+            print(f'[Mask] {mask_model} failed: {e}')
+            return None, dino_detection_count, sam_detection_count, sam_detection_on_mask_count
+
+        result_2d = normalize_mask_2d(result)
+        if not is_mask_valid(result_2d):
+            return None, dino_detection_count, sam_detection_count, sam_detection_on_mask_count
+        return result_2d, dino_detection_count, sam_detection_count, sam_detection_on_mask_count
+
+    try:
+        detections, boxes, logits, phrases = default_groundingdino(
+            image=image,
+            caption=sam_options.dino_prompt,
+            box_threshold=sam_options.dino_box_threshold,
+            text_threshold=sam_options.dino_text_threshold
         )
-
-        return result, dino_detection_count, sam_detection_count, sam_detection_on_mask_count
-
-    detections, boxes, logits, phrases = default_groundingdino(
-        image=image,
-        caption=sam_options.dino_prompt,
-        box_threshold=sam_options.dino_box_threshold,
-        text_threshold=sam_options.dino_text_threshold
-    )
+    except Exception as e:
+        print(f'[Mask] GroundingDINO failed: {e}')
+        return None, dino_detection_count, sam_detection_count, sam_detection_on_mask_count
 
     H, W = image.shape[0], image.shape[1]
     boxes = boxes * torch.Tensor([W, H, W, H])
     boxes[:, :2] = boxes[:, :2] - boxes[:, 2:] / 2
     boxes[:, 2:] = boxes[:, 2:] + boxes[:, :2]
 
-    sam_checkpoint = modules.config.download_sam_model(sam_options.model_type)
-    sam = sam_model_registry[sam_options.model_type](checkpoint=sam_checkpoint)
-
-    sam_predictor = SamPredictor(sam)
-    final_mask_tensor = torch.zeros((image.shape[0], image.shape[1]))
     dino_detection_count = boxes.size(0)
 
-    if dino_detection_count > 0:
-        sam_predictor.set_image(image)
+    if dino_detection_count == 0:
+        return None, dino_detection_count, sam_detection_count, sam_detection_on_mask_count
 
-        if sam_options.dino_erode_or_dilate != 0:
-            for index in range(boxes.size(0)):
-                assert boxes.size(1) == 4
-                boxes[index][0] -= sam_options.dino_erode_or_dilate
-                boxes[index][1] -= sam_options.dino_erode_or_dilate
-                boxes[index][2] += sam_options.dino_erode_or_dilate
-                boxes[index][3] += sam_options.dino_erode_or_dilate
+    try:
+        sam_checkpoint = modules.config.download_sam_model(sam_options.model_type)
+        sam = sam_model_registry[sam_options.model_type](checkpoint=sam_checkpoint)
+        sam_predictor = SamPredictor(sam)
+    except Exception as e:
+        print(f'[Mask] SAM load failed: {e}')
+        return None, dino_detection_count, sam_detection_count, sam_detection_on_mask_count
 
-        if sam_options.dino_debug:
-            from PIL import ImageDraw, Image
-            debug_dino_image = Image.new("RGB", (image.shape[1], image.shape[0]), color="black")
-            draw = ImageDraw.Draw(debug_dino_image)
-            for box in boxes.numpy():
-                draw.rectangle(box.tolist(), fill="white")
-            return np.array(debug_dino_image), dino_detection_count, sam_detection_count, sam_detection_on_mask_count
+    final_mask_tensor = torch.zeros((image.shape[0], image.shape[1]))
 
+    sam_predictor.set_image(image)
+
+    if sam_options.dino_erode_or_dilate != 0:
+        for index in range(boxes.size(0)):
+            assert boxes.size(1) == 4
+            boxes[index][0] -= sam_options.dino_erode_or_dilate
+            boxes[index][1] -= sam_options.dino_erode_or_dilate
+            boxes[index][2] += sam_options.dino_erode_or_dilate
+            boxes[index][3] += sam_options.dino_erode_or_dilate
+
+    if sam_options.dino_debug:
+        from PIL import ImageDraw, Image
+        debug_dino_image = Image.new("RGB", (image.shape[1], image.shape[0]), color="black")
+        draw = ImageDraw.Draw(debug_dino_image)
+        for box in boxes.numpy():
+            draw.rectangle(box.tolist(), fill="white")
+        debug_2d = normalize_mask_2d(np.array(debug_dino_image))
+        return debug_2d, dino_detection_count, sam_detection_count, sam_detection_on_mask_count
+
+    try:
         transformed_boxes = sam_predictor.transform.apply_boxes_torch(boxes, image.shape[:2])
         masks, _, _ = sam_predictor.predict_torch(
             point_coords=None,
@@ -123,8 +187,12 @@ def generate_mask_from_image(image: np.ndarray, mask_model: str = 'sam', extras=
             mask_tensor = masks[obj_ind][0]
             final_mask_tensor += mask_tensor
             sam_detection_on_mask_count += 1
+    except Exception as e:
+        print(f'[Mask] SAM predict failed: {e}')
+        return None, dino_detection_count, sam_detection_count, sam_detection_on_mask_count
 
-    final_mask_tensor = (final_mask_tensor > 0).to('cpu').numpy()
-    mask_image = np.dstack((final_mask_tensor, final_mask_tensor, final_mask_tensor)) * 255
-    mask_image = np.array(mask_image, dtype=np.uint8)
-    return mask_image, dino_detection_count, sam_detection_count, sam_detection_on_mask_count
+    if sam_detection_on_mask_count == 0:
+        return None, dino_detection_count, sam_detection_count, sam_detection_on_mask_count
+
+    final_mask_np = (final_mask_tensor > 0).to('cpu').numpy().astype(np.uint8) * 255
+    return final_mask_np, dino_detection_count, sam_detection_count, sam_detection_on_mask_count
