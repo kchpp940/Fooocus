@@ -96,6 +96,76 @@ def process_mask(mask, invert: bool = False, morphic_px: int = 0,
     return m
 
 
+def merge_masks(mask_sources: list, target_size=None) -> np.ndarray | None:
+    """
+    合并多个蒙版来源，只处理真正的蒙版通道，不合并 RGB 图像内容。
+
+    每个来源可以是:
+      - None: 跳过
+      - np.ndarray: 原始蒙版数据（会经过 normalize_mask_2d 归一化）
+      - dict: {'mask': np.ndarray} 格式，只提取 'mask' 字段，忽略 'image'
+
+    合并逻辑:
+      1. 逐个归一化每个来源为 2D uint8
+      2. 可选 resize 到 target_size=(width, height)
+      3. 逐像素取 np.maximum 合并（并集）
+
+    参数:
+        mask_sources: 蒙版来源列表，按优先级从低到高排列（后加入的会覆盖前面的）
+        target_size: (width, height) 元组，需要 resize 时传入
+
+    返回:
+        合并后的 2D uint8 mask，或 None（所有来源都无效）
+    """
+    from modules.util import resample_image
+
+    result = None
+    for src in mask_sources:
+        if src is None:
+            continue
+
+        if isinstance(src, dict):
+            src = src.get('mask')
+            if src is None:
+                continue
+
+        if not isinstance(src, np.ndarray):
+            continue
+
+        m = normalize_mask_2d(src)
+        if m is None:
+            continue
+
+        if target_size is not None:
+            tw, th = target_size
+            if m.shape[0] != th or m.shape[1] != tw:
+                m = resample_image(m, width=tw, height=th)
+                m = normalize_mask_2d(m)
+                if m is None:
+                    continue
+
+        if result is None:
+            result = m
+        else:
+            if result.shape != m.shape:
+                if target_size is not None:
+                    tw, th = target_size
+                    m = resample_image(m, width=tw, height=th)
+                    result = resample_image(result, width=tw, height=th)
+                    m = normalize_mask_2d(m)
+                    result = normalize_mask_2d(result)
+                    if m is None or result is None:
+                        continue
+                else:
+                    continue
+            result = np.maximum(result, m)
+
+    if result is None or not is_mask_valid(result):
+        return None
+
+    return result
+
+
 class SAMOptions:
     def __init__(self,
                  # GroundingDINO

@@ -1,6 +1,6 @@
 import threading
 
-from extras.inpaint_mask import generate_mask_from_image, SAMOptions, process_mask
+from extras.inpaint_mask import generate_mask_from_image, SAMOptions, process_mask, merge_masks
 from modules.patch import PatchSettings, patch_settings, patch_all
 import modules.config
 
@@ -875,39 +875,24 @@ def worker():
                 async_task.current_tab == 'ip' and async_task.mixing_image_prompt_and_inpaint)) \
                 and isinstance(async_task.inpaint_input_image, dict):
             inpaint_image = async_task.inpaint_input_image['image']
-            raw_mask = async_task.inpaint_input_image['mask']
-
-            if async_task.inpaint_advanced_masking_checkbox:
-                if isinstance(async_task.inpaint_mask_image_upload, dict):
-                    upload_img = async_task.inpaint_mask_image_upload.get('image')
-                    upload_mask = async_task.inpaint_mask_image_upload.get('mask')
-                    parts = []
-                    if isinstance(upload_img, np.ndarray) and upload_img.ndim >= 2:
-                        parts.append(upload_img)
-                    if isinstance(upload_mask, np.ndarray) and upload_mask.ndim >= 2:
-                        parts.append(upload_mask)
-                    if parts:
-                        merged = parts[0]
-                        for p in parts[1:]:
-                            if p.shape[:2] != merged.shape[:2]:
-                                p = resample_image(p, width=merged.shape[1], height=merged.shape[0])
-                            if p.ndim != merged.ndim:
-                                if p.ndim == 2:
-                                    p = np.repeat(p[:, :, np.newaxis], merged.shape[2], axis=2)
-                                else:
-                                    merged = np.repeat(merged[:, :, np.newaxis], p.shape[2], axis=2)
-                            merged = np.maximum(merged, p)
-                        raw_mask = np.maximum(raw_mask, merged)
-                elif isinstance(async_task.inpaint_mask_image_upload, np.ndarray) \
-                        and async_task.inpaint_mask_image_upload.ndim >= 2:
-                    raw_mask = np.maximum(raw_mask, async_task.inpaint_mask_image_upload)
+            sketch_mask = async_task.inpaint_input_image['mask']
 
             H, W, _ = inpaint_image.shape
+            target_size = (W, H)
+
+            if async_task.inpaint_advanced_masking_checkbox:
+                mask_sources = [sketch_mask]
+                if async_task.inpaint_mask_image_upload is not None:
+                    mask_sources.append(async_task.inpaint_mask_image_upload)
+                raw_mask = merge_masks(mask_sources, target_size=target_size)
+            else:
+                raw_mask = sketch_mask
+
             inpaint_mask = process_mask(
                 raw_mask,
                 invert=async_task.invert_mask_checkbox,
                 morphic_px=async_task.inpaint_erode_or_dilate,
-                target_size=(W, H)
+                target_size=target_size
             )
 
             inpaint_image = HWC3(inpaint_image)
