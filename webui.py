@@ -899,24 +899,32 @@ with shared.gradio_root:
 
         if not args_manager.args.disable_preset_selection:
             def preset_selection_change(preset, is_generating, inpaint_mode):
-                preset_content = modules.config.try_get_preset_content(preset) if preset != 'initial' else {}
-                preset_prepared = modules.meta_parser.parse_meta_from_preset(preset_content)
+                if is_generating:
+                    print("[Preset Change] Skipping preset change during generation")
+                    return modules.meta_parser.load_parameter_button_click({}, is_generating, inpaint_mode)
+                
+                try:
+                    preset_content = modules.config.try_get_preset_content(preset) if preset != 'initial' else {}
+                    preset_prepared = modules.meta_parser.parse_meta_from_preset(preset_content)
 
-                default_model = preset_prepared.get('base_model')
-                previous_default_models = preset_prepared.get('previous_default_models', [])
-                checkpoint_downloads = preset_prepared.get('checkpoint_downloads', {})
-                embeddings_downloads = preset_prepared.get('embeddings_downloads', {})
-                lora_downloads = preset_prepared.get('lora_downloads', {})
-                vae_downloads = preset_prepared.get('vae_downloads', {})
+                    default_model = preset_prepared.get('base_model')
+                    previous_default_models = preset_prepared.get('previous_default_models', [])
+                    checkpoint_downloads = preset_prepared.get('checkpoint_downloads', {})
+                    embeddings_downloads = preset_prepared.get('embeddings_downloads', {})
+                    lora_downloads = preset_prepared.get('lora_downloads', {})
+                    vae_downloads = preset_prepared.get('vae_downloads', {})
 
-                preset_prepared['base_model'], preset_prepared['checkpoint_downloads'] = launch.download_models(
-                    default_model, previous_default_models, checkpoint_downloads, embeddings_downloads, lora_downloads,
-                    vae_downloads)
+                    preset_prepared['base_model'], preset_prepared['checkpoint_downloads'] = launch.download_models(
+                        default_model, previous_default_models, checkpoint_downloads, embeddings_downloads, lora_downloads,
+                        vae_downloads)
 
-                if 'prompt' in preset_prepared and preset_prepared.get('prompt') == '':
-                    del preset_prepared['prompt']
+                    if 'prompt' in preset_prepared and preset_prepared.get('prompt') == '':
+                        del preset_prepared['prompt']
 
-                return modules.meta_parser.load_parameter_button_click(json.dumps(preset_prepared), is_generating, inpaint_mode)
+                    return modules.meta_parser.load_parameter_button_click(json.dumps(preset_prepared), is_generating, inpaint_mode)
+                except Exception as e:
+                    print(f"[Preset Change] Failed to apply preset: {e}")
+                    return modules.meta_parser.load_parameter_button_click({}, is_generating, inpaint_mode)
 
 
             def inpaint_engine_state_change(inpaint_engine_version, *args):
@@ -1008,30 +1016,49 @@ with shared.gradio_root:
         ctrls += enhance_ctrls
 
         def parse_meta(raw_prompt_txt, is_generating):
+            if is_generating:
+                return gr.update(), gr.update(), gr.update()
+            
             loaded_json = None
-            if is_json(raw_prompt_txt):
-                loaded_json = json.loads(raw_prompt_txt)
+            try:
+                if is_json(raw_prompt_txt):
+                    loaded_json = json.loads(raw_prompt_txt)
+            except Exception as e:
+                print(f"[Parse Meta] Failed to parse JSON from prompt: {e}")
+                loaded_json = None
 
             if loaded_json is None:
-                if is_generating:
-                    return gr.update(), gr.update(), gr.update()
-                else:
-                    return gr.update(), gr.update(visible=True), gr.update(visible=False)
+                return gr.update(), gr.update(visible=True), gr.update(visible=False)
 
-            return json.dumps(loaded_json), gr.update(visible=False), gr.update(visible=True)
+            try:
+                return json.dumps(loaded_json), gr.update(visible=False), gr.update(visible=True)
+            except Exception as e:
+                print(f"[Parse Meta] Failed to serialize JSON: {e}")
+                return gr.update(), gr.update(visible=True), gr.update(visible=False)
 
         prompt.input(parse_meta, inputs=[prompt, state_is_generating], outputs=[prompt, generate_button, load_parameter_button], queue=False, show_progress=False)
 
         load_parameter_button.click(modules.meta_parser.load_parameter_button_click, inputs=[prompt, state_is_generating, inpaint_mode], outputs=load_data_outputs, queue=False, show_progress=False)
 
         def trigger_metadata_import(file, state_is_generating):
-            parameters, metadata_scheme = modules.meta_parser.read_info_from_image(file)
-            if parameters is None:
-                print('Could not find metadata in the image!')
+            if state_is_generating:
+                print("[Metadata Import] Skipping import during generation")
+                return modules.meta_parser.load_parameter_button_click({}, state_is_generating, inpaint_mode)
+            
+            parsed_parameters = {}
+            try:
+                parameters, metadata_scheme = modules.meta_parser.read_info_from_image(file)
+                if parameters is None:
+                    print('Could not find metadata in the image!')
+                else:
+                    metadata_parser = modules.meta_parser.get_metadata_parser(metadata_scheme)
+                    parsed_parameters = metadata_parser.to_json(parameters)
+                    if not isinstance(parsed_parameters, dict):
+                        print(f"[Metadata Import] Expected dict but got {type(parsed_parameters)}")
+                        parsed_parameters = {}
+            except Exception as e:
+                print(f"[Metadata Import] Failed to parse metadata: {e}")
                 parsed_parameters = {}
-            else:
-                metadata_parser = modules.meta_parser.get_metadata_parser(metadata_scheme)
-                parsed_parameters = metadata_parser.to_json(parameters)
 
             return modules.meta_parser.load_parameter_button_click(parsed_parameters, state_is_generating, inpaint_mode)
 

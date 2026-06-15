@@ -1,7 +1,9 @@
 import json
 import re
+import ast
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Any, Tuple, List, Optional
 
 import gradio as gr
 from PIL import Image
@@ -14,60 +16,348 @@ from modules.flags import SAMPLERS, CIVITAI_NO_KARRAS
 from modules.hash_cache import sha256_from_cache
 from modules.util import quote, unquote, extract_styles_from_prompt, is_json, get_file_from_folder_list
 
-re_param_code = r'\s*(\w[\w \-/]+):\s*("(?:\\.|[^\\"])+"|[^,]*)(?:,|$)'
-re_param = re.compile(re_param_code)
+re_param_code = r'\s*(\w[\w \-/]+):\s*("(?:\\.|[^\\"])*"|[^,]*)(?:,|$)'
+re_param = re.compile(re_param_code, re.DOTALL)
 re_imagesize = re.compile(r"^(\d+)x(\d+)$")
+re_resolution_tuple = re.compile(r"[\(\[]\s*(\d+)\s*[,\*xX]\s*(\d+)\s*[\)\]]")
+re_number = re.compile(r"[+-]?\d*\.?\d+(?:[eE][+-]?\d+)?")
+
+
+def safe_parse_list(value: Any) -> Optional[List[Any]]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        value = value.strip()
+        if value.startswith('[') and value.endswith(']'):
+            try:
+                parsed = ast.literal_eval(value)
+                if isinstance(parsed, list):
+                    return parsed
+            except (ValueError, SyntaxError):
+                pass
+        if value.startswith("'") and value.endswith("'"):
+            value = value[1:-1]
+        elif value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+    return None
+
+
+def safe_parse_resolution(value: Any) -> Optional[Tuple[int, int]]:
+    if isinstance(value, tuple) and len(value) == 2:
+        try:
+            w, h = int(value[0]), int(value[1])
+            if w > 0 and h > 0:
+                return (w, h)
+        except (ValueError, TypeError):
+            pass
+    if isinstance(value, list) and len(value) == 2:
+        try:
+            w, h = int(value[0]), int(value[1])
+            if w > 0 and h > 0:
+                return (w, h)
+        except (ValueError, TypeError):
+            pass
+    if isinstance(value, str):
+        value = value.strip()
+        m = re_imagesize.match(value)
+        if m is not None:
+            return (int(m.group(1)), int(m.group(2)))
+        m = re_resolution_tuple.match(value)
+        if m is not None:
+            return (int(m.group(1)), int(m.group(2)))
+        if value.startswith("'") and value.endswith("'"):
+            value = value[1:-1]
+        elif value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        try:
+            parsed = ast.literal_eval(value)
+            if isinstance(parsed, (tuple, list)) and len(parsed) == 2:
+                w, h = int(parsed[0]), int(parsed[1])
+                if w > 0 and h > 0:
+                    return (w, h)
+        except (ValueError, SyntaxError):
+            pass
+    return None
+
+
+def safe_parse_float_tuple(value: Any, expected_len: int) -> Optional[Tuple[float, ...]]:
+    if isinstance(value, (tuple, list)) and len(value) == expected_len:
+        try:
+            return tuple(float(x) for x in value)
+        except (ValueError, TypeError):
+            pass
+    if isinstance(value, str):
+        value = value.strip()
+        if value.startswith("'") and value.endswith("'"):
+            value = value[1:-1]
+        elif value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        try:
+            parsed = ast.literal_eval(value)
+            if isinstance(parsed, (tuple, list)) and len(parsed) == expected_len:
+                return tuple(float(x) for x in parsed)
+        except (ValueError, SyntaxError):
+            pass
+        nums = re.findall(re_number, value)
+        if len(nums) == expected_len:
+            try:
+                return tuple(float(x) for x in nums)
+            except (ValueError, TypeError):
+                pass
+    return None
+
+
+def safe_parse_float(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        value = value.strip()
+        try:
+            return float(value)
+        except ValueError:
+            pass
+    return None
+
+
+def safe_parse_int(value: Any) -> Optional[int]:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        value = value.strip()
+        try:
+            return int(value)
+        except ValueError:
+            try:
+                f = float(value)
+                if f.is_integer():
+                    return int(f)
+            except ValueError:
+                pass
+    return None
 
 
 def load_parameter_button_click(raw_metadata: dict | str, is_generating: bool, inpaint_mode: str):
-    loaded_parameter_dict = raw_metadata
-    if isinstance(raw_metadata, str):
-        loaded_parameter_dict = json.loads(raw_metadata)
-    assert isinstance(loaded_parameter_dict, dict)
+    try:
+        loaded_parameter_dict = raw_metadata
+        if isinstance(raw_metadata, str):
+            loaded_parameter_dict = json.loads(raw_metadata)
+        assert isinstance(loaded_parameter_dict, dict)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to parse metadata: {e}")
+        loaded_parameter_dict = {}
+
+    if is_generating:
+        print("[Load Parameters] Skipping parameter load during generation")
+        result_count = 1
+        result_count += 1
+        result_count += 2
+        result_count += 1
+        result_count += 1
+        result_count += 1
+        result_count += 1
+        result_count += 3
+        result_count += 1
+        result_count += 1
+        result_count += 3
+        result_count += 1
+        result_count += 1
+        result_count += 1
+        result_count += 1
+        result_count += 1
+        result_count += 1
+        result_count += 1
+        result_count += 1
+        result_count += 1
+        result_count += 1
+        result_count += 2
+        result_count += 1
+        result_count += modules.config.default_enhance_tabs
+        result_count += 1
+        result_count += 1
+        result_count += 5
+        result_count += modules.config.default_max_lora_number * 3
+        return [gr.update()] * result_count
 
     results = [len(loaded_parameter_dict) > 0]
 
-    get_image_number('image_number', 'Image Number', loaded_parameter_dict, results)
-    get_str('prompt', 'Prompt', loaded_parameter_dict, results)
-    get_str('negative_prompt', 'Negative Prompt', loaded_parameter_dict, results)
-    get_list('styles', 'Styles', loaded_parameter_dict, results)
-    performance = get_str('performance', 'Performance', loaded_parameter_dict, results)
-    get_steps('steps', 'Steps', loaded_parameter_dict, results)
-    get_number('overwrite_switch', 'Overwrite Switch', loaded_parameter_dict, results)
-    get_resolution('resolution', 'Resolution', loaded_parameter_dict, results)
-    get_number('guidance_scale', 'Guidance Scale', loaded_parameter_dict, results)
-    get_number('sharpness', 'Sharpness', loaded_parameter_dict, results)
-    get_adm_guidance('adm_guidance', 'ADM Guidance', loaded_parameter_dict, results)
-    get_str('refiner_swap_method', 'Refiner Swap Method', loaded_parameter_dict, results)
-    get_number('adaptive_cfg', 'CFG Mimicking from TSNR', loaded_parameter_dict, results)
-    get_number('clip_skip', 'CLIP Skip', loaded_parameter_dict, results, cast_type=int)
-    get_str('base_model', 'Base Model', loaded_parameter_dict, results)
-    get_str('refiner_model', 'Refiner Model', loaded_parameter_dict, results)
-    get_number('refiner_switch', 'Refiner Switch', loaded_parameter_dict, results)
-    get_str('sampler', 'Sampler', loaded_parameter_dict, results)
-    get_str('scheduler', 'Scheduler', loaded_parameter_dict, results)
-    get_str('vae', 'VAE', loaded_parameter_dict, results)
-    get_seed('seed', 'Seed', loaded_parameter_dict, results)
-    get_inpaint_engine_version('inpaint_engine_version', 'Inpaint Engine Version', loaded_parameter_dict, results, inpaint_mode)
-    get_inpaint_method('inpaint_method', 'Inpaint Mode', loaded_parameter_dict, results)
+    try:
+        get_image_number('image_number', 'Image Number', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load image_number: {e}")
+        results.append(1)
 
-    if is_generating:
+    try:
+        get_str('prompt', 'Prompt', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load prompt: {e}")
         results.append(gr.update())
-    else:
-        results.append(gr.update(visible=True))
 
+    try:
+        get_str('negative_prompt', 'Negative Prompt', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load negative_prompt: {e}")
+        results.append(gr.update())
+
+    try:
+        get_list('styles', 'Styles', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load styles: {e}")
+        results.append(gr.update())
+
+    performance = None
+    try:
+        performance = get_str('performance', 'Performance', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load performance: {e}")
+        results.append(gr.update())
+
+    try:
+        get_steps('steps', 'Steps', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load steps: {e}")
+        results.append(-1)
+
+    try:
+        get_number('overwrite_switch', 'Overwrite Switch', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load overwrite_switch: {e}")
+        results.append(gr.update())
+
+    try:
+        get_resolution('resolution', 'Resolution', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load resolution: {e}")
+        results.append(gr.update())
+        results.append(gr.update())
+        results.append(gr.update())
+
+    try:
+        get_number('guidance_scale', 'Guidance Scale', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load guidance_scale: {e}")
+        results.append(gr.update())
+
+    try:
+        get_number('sharpness', 'Sharpness', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load sharpness: {e}")
+        results.append(gr.update())
+
+    try:
+        get_adm_guidance('adm_guidance', 'ADM Guidance', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load adm_guidance: {e}")
+        results.append(gr.update())
+        results.append(gr.update())
+        results.append(gr.update())
+
+    try:
+        get_str('refiner_swap_method', 'Refiner Swap Method', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load refiner_swap_method: {e}")
+        results.append(gr.update())
+
+    try:
+        get_number('adaptive_cfg', 'CFG Mimicking from TSNR', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load adaptive_cfg: {e}")
+        results.append(gr.update())
+
+    try:
+        get_number('clip_skip', 'CLIP Skip', loaded_parameter_dict, results, cast_type=int)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load clip_skip: {e}")
+        results.append(gr.update())
+
+    try:
+        get_str('base_model', 'Base Model', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load base_model: {e}")
+        results.append(gr.update())
+
+    try:
+        get_str('refiner_model', 'Refiner Model', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load refiner_model: {e}")
+        results.append(gr.update())
+
+    try:
+        get_number('refiner_switch', 'Refiner Switch', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load refiner_switch: {e}")
+        results.append(gr.update())
+
+    try:
+        get_str('sampler', 'Sampler', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load sampler: {e}")
+        results.append(gr.update())
+
+    try:
+        get_str('scheduler', 'Scheduler', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load scheduler: {e}")
+        results.append(gr.update())
+
+    try:
+        get_str('vae', 'VAE', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load vae: {e}")
+        results.append(gr.update())
+
+    try:
+        get_seed('seed', 'Seed', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load seed: {e}")
+        results.append(gr.update())
+        results.append(gr.update())
+
+    try:
+        get_inpaint_engine_version('inpaint_engine_version', 'Inpaint Engine Version', loaded_parameter_dict, results, inpaint_mode)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load inpaint_engine_version: {e}")
+        results.append(gr.update())
+        results.append('empty')
+
+    try:
+        get_inpaint_method('inpaint_method', 'Inpaint Mode', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load inpaint_method: {e}")
+        results.append(gr.update())
+        for i in range(modules.config.default_enhance_tabs):
+            results.append(gr.update())
+
+    results.append(gr.update(visible=True))
     results.append(gr.update(visible=False))
 
-    get_freeu('freeu', 'FreeU', loaded_parameter_dict, results)
+    try:
+        get_freeu('freeu', 'FreeU', loaded_parameter_dict, results)
+    except Exception as e:
+        print(f"[Load Parameters] Failed to load freeu: {e}")
+        results.append(False)
+        results.append(gr.update())
+        results.append(gr.update())
+        results.append(gr.update())
+        results.append(gr.update())
 
-    # prevent performance LoRAs to be added twice, by performance and by lora
     performance_filename = None
-    if performance is not None and performance in Performance.values():
-        performance = Performance(performance)
-        performance_filename = performance.lora_filename()
+    try:
+        if performance is not None and performance in Performance.values():
+            perf = Performance(performance)
+            performance_filename = perf.lora_filename()
+    except Exception as e:
+        print(f"[Load Parameters] Failed to resolve performance LoRA: {e}")
 
     for i in range(modules.config.default_max_lora_number):
-        get_lora(f'lora_combined_{i + 1}', f'LoRA {i + 1}', loaded_parameter_dict, results, performance_filename)
+        try:
+            get_lora(f'lora_combined_{i + 1}', f'LoRA {i + 1}', loaded_parameter_dict, results, performance_filename)
+        except Exception as e:
+            print(f"[Load Parameters] Failed to load lora_combined_{i + 1}: {e}")
+            results.append(True)
+            results.append('None')
+            results.append(1)
 
     return results
 
@@ -86,8 +376,8 @@ def get_str(key: str, fallback: str | None, source_dict: dict, results: list, de
 def get_list(key: str, fallback: str | None, source_dict: dict, results: list, default=None):
     try:
         h = source_dict.get(key, source_dict.get(fallback, default))
-        h = eval(h)
-        assert isinstance(h, list)
+        h = safe_parse_list(h)
+        assert h is not None and isinstance(h, list)
         results.append(h)
     except:
         results.append(gr.update())
@@ -133,7 +423,9 @@ def get_steps(key: str, fallback: str | None, source_dict: dict, results: list, 
 def get_resolution(key: str, fallback: str | None, source_dict: dict, results: list, default=None):
     try:
         h = source_dict.get(key, source_dict.get(fallback, default))
-        width, height = eval(h)
+        resolution = safe_parse_resolution(h)
+        assert resolution is not None
+        width, height = resolution
         formatted = modules.config.add_ratio(f'{width}*{height}')
         if formatted in modules.config.available_aspect_ratios_labels:
             results.append(formatted)
@@ -194,7 +486,9 @@ def get_inpaint_method(key: str, fallback: str | None, source_dict: dict, result
 def get_adm_guidance(key: str, fallback: str | None, source_dict: dict, results: list, default=None):
     try:
         h = source_dict.get(key, source_dict.get(fallback, default))
-        p, n, e = eval(h)
+        parsed = safe_parse_float_tuple(h, 3)
+        assert parsed is not None
+        p, n, e = parsed
         results.append(float(p))
         results.append(float(n))
         results.append(float(e))
@@ -207,7 +501,9 @@ def get_adm_guidance(key: str, fallback: str | None, source_dict: dict, results:
 def get_freeu(key: str, fallback: str | None, source_dict: dict, results: list, default=None):
     try:
         h = source_dict.get(key, source_dict.get(fallback, default))
-        b1, b2, s1, s2 = eval(h)
+        parsed = safe_parse_float_tuple(h, 4)
+        assert parsed is not None
+        b1, b2, s1, s2 = parsed
         results.append(True)
         results.append(float(b1))
         results.append(float(b2))
@@ -223,20 +519,47 @@ def get_freeu(key: str, fallback: str | None, source_dict: dict, results: list, 
 
 def get_lora(key: str, fallback: str | None, source_dict: dict, results: list, performance_filename: str | None):
     try:
-        split_data = source_dict.get(key, source_dict.get(fallback)).split(' : ')
+        raw_value = source_dict.get(key, source_dict.get(fallback))
+        if raw_value is None:
+            raise ValueError(f"Missing value for {key}")
+        
+        raw_str = str(raw_value).strip()
+        if not raw_str or raw_str == 'None':
+            raise ValueError(f"Empty value for {key}")
+        
+        split_data = [s.strip() for s in raw_str.split(' : ')]
+        
         enabled = True
-        name = split_data[0]
-        weight = split_data[1]
+        name = ''
+        weight = 1.0
 
-        if len(split_data) == 3:
-            enabled = split_data[0] == 'True'
+        if len(split_data) == 2:
+            name = split_data[0]
+            weight_str = split_data[1]
+        elif len(split_data) == 3:
+            enabled_str = split_data[0]
+            if enabled_str == 'True' or enabled_str == 'true' or enabled_str == '1':
+                enabled = True
+            elif enabled_str == 'False' or enabled_str == 'false' or enabled_str == '0':
+                enabled = False
+            else:
+                enabled = bool(enabled_str)
             name = split_data[1]
-            weight = split_data[2]
+            weight_str = split_data[2]
+        else:
+            raise ValueError(f"Invalid LoRA format: {raw_str}")
 
-        if name == performance_filename:
-            raise Exception
+        if name == performance_filename or (performance_filename is not None and name == Path(performance_filename).stem):
+            raise Exception("Skipping performance LoRA")
 
-        weight = float(weight)
+        if not name or name == 'None':
+            raise ValueError(f"Invalid LoRA name: {name}")
+
+        parsed_weight = safe_parse_float(weight_str)
+        if parsed_weight is None:
+            raise ValueError(f"Invalid LoRA weight: {weight_str}")
+        weight = parsed_weight
+
         results.append(enabled)
         results.append(name)
         results.append(weight)
@@ -416,10 +739,12 @@ class A1111MetadataParser(MetadataParser):
         data['styles'] = str(found_styles)
 
         # try to load performance based on steps, fallback for direct A1111 imports
-        if 'steps' in data and 'performance' in data is None:
+        if 'steps' in data and data.get('performance') in [None, '']:
             try:
-                data['performance'] = Performance.by_steps(data['steps']).value
-            except ValueError | KeyError:
+                steps_val = safe_parse_int(data['steps'])
+                if steps_val is not None:
+                    data['performance'] = Performance.by_steps(steps_val).value
+            except (ValueError, KeyError):
                 pass
 
         if 'sampler' in data:
@@ -459,14 +784,17 @@ class A1111MetadataParser(MetadataParser):
     def to_string(self, metadata: dict) -> str:
         data = {k: v for _, k, v in metadata}
 
-        width, height = eval(data['resolution'])
+        resolution = safe_parse_resolution(data['resolution'])
+        if resolution is None:
+            raise ValueError(f"Invalid resolution: {data['resolution']}")
+        width, height = resolution
 
         sampler = data['sampler']
         scheduler = data['scheduler']
 
         if sampler in SAMPLERS and SAMPLERS[sampler] != '':
             sampler = SAMPLERS[sampler]
-            if sampler not in CIVITAI_NO_KARRAS and scheduler == 'karras':
+            if sampler not in CIVITAI_NO_KARRAS and scheduler == 'karras' and not sampler.endswith(' Karras'):
                 sampler += f' Karras'
 
         generation_params = {
@@ -604,31 +932,58 @@ def get_metadata_parser(metadata_scheme: MetadataScheme) -> MetadataParser:
             raise NotImplementedError
 
 
-def read_info_from_image(file) -> tuple[str | None, MetadataScheme | None]:
+def _decode_exif_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        try:
+            if value.startswith(b'ASCII\x00\x00\x00'):
+                value = value[8:]
+            elif value.startswith(b'UNICODE\x00'):
+                value = value[8:]
+            return value.decode('utf-8', errors='replace')
+        except Exception:
+            try:
+                return value.decode('utf-16', errors='replace')
+            except Exception:
+                return None
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def read_info_from_image(file) -> tuple[str | dict | None, MetadataScheme | None]:
     items = (file.info or {}).copy()
 
     parameters = items.pop('parameters', None)
     metadata_scheme = items.pop('fooocus_scheme', None)
     exif = items.pop('exif', None)
 
+    parameters = _decode_exif_value(parameters)
+    metadata_scheme = _decode_exif_value(metadata_scheme)
+
     if parameters is not None and is_json(parameters):
         parameters = json.loads(parameters)
     elif exif is not None:
-        exif = file.getexif()
-        # 0x9286 = UserComment
-        parameters = exif.get(0x9286, None)
-        # 0x927C = MakerNote
-        metadata_scheme = exif.get(0x927C, None)
+        try:
+            exif = file.getexif()
+            parameters = exif.get(0x9286, None)
+            metadata_scheme = exif.get(0x927C, None)
+            
+            parameters = _decode_exif_value(parameters)
+            metadata_scheme = _decode_exif_value(metadata_scheme)
 
-        if is_json(parameters):
-            parameters = json.loads(parameters)
+            if parameters is not None and is_json(parameters):
+                parameters = json.loads(parameters)
+        except Exception as e:
+            print(f"[Read Metadata] Failed to read EXIF: {e}")
 
     try:
-        metadata_scheme = MetadataScheme(metadata_scheme)
+        if metadata_scheme is not None:
+            metadata_scheme = MetadataScheme(metadata_scheme)
     except ValueError:
         metadata_scheme = None
 
-        # broad fallback
         if isinstance(parameters, dict):
             metadata_scheme = MetadataScheme.FOOOCUS
 
@@ -640,11 +995,13 @@ def read_info_from_image(file) -> tuple[str | None, MetadataScheme | None]:
 
 def get_exif(metadata: str | None, metadata_scheme: str):
     exif = Image.Exif()
-    # tags see see https://github.com/python-pillow/Pillow/blob/9.2.x/src/PIL/ExifTags.py
+    # tags see https://github.com/python-pillow/Pillow/blob/9.2.x/src/PIL/ExifTags.py
     # 0x9286 = UserComment
-    exif[0x9286] = metadata
+    if metadata is not None:
+        exif[0x9286] = metadata.encode('utf-8')
     # 0x0131 = Software
     exif[0x0131] = 'Fooocus v' + fooocus_version.version
     # 0x927C = MakerNote
-    exif[0x927C] = metadata_scheme
+    if metadata_scheme is not None:
+        exif[0x927C] = metadata_scheme.encode('utf-8')
     return exif
