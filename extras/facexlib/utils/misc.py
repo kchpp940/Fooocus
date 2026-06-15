@@ -58,6 +58,9 @@ def img2tensor(imgs, bgr2rgb=True, float32=True):
 
 def load_file_from_url(url, model_dir=None, progress=True, file_name=None, save_dir=None):
     """Ref:https://github.com/1adrianb/face-alignment/blob/master/face_alignment/utils.py
+
+    Uses atomic download pattern: downloads to a temporary .part file first,
+    then atomically renames to the final filename.
     """
     if model_dir is None:
         hub_dir = get_dir()
@@ -72,9 +75,44 @@ def load_file_from_url(url, model_dir=None, progress=True, file_name=None, save_
     if file_name is not None:
         filename = file_name
     cached_file = os.path.abspath(os.path.join(save_dir, filename))
-    if not os.path.exists(cached_file):
-        print(f'Downloading: "{url}" to {cached_file}\n')
-        download_url_to_file(url, cached_file, hash_prefix=None, progress=progress)
+
+    if os.path.exists(cached_file):
+        return cached_file
+
+    temp_file = cached_file + '.part'
+
+    if os.path.exists(temp_file):
+        print(f'[Download] Removing stale temp file {temp_file}')
+        try:
+            os.remove(temp_file)
+        except OSError:
+            pass
+
+    print(f'Downloading: "{url}" to {cached_file}\n')
+
+    try:
+        download_url_to_file(url, temp_file, hash_prefix=None, progress=progress)
+    except Exception:
+        if os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except OSError:
+                pass
+        raise
+
+    if not os.path.exists(temp_file):
+        raise RuntimeError(f'Download failed: temp file {temp_file} was not created')
+
+    try:
+        os.replace(temp_file, cached_file)
+    except OSError as e:
+        try:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+        except OSError:
+            pass
+        raise RuntimeError(f'Failed to finalize download: {e}')
+
     return cached_file
 
 

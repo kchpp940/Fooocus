@@ -147,6 +147,11 @@ config.default_base_model_name, config.checkpoint_downloads = download_models(
     config.embeddings_downloads, config.lora_downloads, config.vae_downloads)
 
 config.update_files()
-init_cache(config.model_filenames, config.paths_checkpoints, config.lora_filenames, config.paths_loras)
+init_cache(
+    config.model_filenames, config.paths_checkpoints,
+    config.lora_filenames, config.paths_loras,
+    config.vae_filenames, config.path_vae,
+    config.embedding_filenames, config.path_embeddings
+)
 
 from webui import *
