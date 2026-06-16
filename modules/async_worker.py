@@ -19,18 +19,16 @@ class TaskStatus(Enum):
 
 
 class FinishEnvelope:
-    def __init__(self, status, results=None, error=None, should_restore_ui=True):
+    def __init__(self, status, results=None, error=None):
         self.status = status
         self.results = results if results is not None else []
         self.error = error
-        self.should_restore_ui = should_restore_ui
 
     def to_dict(self):
         return {
             'status': self.status.value if isinstance(self.status, TaskStatus) else self.status,
             'results': self.results,
             'error': self.error,
-            'should_restore_ui': self.should_restore_ui,
         }
 
 
@@ -1543,11 +1541,9 @@ def worker():
                     build_image_wall(task)
                 if task.status == TaskStatus.RUNNING:
                     task.mark_finished()
-                should_restore = task.status in (TaskStatus.STOPPED, TaskStatus.SKIPPED, TaskStatus.FAILED)
                 envelope = FinishEnvelope(
                     status=task.status,
-                    results=task.results,
-                    should_restore_ui=should_restore
+                    results=task.results
                 )
                 task.yields.append(['finish', envelope.to_dict()])
                 pipeline.prepare_text_encoder(async_call=True)
@@ -1557,8 +1553,7 @@ def worker():
                 envelope = FinishEnvelope(
                     status=task.status,
                     results=task.results,
-                    error=str(e),
-                    should_restore_ui=True
+                    error=str(e)
                 )
                 task.yields.append(['finish', envelope.to_dict()])
             finally:

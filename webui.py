@@ -43,6 +43,30 @@ def generate_clicked(task: worker.AsyncTask):
     finished = False
     final_results = []
 
+    def yield_finish(task_status, results, error=None):
+        if not args_manager.args.disable_enhance_output_sorting:
+            results = sort_enhance_images(results, task)
+
+        progress_title = None
+        if error:
+            progress_title = f'Generation failed: {error}'
+        elif task_status is not None:
+            from modules.async_worker import TaskStatus
+            if task_status == TaskStatus.STOPPED.value:
+                progress_title = 'Generation stopped by user'
+            elif task_status == TaskStatus.SKIPPED.value:
+                progress_title = 'Generation skipped by user'
+
+        if progress_title:
+            progress_html_update = gr.update(visible=True, value=modules.html.make_progress_html(100, progress_title))
+        else:
+            progress_html_update = gr.update(visible=False)
+
+        return progress_html_update, \
+            gr.update(visible=False), \
+            gr.update(visible=False), \
+            gr.update(visible=True, value=results)
+
     try:
         yield gr.update(visible=True, value=modules.html.make_progress_html(1, 'Waiting for task to start ...')), \
             gr.update(visible=True, value=None), \
@@ -78,37 +102,14 @@ def generate_clicked(task: worker.AsyncTask):
                         task_status = envelope.get('status')
                         results = envelope.get('results', [])
                         error = envelope.get('error')
-                        should_restore_ui = envelope.get('should_restore_ui', False)
                     else:
                         task_status = None
                         results = envelope if envelope is not None else []
                         error = None
-                        should_restore_ui = False
-
-                    if not args_manager.args.disable_enhance_output_sorting:
-                        results = sort_enhance_images(results, task)
 
                     final_results = results
 
-                    progress_title = None
-                    if error:
-                        progress_title = f'Generation failed: {error}'
-                    elif task_status is not None:
-                        from modules.async_worker import TaskStatus
-                        if task_status == TaskStatus.STOPPED.value:
-                            progress_title = 'Generation stopped by user'
-                        elif task_status == TaskStatus.SKIPPED.value:
-                            progress_title = 'Generation skipped by user'
-
-                    if progress_title:
-                        progress_html_update = gr.update(visible=True, value=modules.html.make_progress_html(100, progress_title))
-                    else:
-                        progress_html_update = gr.update(visible=False)
-
-                    yield progress_html_update, \
-                        gr.update(visible=False), \
-                        gr.update(visible=False), \
-                        gr.update(visible=True, value=results)
+                    yield yield_finish(task_status, results, error)
                     finished = True
 
                     # delete Fooocus temp images, only keep gradio temp images
@@ -121,10 +122,7 @@ def generate_clicked(task: worker.AsyncTask):
             if not args_manager.args.disable_enhance_output_sorting:
                 final_results = sort_enhance_images(task.results, task)
 
-            yield gr.update(visible=False), \
-                gr.update(visible=False), \
-                gr.update(visible=False), \
-                gr.update(visible=True, value=final_results) if len(final_results) > 0 else gr.update(visible=True)
+            yield yield_finish(None, final_results)
 
     execution_time = time.perf_counter() - execution_start_time
     print(f'Total time: {execution_time:.2f} seconds')
