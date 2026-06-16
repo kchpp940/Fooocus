@@ -1,6 +1,5 @@
 import os
 import json
-import time
 from modules.config import get_user_data_dir
 
 

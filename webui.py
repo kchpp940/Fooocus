@@ -254,22 +254,7 @@ with shared.gradio_root:
     inpaint_engine_state = gr.State('empty')
 
     def get_style_metadata():
-        import json
-        from modules import style_sorter, sdxl_styles, style_prefs
-        source_map = {}
-        for style_name in sdxl_styles.style_keys:
-            source = sdxl_styles.get_style_source(style_name)
-            if source not in source_map:
-                source_map[source] = []
-            source_map[source].append(style_name)
-        metadata = {
-            'favorites': style_sorter.get_favorites(),
-            'recentlyUsed': style_sorter.get_recently_used(),
-            'groupBy': style_sorter.get_group_by(),
-            'filter': style_sorter.get_filter(),
-            'sourceMap': source_map
-        }
-        return f'<script id="style-metadata-data" type="application/json">{json.dumps(metadata, ensure_ascii=False)}</script>'
+        return style_sorter.build_metadata_html()
 
     style_metadata_html = gr.HTML(value=get_style_metadata(), visible=False, elem_id='style_metadata_container')
     with gr.Row():
@@ -785,29 +770,13 @@ with shared.gradio_root:
                 initial_group = style_sorter.get_group_by()
                 initial_group_label = initial_group.capitalize() if initial_group != 'none' else 'None'
 
-                filter_all_classes = ['style_filter_btn']
-                filter_fav_classes = ['style_filter_btn']
-                filter_recent_classes = ['style_filter_btn']
-                if initial_filter == 'all':
-                    filter_all_classes.append('style_filter_active')
-                    filter_all_variant = 'primary'
-                    filter_fav_variant = 'secondary'
-                    filter_recent_variant = 'secondary'
-                elif initial_filter == 'favorites':
-                    filter_fav_classes.append('style_filter_active')
-                    filter_all_variant = 'secondary'
-                    filter_fav_variant = 'primary'
-                    filter_recent_variant = 'secondary'
-                else:
-                    filter_recent_classes.append('style_filter_active')
-                    filter_all_variant = 'secondary'
-                    filter_fav_variant = 'secondary'
-                    filter_recent_variant = 'primary'
-
                 with gr.Row(elem_classes=['style_filter_bar']):
-                    style_filter_all = gr.Button('All', variant=filter_all_variant, elem_classes=filter_all_classes)
-                    style_filter_favorites = gr.Button('Favorites', variant=filter_fav_variant, elem_classes=filter_fav_classes)
-                    style_filter_recent = gr.Button('Recent', variant=filter_recent_variant, elem_classes=filter_recent_classes)
+                    style_filter_all = gr.Button('All', variant='primary' if initial_filter == 'all' else 'secondary',
+                                                 elem_classes=['style_filter_btn'] + (['style_filter_active'] if initial_filter == 'all' else []))
+                    style_filter_favorites = gr.Button('Favorites', variant='primary' if initial_filter == 'favorites' else 'secondary',
+                                                       elem_classes=['style_filter_btn'] + (['style_filter_active'] if initial_filter == 'favorites' else []))
+                    style_filter_recent = gr.Button('Recent', variant='primary' if initial_filter == 'recent' else 'secondary',
+                                                    elem_classes=['style_filter_btn'] + (['style_filter_active'] if initial_filter == 'recent' else []))
                     style_group_by = gr.Dropdown(
                         label='Group by',
                         choices=['None', 'Source', 'Favorites'],
@@ -828,94 +797,73 @@ with shared.gradio_root:
                                                     elem_classes=['style_selections'])
                 gradio_receiver_style_selections = gr.Textbox(elem_id='gradio_receiver_style_selections', visible=False)
                 gradio_receiver_favorite_toggle = gr.Textbox(elem_id='gradio_receiver_favorite_toggle', visible=False)
-                current_style_filter = gr.State('all')
-                current_style_group = gr.State('none')
-
-                def set_filter_mode(selected, filter_mode, current_group):
-                    style_sorter.set_filter(filter_mode)
-                    return style_sorter.refresh_styles_display(selected, filter_mode, current_group), filter_mode
-
-                def set_group_mode(selected, group_mode, current_filter):
-                    group_key = group_mode.lower() if group_mode else 'none'
-                    style_sorter.set_group_by(group_key)
-                    return style_sorter.refresh_styles_display(selected, current_filter, group_key), group_key
-
-                def toggle_favorite(style_name, selected, current_filter, current_group):
-                    style_sorter.toggle_favorite(style_name)
-                    return style_sorter.refresh_styles_display(selected, current_filter, current_group)
+                current_style_filter = gr.State(initial_filter)
+                current_style_group = gr.State(initial_group)
 
                 style_filter_all.click(
-                    set_filter_mode,
+                    style_sorter.set_filter_and_refresh,
                     inputs=[style_selections, gr.State('all'), current_style_group],
-                    outputs=[style_selections, current_style_filter],
+                    outputs=[style_selections, current_style_filter, style_metadata_html],
                     queue=False,
                     show_progress=False
-                ).then(lambda: None, _js='()=>{setActiveStyleFilter("all"); refresh_style_localization();}')
+                ).then(lambda: None, _js='()=>{setActiveStyleFilter("all"); loadStyleMetadata(); refresh_style_localization();}')
 
                 style_filter_favorites.click(
-                    set_filter_mode,
+                    style_sorter.set_filter_and_refresh,
                     inputs=[style_selections, gr.State('favorites'), current_style_group],
-                    outputs=[style_selections, current_style_filter],
+                    outputs=[style_selections, current_style_filter, style_metadata_html],
                     queue=False,
                     show_progress=False
-                ).then(lambda: None, _js='()=>{setActiveStyleFilter("favorites"); refresh_style_localization();}')
+                ).then(lambda: None, _js='()=>{setActiveStyleFilter("favorites"); loadStyleMetadata(); refresh_style_localization();}')
 
                 style_filter_recent.click(
-                    set_filter_mode,
+                    style_sorter.set_filter_and_refresh,
                     inputs=[style_selections, gr.State('recent'), current_style_group],
-                    outputs=[style_selections, current_style_filter],
+                    outputs=[style_selections, current_style_filter, style_metadata_html],
                     queue=False,
                     show_progress=False
-                ).then(lambda: None, _js='()=>{setActiveStyleFilter("recent"); refresh_style_localization();}')
+                ).then(lambda: None, _js='()=>{setActiveStyleFilter("recent"); loadStyleMetadata(); refresh_style_localization();}')
 
                 style_group_by.change(
-                    set_group_mode,
+                    style_sorter.set_group_and_refresh,
                     inputs=[style_selections, style_group_by, current_style_filter],
-                    outputs=[style_selections, current_style_group],
+                    outputs=[style_selections, current_style_group, style_metadata_html],
                     queue=False,
                     show_progress=False
-                ).then(lambda x: None, inputs=[style_group_by], _js='(x)=>{setActiveGroupBy(x); refresh_style_localization();}')
+                ).then(lambda x: None, inputs=[style_group_by], _js='(x)=>{setActiveGroupBy(x); loadStyleMetadata(); refresh_style_localization();}')
 
                 def initial_style_load():
-                    return style_sorter.refresh_styles_display(
+                    return style_sorter.refresh_style_choices(
                         modules.config.default_styles,
                         initial_filter,
                         initial_group
                     )
 
                 shared.gradio_root.load(initial_style_load,
-                                        outputs=style_selections).then(
+                                        outputs=[style_selections, style_metadata_html]).then(
                     lambda: None, _js=f'()=>{{setActiveStyleFilter("{initial_filter}"); setActiveGroupBy("{initial_group_label}"); initializeStyleManagement(); refresh_style_localization();}}')
 
                 style_search_bar.change(style_sorter.search_styles,
                                         inputs=[style_selections, style_search_bar, current_style_filter, current_style_group],
-                                        outputs=style_selections,
+                                        outputs=[style_selections, style_metadata_html],
                                         queue=False,
                                         show_progress=False).then(
-                    lambda: None, _js='()=>{refresh_style_localization();}')
+                    lambda: None, _js='()=>{loadStyleMetadata(); refresh_style_localization();}')
 
                 gradio_receiver_style_selections.input(style_sorter.sort_styles,
-                                                       inputs=style_selections,
-                                                       outputs=style_selections,
+                                                       inputs=[style_selections],
+                                                       outputs=[style_selections, style_metadata_html],
                                                        queue=False,
                                                        show_progress=False).then(
-                    lambda: None, _js='()=>{refresh_style_localization();}')
+                    lambda: None, _js='()=>{loadStyleMetadata(); refresh_style_localization();}')
 
                 gradio_receiver_favorite_toggle.input(
-                    toggle_favorite,
+                    style_sorter.toggle_favorite_and_refresh,
                     inputs=[gradio_receiver_favorite_toggle, style_selections, current_style_filter, current_style_group],
-                    outputs=[style_selections],
+                    outputs=[style_selections, style_metadata_html],
                     queue=False,
                     show_progress=False
-                ).then(lambda: None, _js='()=>{refresh_style_localization();}')
-
-                style_selections.change(
-                    lambda selected: style_sorter.refresh_styles_display(selected, current_style_filter.value, current_style_group.value),
-                    inputs=[style_selections],
-                    outputs=[style_selections],
-                    queue=False,
-                    show_progress=False
-                )
+                ).then(lambda: None, _js='()=>{loadStyleMetadata(); refresh_style_localization();}')
 
             with gr.Tab(label='Models'):
                 with gr.Group():
@@ -1313,7 +1261,7 @@ with shared.gradio_root:
             return modules.meta_parser.load_parameter_button_click(parsed_parameters, state_is_generating, inpaint_mode)
 
         metadata_import_button.click(trigger_metadata_import, inputs=[metadata_input_image, state_is_generating], outputs=load_data_outputs, queue=False, show_progress=True) \
-            .then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)
+            .then(style_sorter.sort_styles, inputs=style_selections, outputs=[style_selections, style_metadata_html], queue=False, show_progress=False)
 
         def track_style_usage_and_get_task(selected_styles, *args):
             if isinstance(selected_styles, (list, tuple)):

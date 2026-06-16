@@ -266,7 +266,8 @@ var styleFavoritesData = {
     favorites: [],
     recentlyUsed: [],
     groupBy: 'none',
-    filter: 'all'
+    filter: 'all',
+    sourceMap: {}
 };
 
 function updateStyleFavoritesData(data) {
@@ -286,28 +287,24 @@ function addFavoriteStarsToStyles() {
     var container = document.querySelector('.style_selections .wrap[data-testid="checkbox-group"]');
     if (!container) return;
 
-    var labels = container.querySelectorAll('label');
-    labels.forEach(function(label) {
-        if (label.classList.contains('style-item')) return;
+    container.querySelectorAll('.style_favorite_star').forEach(function(star) {
+        star.remove();
+    });
 
-        label.classList.add('style-item');
+    container.querySelectorAll('label').forEach(function(label) {
+        if (label.querySelector('.style_favorite_star')) return;
 
         var styleName = getStyleNameFromLabel(label);
         if (!styleName) return;
 
-        var existingStar = label.querySelector('.style_favorite_star');
-        if (existingStar) {
-            existingStar.remove();
-        }
-
         var star = document.createElement('span');
         star.className = 'style_favorite_star';
-        star.innerHTML = '☆';
+        star.innerHTML = '\u2606';
         star.title = 'Add to Favorites';
 
-        if (styleFavoritesData.favorites.includes(styleName)) {
+        if (styleFavoritesData.favorites.indexOf(styleName) > -1) {
             star.classList.add('is_favorite');
-            star.innerHTML = '★';
+            star.innerHTML = '\u2605';
             star.title = 'Remove from Favorites';
         }
 
@@ -327,13 +324,6 @@ function toggleFavoriteStyle(styleName) {
         receiver.value = styleName;
         var event = new Event('input', { bubbles: true });
         receiver.dispatchEvent(event);
-    }
-
-    var idx = styleFavoritesData.favorites.indexOf(styleName);
-    if (idx > -1) {
-        styleFavoritesData.favorites.splice(idx, 1);
-    } else {
-        styleFavoritesData.favorites.push(styleName);
     }
 }
 
@@ -379,7 +369,7 @@ function addStyleGroupHeaders() {
         return;
     }
 
-    var labels = container.querySelectorAll('label.style-item');
+    var labels = container.querySelectorAll('label');
     var currentGroup = null;
 
     labels.forEach(function(label) {
@@ -399,12 +389,12 @@ function addStyleGroupHeaders() {
 }
 
 function getStyleGroup(styleName) {
-    if (['Fooocus V2', 'Random Style'].includes(styleName)) {
+    if (['Fooocus V2', 'Random Style'].indexOf(styleName) > -1) {
         return 'Quick Access';
     }
 
     if (styleFavoritesData.groupBy === 'favorites') {
-        return styleFavoritesData.favorites.includes(styleName) ? 'Favorites' : 'All Styles';
+        return styleFavoritesData.favorites.indexOf(styleName) > -1 ? 'Favorites' : 'All Styles';
     }
 
     if (styleFavoritesData.groupBy === 'source') {
@@ -418,7 +408,7 @@ function getStyleGroup(styleName) {
         };
 
         for (var source in styleFavoritesData.sourceMap || {}) {
-            if (styleFavoritesData.sourceMap[source].includes(styleName)) {
+            if (styleFavoritesData.sourceMap[source].indexOf(styleName) > -1) {
                 return sourceLabels[source] || source;
             }
         }
