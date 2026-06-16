@@ -28,6 +28,7 @@ user_path_config-deprecated.txt
 /outputs
 /config.json
 /log
+/user_data/
 /webui.settings.bat
 /embeddings
 /styles.csv

@@ -181,10 +181,10 @@ def get_dir_or_set_default(key, default_value, as_array=False, make_directory=Fa
         for path in default_value:
             abs_path = os.path.abspath(os.path.join(os.path.dirname(__file__), path))
             dp.append(abs_path)
-            os.makedirs(abs_path, exist_ok=True)
+            makedirs_with_log(abs_path)
     else:
         dp = os.path.abspath(os.path.join(os.path.dirname(__file__), default_value))
-        os.makedirs(dp, exist_ok=True)
+        makedirs_with_log(dp)
         if as_array:
             dp = [dp]
     config_dict[key] = dp
@@ -205,6 +205,15 @@ path_wildcards = get_dir_or_set_default('path_wildcards', '../wildcards/')
 path_safety_checker = get_dir_or_set_default('path_safety_checker', '../models/safety_checker/')
 path_sam = get_dir_or_set_default('path_sam', '../models/sam/')
 path_outputs = get_path_output()
+
+_datadir = os.getenv('DATADIR')
+if _datadir is not None and isinstance(_datadir, str) and _datadir.strip() != '':
+    _user_data_default = _datadir
+else:
+    _user_data_default = '../user_data/'
+
+path_user_data = get_dir_or_set_default('path_user_data', _user_data_default, make_directory=True)
+sorted_styles_path = os.path.join(path_user_data, 'sorted_styles.json')
 
 
 def get_config_item_or_set_default(key, default_value, validator, disable_empty_as_none=False, expected_type=None):

@@ -34,7 +34,6 @@ docker run -p 7865:7865 -v fooocus-data:/content/data -it \
 -e path_controlnet=/content/data/models/controlnet/ \
 -e path_clip_vision=/content/data/models/clip_vision/ \
 -e path_fooocus_expansion=/content/data/models/prompt_expansion/fooocus_expansion/ \
--e sorted_styles_path=/content/data/sorted_styles.json \
 -e path_outputs=/content/app/outputs/ \
 ghcr.io/lllyasviel/fooocus
 ```
@@ -56,7 +55,6 @@ podman run -p 7865:7865 -v fooocus-data:/content/data -it \
 -e path_controlnet=/content/data/models/controlnet/ \
 -e path_clip_vision=/content/data/models/clip_vision/ \
 -e path_fooocus_expansion=/content/data/models/prompt_expansion/fooocus_expansion/ \
--e sorted_styles_path=/content/data/sorted_styles.json \
 -e path_outputs=/content/app/outputs/ \
 ghcr.io/lllyasviel/fooocus
 ```
@@ -120,7 +118,7 @@ Docker specified environments are there. They are used by 'entrypoint.sh'
 |CMDARGS|Arguments for [entry_with_update.py](entry_with_update.py) which is called by [entrypoint.sh](entrypoint.sh)|
 |config_path|'config.txt' location|
 |config_example_path|'config_modification_tutorial.txt' location|
-|sorted_styles_path|'sorted_styles.json' location|
+|path_user_data|Directory for user-writable state (style sorting, etc.)|
 |HF_MIRROR| huggingface mirror site domain| 
 
 You can also use the same json key names and values explained in the 'config_modification_tutorial.txt' as the environments.
