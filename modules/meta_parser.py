@@ -826,11 +826,21 @@ def safe_extract_loras(data: dict) -> list:
 
 
 def build_standard_apply_metadata(image_path: str | None, embedded_parsed: dict | None,
-                                  log_parsed: dict | None, metadata_scheme=None) -> tuple[dict, dict]:
-    result = {}
-    sources = {}
+                                  log_parsed: dict | None, metadata_scheme=None) -> tuple[dict, dict, list]:
+    """
+    构建标准回填 metadata，返回三元组：
+      (apply_metadata: dict, apply_sources: dict, dropped_keys: list)
+
+    - apply_metadata: 仅含白名单 key 的可回填参数字典
+    - apply_sources: 每个 key 的来源: embedded / log / default
+    - dropped_keys: 输入中有但不在白名单里、被丢弃的 key 列表
+    """
+    apply_data = {}
+    apply_sources = {}
+    dropped_keys = []
+
     lora_keys = _get_standard_lora_keys()
-    all_apply_keys = list(STANDARD_APPLY_KEYS) + lora_keys
+    all_apply_keys = set(list(STANDARD_APPLY_KEYS) + lora_keys)
 
     try:
         model_filenames = modules.config.model_filenames
@@ -845,58 +855,47 @@ def build_standard_apply_metadata(image_path: str | None, embedded_parsed: dict 
     except Exception:
         lora_filenames = []
 
+    def _normalize_value(key, val):
+        try:
+            if key in ('base_model', 'refiner_model'):
+                return _normalize_model_filename(val, model_filenames)
+            elif key == 'vae':
+                return _normalize_model_filename(val, vae_filenames)
+            elif key.startswith('lora_combined_'):
+                return _normalize_lora_filename(val, lora_filenames)
+        except Exception:
+            pass
+        return val
+
     if embedded_parsed is not None and isinstance(embedded_parsed, dict):
-        for key in all_apply_keys:
-            if not _has_valid_field(embedded_parsed, key):
-                continue
-            val = embedded_parsed[key]
-            try:
-                if key in ('base_model', 'refiner_model'):
-                    val = _normalize_model_filename(val, model_filenames)
-                elif key == 'vae':
-                    val = _normalize_model_filename(val, vae_filenames)
-                elif key.startswith('lora_combined_'):
-                    val = _normalize_lora_filename(val, lora_filenames)
-            except Exception:
-                pass
-            result[key] = val
-            sources[key] = 'embedded'
+        for key, val in embedded_parsed.items():
+            if key in all_apply_keys:
+                if _has_valid_field(embedded_parsed, key):
+                    norm_val = _normalize_value(key, val)
+                    apply_data[key] = norm_val
+                    apply_sources[key] = 'embedded'
+            else:
+                dropped_keys.append(key)
 
     if log_parsed is not None and isinstance(log_parsed, dict):
-        for key in STANDARD_APPLY_KEYS:
-            if _has_valid_field(result, key):
-                continue
-            if not _has_valid_field(log_parsed, key):
-                continue
-            val = log_parsed[key]
-            try:
-                if key in ('base_model', 'refiner_model'):
-                    val = _normalize_model_filename(val, model_filenames)
-                elif key == 'vae':
-                    val = _normalize_model_filename(val, vae_filenames)
-            except Exception:
-                pass
-            result[key] = val
-            sources[key] = 'log'
+        for key, val in log_parsed.items():
+            if key in all_apply_keys:
+                if _has_valid_field(apply_data, key):
+                    continue
+                if not _has_valid_field(log_parsed, key):
+                    continue
+                norm_val = _normalize_value(key, val)
+                apply_data[key] = norm_val
+                apply_sources[key] = 'log'
+            else:
+                if key not in dropped_keys:
+                    dropped_keys.append(key)
 
-        for key in lora_keys:
-            if _has_valid_field(result, key):
-                continue
-            if not _has_valid_field(log_parsed, key):
-                continue
-            val = log_parsed[key]
-            try:
-                val = _normalize_lora_filename(val, lora_filenames)
-            except Exception:
-                pass
-            result[key] = val
-            sources[key] = 'log'
+    if not _has_valid_field(apply_data, 'image_number'):
+        apply_data['image_number'] = 1
+        apply_sources['image_number'] = 'default'
 
-    if not _has_valid_field(result, 'image_number'):
-        result['image_number'] = 1
-        sources['image_number'] = 'default'
-
-    return result, sources
+    return apply_data, apply_sources, dropped_keys
 
 
 def extract_comparison_data(file) -> dict:
@@ -906,9 +905,10 @@ def extract_comparison_data(file) -> dict:
         'raw_metadata': None,
         'log_metadata': None,
         'merged_metadata': None,
-        'apply_metadata': None,
-        'apply_sources': None,
-        'apply_source_summary': {},
+        'apply_metadata': {},
+        'apply_sources': {},
+        'apply_dropped_keys': [],
+        'apply_source_summary': {'embedded': 0, 'log': 0, 'default': 0},
         'metadata_scheme': None,
         'metadata_source': 'none',
         'image_path': None,
@@ -966,11 +966,12 @@ def extract_comparison_data(file) -> dict:
                     merged[k] = v
         result['merged_metadata'] = merged if merged else None
         try:
-            apply_data, apply_src = build_standard_apply_metadata(
+            apply_data, apply_src, dropped = build_standard_apply_metadata(
                 image_path, embedded_parsed, log_parsed, metadata_scheme
             )
             result['apply_metadata'] = apply_data
             result['apply_sources'] = apply_src
+            result['apply_dropped_keys'] = dropped
             source_counts = {'embedded': 0, 'log': 0, 'default': 0}
             for k, s in apply_src.items():
                 if s in source_counts:
@@ -979,6 +980,7 @@ def extract_comparison_data(file) -> dict:
         except Exception:
             result['apply_metadata'] = {}
             result['apply_sources'] = {}
+            result['apply_dropped_keys'] = []
             result['apply_source_summary'] = {'embedded': 0, 'log': 0, 'default': 0}
         for key, label, ftype in COMPARISON_FIELDS:
             value, ok = safe_extract_field(merged, key, label, ftype)
@@ -1041,7 +1043,11 @@ def compare_metadata(data_a: dict, data_b: dict) -> dict:
             'b': data_b.get('error')
         },
         'source_a': data_a.get('metadata_source', 'none'),
-        'source_b': data_b.get('metadata_source', 'none')
+        'source_b': data_b.get('metadata_source', 'none'),
+        'apply_source_summary_a': data_a.get('apply_source_summary', {}),
+        'apply_source_summary_b': data_b.get('apply_source_summary', {}),
+        'apply_dropped_keys_a': data_a.get('apply_dropped_keys', []),
+        'apply_dropped_keys_b': data_b.get('apply_dropped_keys', [])
     }
     fields_a = data_a.get('fields', {})
     fields_b = data_b.get('fields', {})
@@ -1186,6 +1192,15 @@ def render_comparison_html(comparison: dict, data_a: dict, data_b: dict) -> str:
     .cmp-src-indicator { font-size: 10px; margin-left: 4px; opacity: 0.7; }
     .cmp-legend { background: #1e1e1e; padding: 8px 16px; border-radius: 6px; margin-bottom: 12px; font-size: 11px; color: #aaa; }
     .cmp-legend-item { display: inline-block; margin-right: 14px; }
+    .cmp-apply-summary { background: #1a1a2a; padding: 10px 16px; border-radius: 6px; margin-bottom: 14px; font-size: 12px; border-left: 3px solid #4a6baf; }
+    .cmp-apply-title { font-weight: 600; color: #b0c4ff; margin-bottom: 6px; font-size: 13px; }
+    .cmp-apply-row { display: grid; grid-template-columns: 18% 41% 41%; gap: 8px; }
+    .cmp-apply-col { padding: 4px 8px; }
+    .cmp-apply-badge { display: inline-block; padding: 2px 8px; border-radius: 8px; font-size: 11px; margin-right: 6px; margin-bottom: 3px; }
+    .cmp-apply-badge-emb { background: #1f3a2a; color: #90ee90; }
+    .cmp-apply-badge-log { background: #3a3520; color: #ffd700; }
+    .cmp-apply-badge-def { background: #2a2a2a; color: #999; }
+    .cmp-apply-badge-drop { background: #3a1f1f; color: #ff9999; }
     </style>
     """
     parts = [css, '<div class="cmp-container">']
@@ -1210,6 +1225,31 @@ def render_comparison_html(comparison: dict, data_a: dict, data_b: dict) -> str:
         parts.append(f'<span class="cmp-badge cmp-badge-diff">LoRA differ</span>')
     parts.append(f'<span class="cmp-badge cmp-badge-src">A: {_source_summary_label(source_a)}</span>')
     parts.append(f'<span class="cmp-badge cmp-badge-src">B: {_source_summary_label(source_b)}</span>')
+    parts.append('</div></div>')
+    apply_sum_a = comparison.get('apply_source_summary_a', {})
+    apply_sum_b = comparison.get('apply_source_summary_b', {})
+    dropped_a = comparison.get('apply_dropped_keys_a', [])
+    dropped_b = comparison.get('apply_dropped_keys_b', [])
+    parts.append('<div class="cmp-apply-summary">')
+    parts.append('<div class="cmp-apply-title">📋 Apply parameter sources (what will actually be applied)</div>')
+    parts.append('<div class="cmp-apply-row">')
+    parts.append('<div class="cmp-apply-col"><b>Image A</b></div>')
+    parts.append('<div class="cmp-apply-col">')
+    parts.append(f'<span class="cmp-apply-badge cmp-apply-badge-emb">📷 Embedded: {apply_sum_a.get("embedded", 0)}</span>')
+    parts.append(f'<span class="cmp-apply-badge cmp-apply-badge-log">📝 Log: {apply_sum_a.get("log", 0)}</span>')
+    parts.append(f'<span class="cmp-apply-badge cmp-apply-badge-def">Default: {apply_sum_a.get("default", 0)}</span>')
+    if dropped_a:
+        parts.append(f'<br><span class="cmp-apply-badge cmp-apply-badge-drop" title="Unknown keys not used for apply">Dropped keys: {len(dropped_a)}</span>')
+        parts.append(f'<span style="font-size:11px;color:#ff9999;opacity:0.7;">{", ".join(dropped_a[:8])}</span>')
+    parts.append('</div>')
+    parts.append('<div class="cmp-apply-col">')
+    parts.append(f'<span class="cmp-apply-badge cmp-apply-badge-emb">📷 Embedded: {apply_sum_b.get("embedded", 0)}</span>')
+    parts.append(f'<span class="cmp-apply-badge cmp-apply-badge-log">📝 Log: {apply_sum_b.get("log", 0)}</span>')
+    parts.append(f'<span class="cmp-apply-badge cmp-apply-badge-def">Default: {apply_sum_b.get("default", 0)}</span>')
+    if dropped_b:
+        parts.append(f'<br><span class="cmp-apply-badge cmp-apply-badge-drop" title="Unknown keys not used for apply">Dropped keys: {len(dropped_b)}</span>')
+        parts.append(f'<span style="font-size:11px;color:#ff9999;opacity:0.7;">{", ".join(dropped_b[:8])}</span>')
+    parts.append('</div>')
     parts.append('</div></div>')
     parts.append('<table class="cmp-table">')
     parts.append('<thead><tr class="cmp-header-row">')
