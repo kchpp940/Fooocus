@@ -48,14 +48,17 @@ def generate_clicked(task: worker.AsyncTask):
             results = sort_enhance_images(results, task)
 
         progress_title = None
-        if error:
-            progress_title = f'Generation failed: {error}'
-        elif task_status is not None:
+        if task_status is not None:
             from modules.async_worker import TaskStatus
             if task_status == TaskStatus.STOPPED.value:
                 progress_title = 'Generation stopped by user'
             elif task_status == TaskStatus.SKIPPED.value:
                 progress_title = 'Generation skipped by user'
+            elif task_status == TaskStatus.FAILED.value:
+                progress_title = f'Generation failed: {error}' if error else 'Generation failed'
+
+        if progress_title is None and error:
+            progress_title = f'Generation failed: {error}'
 
         if progress_title:
             progress_html_update = gr.update(visible=True, value=modules.html.make_progress_html(100, progress_title))
