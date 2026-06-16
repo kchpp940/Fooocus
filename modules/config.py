@@ -206,13 +206,44 @@ path_safety_checker = get_dir_or_set_default('path_safety_checker', '../models/s
 path_sam = get_dir_or_set_default('path_sam', '../models/sam/')
 path_outputs = get_path_output()
 
-_datadir = os.getenv('DATADIR')
-if _datadir is not None and isinstance(_datadir, str) and _datadir.strip() != '':
-    _user_data_default = _datadir
-else:
-    _user_data_default = '../user_data/'
 
-path_user_data = get_dir_or_set_default('path_user_data', _user_data_default, make_directory=True)
+def _resolve_path_user_data():
+    global config_dict, visited_keys, always_save_keys
+
+    if 'path_user_data' not in visited_keys:
+        visited_keys.append('path_user_data')
+
+    env_explicit = os.getenv('path_user_data')
+    env_datadir = os.getenv('DATADIR')
+
+    if env_explicit is not None and isinstance(env_explicit, str) and env_explicit.strip() != '':
+        print(f"Environment: path_user_data = {env_explicit}")
+        resolved = env_explicit
+        if 'path_user_data' not in always_save_keys:
+            always_save_keys.append('path_user_data')
+    elif env_datadir is not None and isinstance(env_datadir, str) and env_datadir.strip() != '':
+        resolved = env_datadir
+    else:
+        from_config = config_dict.get('path_user_data', None)
+        if isinstance(from_config, str) and from_config.strip() != '':
+            resolved = from_config
+        else:
+            resolved = '../user_data/'
+
+    if not os.path.isabs(resolved):
+        resolved = os.path.abspath(os.path.join(os.path.dirname(__file__), resolved))
+
+    makedirs_with_log(resolved)
+
+    if not (os.path.exists(resolved) and os.path.isdir(resolved)):
+        print(f'Failed to resolve path_user_data: {resolved} is invalid or does not exist.')
+
+    config_dict['path_user_data'] = resolved
+
+    return resolved
+
+
+path_user_data = _resolve_path_user_data()
 sorted_styles_path = os.path.join(path_user_data, 'sorted_styles.json')
 
 
