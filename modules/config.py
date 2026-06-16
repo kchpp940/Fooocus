@@ -14,84 +14,26 @@ from modules.flags import OutputFormat, Performance, MetadataScheme
 
 _root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-_user_data_dir = None
-
 
 def get_user_data_dir():
-    """
-    Get the user data root directory.
-    
-    Resolution priority (highest to lowest):
-      1. FOOOCUS_USER_DATA_DIR / DATADIR env var (runtime override, never persisted)
-      2. path_user_data env var (user explicit, persists to config.txt)
-      3. path_user_data from config.txt (persisted user setting)
-      4. Default: ./user_data/ in project root (never persisted)
-    
-    Persistence rules:
-      - Value from source 1 (FOOOCUS_USER_DATA_DIR/DATADIR): never written back to config.txt
-      - Value from source 2 (path_user_data env): written back to config.txt (user explicit)
-      - Value from source 3 (config.txt): kept as-is
-      - Value from source 4 (default): never written back to config.txt
-    
-    This ensures Docker-mounted old config.txt cannot override runtime DATADIR.
-    """
-    global _user_data_dir
-    if _user_data_dir is not None:
-        return _user_data_dir
-
-    runtime_env = os.getenv('FOOOCUS_USER_DATA_DIR') or os.getenv('DATADIR')
-    user_env = os.getenv('path_user_data')
-    config_val = config_dict.get('path_user_data')
-    default_dir = os.path.join(_root_dir, 'user_data')
-
-    source = 'default'
-
-    if runtime_env:
-        _user_data_dir = os.path.abspath(runtime_env)
-        source = 'runtime_env'
-    elif user_env:
-        _user_data_dir = os.path.abspath(user_env)
-        source = 'user_env'
-    elif config_val:
-        if isinstance(config_val, list) and len(config_val) > 0:
-            _user_data_dir = os.path.abspath(config_val[0])
-        elif isinstance(config_val, str):
-            _user_data_dir = os.path.abspath(config_val)
-        else:
-            _user_data_dir = default_dir
-        source = 'config'
+    env_dir = os.getenv('FOOOCUS_USER_DATA_DIR')
+    if env_dir:
+        user_dir = os.path.abspath(env_dir)
     else:
-        _user_data_dir = default_dir
-        source = 'default'
-
-    os.makedirs(_user_data_dir, exist_ok=True)
-
-    if source == 'user_env':
-        config_dict['path_user_data'] = _user_data_dir
-        if 'path_user_data' not in always_save_keys:
-            always_save_keys.append('path_user_data')
-    elif source == 'config':
-        config_dict['path_user_data'] = _user_data_dir
-
-    return _user_data_dir
+        config_path_val = os.getenv('config_path')
+        if config_path_val:
+            user_dir = os.path.dirname(os.path.abspath(config_path_val))
+        else:
+            home = os.path.expanduser('~')
+            user_dir = os.path.join(home, '.fooocus')
+    os.makedirs(user_dir, exist_ok=True)
+    return user_dir
 
 
 def get_user_presets_dir():
     user_presets_dir = os.path.join(get_user_data_dir(), 'user_presets')
     os.makedirs(user_presets_dir, exist_ok=True)
     return user_presets_dir
-
-
-def get_sorted_styles_path():
-    """
-    Get the path to sorted_styles.json.
-    Unified under path_user_data for consistent user state location.
-    Can be overridden by SORTED_STYLES_PATH / sorted_styles_path env var for backward compatibility.
-    """
-    env_path = os.getenv('sorted_styles_path') or os.getenv('SORTED_STYLES_PATH')
-    if env_path:
-        return os.path.abspath(env_path)
-    return os.path.join(get_user_data_dir(), 'sorted_styles.json')
 
 
 def get_config_path(key, default_value):
@@ -229,12 +171,12 @@ def update_presets():
     available_presets = get_presets()
 
 
-def try_get_preset_content(preset, normalize=True):
+def try_get_preset_content(preset):
     if not isinstance(preset, str):
         return {}
 
     if preset == 'initial':
-        return normalize_preset_data({}) if normalize else {}
+        return {}
 
     if is_user_preset(preset):
         preset_name = strip_user_prefix(preset)
@@ -247,15 +189,13 @@ def try_get_preset_content(preset, normalize=True):
             with open(preset_path, "r", encoding="utf-8") as json_file:
                 json_content = json.load(json_file)
                 print(f'Loaded preset: {preset_path}')
-                if normalize:
-                    return normalize_preset_data(json_content)
                 return json_content
         else:
             raise FileNotFoundError
     except Exception as e:
         print(f'Load preset [{preset_path}] failed')
         print(e)
-        return {}
+    return {}
 
 
 def save_user_preset(preset_name, preset_data):
@@ -272,12 +212,11 @@ def save_user_preset(preset_name, preset_data):
     if preset_name in builtin_presets:
         return False, 'Cannot overwrite built-in preset'
 
-    normalized_data = normalize_preset_data(preset_data)
     preset_path = os.path.join(get_user_presets_dir(), f'{preset_name}.json')
 
     try:
         with open(preset_path, "w", encoding="utf-8") as json_file:
-            json.dump(normalized_data, json_file, indent=4, ensure_ascii=False)
+            json.dump(preset_data, json_file, indent=4, ensure_ascii=False)
         print(f'User preset saved: {preset_path}')
         update_presets()
         return True, add_user_prefix(preset_name)
@@ -347,240 +286,67 @@ def rename_user_preset(old_preset_name, new_preset_name):
 
 
 def duplicate_user_preset(source_preset_name, new_preset_name):
-    raw_content = try_get_preset_content(source_preset_name, normalize=False)
-    if not raw_content:
+    source_content = try_get_preset_content(source_preset_name)
+    if not source_content:
         return False, 'Source preset content is empty or not found'
-    return save_user_preset(new_preset_name, raw_content)
 
-
-PRESET_SCHEMA_DISPLAY_INFO = {
-    'default_model': ('Base Model', 'SDXL 1.0 base checkpoint'),
-    'default_refiner': ('Refiner Model', 'SDXL refiner checkpoint'),
-    'default_refiner_switch': ('Refiner Switch', 'Step to switch to refiner'),
-    'previous_default_models': ('Previous Models', 'Fallback model names for compatibility'),
-    'default_loras_min_weight': ('LoRA Min Weight', 'Minimum LoRA weight slider value'),
-    'default_loras_max_weight': ('LoRA Max Weight', 'Maximum LoRA weight slider value'),
-    'default_loras': ('LoRAs', 'List of LoRA models and weights'),
-    'default_cfg_scale': ('CFG Scale', 'Classifier-Free Guidance scale'),
-    'default_sample_sharpness': ('Sharpness', 'Sampling sharpness'),
-    'default_cfg_tsnr': ('Adaptive CFG (TSNR)', 'Timestep-Normalized CFG'),
-    'default_clip_skip': ('CLIP Skip', 'CLIP layers to skip'),
-    'default_sampler': ('Sampler', 'Sampling method'),
-    'default_scheduler': ('Scheduler', 'Noise schedule'),
-    'default_overwrite_step': ('Overwrite Steps', 'Force step count (-1 = use performance default)'),
-    'default_overwrite_switch': ('Overwrite Switch', 'Force refiner switch step (-1 = use default)'),
-    'default_performance': ('Performance', 'Speed / Quality tradeoff'),
-    'default_image_number': ('Image Number', 'Default batch size'),
-    'default_prompt': ('Default Prompt', 'Auto-filled positive prompt'),
-    'default_prompt_negative': ('Default Negative', 'Auto-filled negative prompt'),
-    'default_styles': ('Default Styles', 'Auto-applied style templates'),
-    'default_aspect_ratio': ('Aspect Ratio', 'Default image dimensions'),
-    'default_save_metadata_to_images': ('Save Metadata', 'Embed generation metadata in images'),
-    'checkpoint_downloads': ('Checkpoint URLs', 'Model download URLs'),
-    'embeddings_downloads': ('Embedding URLs', 'Embedding download URLs'),
-    'lora_downloads': ('LoRA URLs', 'LoRA download URLs'),
-    'vae_downloads': ('VAE URLs', 'VAE download URLs'),
-    'default_vae': ('VAE', 'Variational Autoencoder'),
-    'default_inpaint_engine_version': ('Inpaint Engine', 'Inpainting model version'),
-}
-
-
-def get_standard_preset_schema():
-    num_loras = default_max_lora_number
-    default_loras = [[True, 'None', 1.0] for _ in range(num_loras)]
-
-    return {
-        'default_model': 'model.safetensors',
-        'default_refiner': 'None',
-        'default_refiner_switch': 0.5,
-        'previous_default_models': [],
-        'default_loras_min_weight': -1.0,
-        'default_loras_max_weight': 2.0,
-        'default_loras': default_loras,
-        'default_cfg_scale': 7.0,
-        'default_sample_sharpness': 2.0,
-        'default_cfg_tsnr': 7.0,
-        'default_clip_skip': 2,
-        'default_sampler': 'dpmpp_2m_sde_gpu',
-        'default_scheduler': 'karras',
-        'default_overwrite_step': -1,
-        'default_overwrite_switch': -1,
-        'default_performance': 'Speed',
-        'default_image_number': 2,
-        'default_prompt': '',
-        'default_prompt_negative': '',
-        'default_styles': [],
-        'default_aspect_ratio': '1152*896',
-        'default_save_metadata_to_images': True,
-        'checkpoint_downloads': {},
-        'embeddings_downloads': {},
-        'lora_downloads': {},
-        'vae_downloads': {},
-        'default_vae': 'Default (model)',
-        'default_inpaint_engine_version': 'v2.6',
-    }
-
-
-def normalize_preset_data(preset_data):
-    if not isinstance(preset_data, dict):
-        preset_data = {}
-
-    schema = get_standard_preset_schema()
-    normalized = dict(schema)
-
-    for key in schema:
-        if key in preset_data:
-            value = preset_data[key]
-            default_value = schema[key]
-
-            if isinstance(value, type(default_value)):
-                if key == 'default_loras' and isinstance(value, list):
-                    normalized[key] = _normalize_lora_list(value, len(default_value))
-                elif key == 'default_styles' and isinstance(value, list):
-                    normalized[key] = [s for s in value if isinstance(s, str)]
-                elif key == 'default_aspect_ratio' and isinstance(value, str):
-                    normalized[key] = value.replace('×', '*')
-                elif key == 'default_vae' and isinstance(value, str):
-                    if not value or value.lower() == 'default':
-                        normalized[key] = 'Default (model)'
-                    else:
-                        normalized[key] = value
-                else:
-                    normalized[key] = value
-            else:
-                if isinstance(default_value, list) or isinstance(default_value, dict):
-                    normalized[key] = default_value
-                else:
-                    try:
-                        if isinstance(default_value, bool):
-                            normalized[key] = bool(value)
-                        elif isinstance(default_value, int):
-                            normalized[key] = int(value)
-                        elif isinstance(default_value, float):
-                            normalized[key] = float(value)
-                        elif isinstance(default_value, str):
-                            normalized[key] = str(value)
-                    except (ValueError, TypeError):
-                        normalized[key] = default_value
-
-    return normalized
-
-
-def _normalize_lora_list(lora_list, expected_length):
-    result = []
-    for i in range(expected_length):
-        if i < len(lora_list) and isinstance(lora_list[i], list):
-            lora = lora_list[i]
-            if len(lora) >= 3:
-                enabled = bool(lora[0])
-                name = str(lora[1]) if lora[1] else 'None'
-                weight = float(lora[2])
-            elif len(lora) == 2:
-                enabled = True
-                name = str(lora[0]) if lora[0] else 'None'
-                weight = float(lora[1])
-            else:
-                enabled = True
-                name = 'None'
-                weight = 1.0
-            result.append([enabled, name, weight])
-        else:
-            result.append([True, 'None', 1.0])
-    return result
-
-
-def get_preset_covered_fields(preset_data):
-    schema = get_standard_preset_schema()
-    if not isinstance(preset_data, dict):
-        return set()
-
-    covered = set()
-    normalized = normalize_preset_data(preset_data)
-
-    for key in schema:
-        if key in preset_data:
-            raw_value = preset_data[key]
-            norm_value = normalized[key]
-            if norm_value != schema[key]:
-                covered.add(key)
-            elif key == 'default_styles' and isinstance(raw_value, list) and len(raw_value) > 0:
-                covered.add(key)
-            elif key == 'default_loras' and isinstance(raw_value, list):
-                for lora in raw_value:
-                    if isinstance(lora, list) and len(lora) >= 2:
-                        name = lora[1] if len(lora) >= 3 else lora[0]
-                        if isinstance(name, str) and name != 'None':
-                            covered.add(key)
-                            break
-
-    return covered
+    return save_user_preset(new_preset_name, source_content)
 
 
 def get_preset_details(preset_name):
-    if preset_name == 'initial':
-        return {
-            'name': preset_name,
-            'type': 'initial',
-            'details': {},
-            'covered_fields': set(),
-            'raw_content': {},
-            'normalized_content': normalize_preset_data({}),
-            'description': 'Initial default settings - no preset applied'
-        }
-
     content = try_get_preset_content(preset_name)
     if not content:
+        if preset_name == 'initial':
+            return {'name': preset_name, 'type': 'initial', 'details': {}, 'description': 'Initial default settings'}
         return None
-
-    raw_content = try_get_preset_content(preset_name, normalize=False)
-    raw_content = dict(raw_content) if isinstance(raw_content, dict) else {}
-    normalized_content = normalize_preset_data(raw_content)
-    covered_fields = get_preset_covered_fields(raw_content)
 
     result = {
         'name': preset_name,
         'type': 'user' if is_user_preset(preset_name) else 'builtin',
         'details': {},
-        'covered_fields': covered_fields,
-        'raw_content': raw_content,
-        'normalized_content': normalized_content,
         'description': ''
     }
 
-    schema_defaults = get_standard_preset_schema()
+    display_keys = {
+        'default_model': 'Base Model',
+        'default_refiner': 'Refiner Model',
+        'default_refiner_switch': 'Refiner Switch',
+        'default_loras': 'LoRAs',
+        'default_cfg_scale': 'CFG Scale',
+        'default_sample_sharpness': 'Sharpness',
+        'default_cfg_tsnr': 'Adaptive CFG (TSNR)',
+        'default_clip_skip': 'CLIP Skip',
+        'default_sampler': 'Sampler',
+        'default_scheduler': 'Scheduler',
+        'default_performance': 'Performance',
+        'default_styles': 'Default Styles',
+        'default_aspect_ratio': 'Aspect Ratio',
+        'default_overwrite_step': 'Steps (overwrite)',
+        'default_vae': 'VAE',
+        'default_inpaint_engine_version': 'Inpaint Engine',
+    }
 
-    for config_key, (display_name, description) in PRESET_SCHEMA_DISPLAY_INFO.items():
-        if config_key not in covered_fields:
-            continue
-
-        value = normalized_content.get(config_key, schema_defaults.get(config_key))
-
-        if config_key == 'default_loras' and isinstance(value, list):
-            lora_strs = []
-            for lora in value:
-                if isinstance(lora, list) and len(lora) >= 2:
-                    if len(lora) == 3:
-                        enabled, name, weight = lora
-                        status = '✓' if enabled else '✗'
-                        lora_strs.append(f'{status} {name} (w={weight})')
-                    else:
-                        name, weight = lora[0], lora[1]
-                        lora_strs.append(f'{name} (w={weight})')
-            non_empty = [s for s in lora_strs if 'None' not in s]
-            result['details'][display_name] = non_empty if non_empty else 'None'
-        elif config_key == 'default_styles' and isinstance(value, list):
-            result['details'][display_name] = value
-        elif config_key == 'previous_default_models' and isinstance(value, list):
-            if len(value) > 0:
+    for config_key, display_name in display_keys.items():
+        if config_key in content:
+            value = content[config_key]
+            if config_key == 'default_loras' and isinstance(value, list):
+                lora_strs = []
+                for lora in value:
+                    if isinstance(lora, list) and len(lora) >= 2:
+                        if len(lora) == 3:
+                            enabled, name, weight = lora
+                            status = '✓' if enabled else '✗'
+                            lora_strs.append(f'{status} {name} (w={weight})')
+                        else:
+                            name, weight = lora[0], lora[1]
+                            lora_strs.append(f'{name} (w={weight})')
+                result['details'][display_name] = lora_strs if lora_strs else 'None'
+            elif config_key == 'default_styles' and isinstance(value, list):
                 result['details'][display_name] = value
-        elif config_key.endswith('_downloads') and isinstance(value, dict):
-            if len(value) > 0:
-                result['details'][display_name] = list(value.keys())
-        else:
-            result['details'][display_name] = value
+            else:
+                result['details'][display_name] = value
 
     return result
-
 
 available_presets = get_presets()
 preset = args_manager.args.preset

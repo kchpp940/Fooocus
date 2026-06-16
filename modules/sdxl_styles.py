@@ -23,6 +23,7 @@ def normalize_key(k):
 
 
 styles = {}
+style_sources = {}
 styles_files = get_files_from_folder(styles_path, ['.json'])
 
 for x in ['sdxl_styles_fooocus.json',
@@ -43,11 +44,32 @@ for styles_file in styles_files:
                 prompt = entry['prompt'] if 'prompt' in entry else ''
                 negative_prompt = entry['negative_prompt'] if 'negative_prompt' in entry else ''
                 styles[name] = (prompt, negative_prompt)
+                style_sources[name] = styles_file
     except Exception as e:
         print(str(e))
         print(f'Failed to load style file {styles_file}')
 
 style_keys = list(styles.keys())
+
+
+def get_style_source(style_name):
+    return style_sources.get(style_name, 'unknown')
+
+
+def get_source_label(source_file):
+    labels = {
+        'sdxl_styles_fooocus.json': 'Fooocus',
+        'sdxl_styles_sai.json': 'SAI',
+        'sdxl_styles_mre.json': 'MRE',
+        'sdxl_styles_twri.json': 'Twri',
+        'sdxl_styles_diva.json': 'Diva',
+        'sdxl_styles_marc_k3nt3l.json': 'Marc K3nt3l'
+    }
+    return labels.get(source_file, source_file.replace('sdxl_styles_', '').replace('.json', ''))
+
+
+def get_all_sources():
+    return sorted(set(style_sources.values()))
 fooocus_expansion = 'Fooocus V2'
 random_style_name = 'Random Style'
 legal_style_names = [fooocus_expansion, random_style_name] + style_keys

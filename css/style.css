@@ -416,3 +416,110 @@ div:has(> #positive_prompt) {
 #inpaint_brush_color input[type=color]{
   background: none;
 }
+
+.style_filter_bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.style_filter_btn {
+  flex: 1;
+  min-width: 70px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.style_filter_btn.style_filter_active {
+  background: var(--primary-600) !important;
+  color: white !important;
+  border-color: var(--primary-600) !important;
+}
+
+.style_group_by {
+  flex: 1;
+  min-width: 100px;
+}
+
+.style_group_by .wrap {
+  min-width: 100px;
+}
+
+.style_selections .wrap[data-testid="checkbox-group"] {
+  position: relative;
+}
+
+.style_selections label {
+  position: relative;
+  padding-left: 28px !important;
+}
+
+.style_favorite_star {
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  cursor: pointer;
+  font-size: 14px;
+  color: #ccc;
+  transition: color 0.2s ease;
+  user-select: none;
+  z-index: 10;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.style_favorite_star:hover {
+  color: #f59e0b;
+  transform: translateY(-50%) scale(1.1);
+}
+
+.style_favorite_star.is_favorite {
+  color: #f59e0b;
+}
+
+.style_group_header {
+  width: 100%;
+  padding: 8px 10px;
+  margin: 8px 0 4px 0;
+  background: linear-gradient(90deg, var(--neutral-100), transparent);
+  border-left: 3px solid var(--primary-500);
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--neutral-700);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  pointer-events: none;
+  border-radius: 0 4px 4px 0;
+}
+
+.style_group_header:first-child {
+  margin-top: 0;
+}
+
+.style_selections label.style-item {
+  position: relative;
+}
+
+.style_selections label.style-item span {
+  margin-left: 22px;
+}
+
+.style-recent-badge {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10b981;
+  margin-left: 4px;
+  vertical-align: middle;
+}

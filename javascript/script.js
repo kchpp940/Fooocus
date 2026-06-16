@@ -261,3 +261,199 @@ function htmlDecode(input) {
   var doc = new DOMParser().parseFromString(input, "text/html");
   return doc.documentElement.textContent;
 }
+
+var styleFavoritesData = {
+    favorites: [],
+    recentlyUsed: [],
+    groupBy: 'none',
+    filter: 'all'
+};
+
+function updateStyleFavoritesData(data) {
+    if (data) {
+        Object.assign(styleFavoritesData, data);
+    }
+}
+
+function getStyleNameFromLabel(label) {
+    var span = label.querySelector('span');
+    if (!span) return null;
+    var originalText = span.getAttribute('data-original-text');
+    return originalText || span.textContent.trim();
+}
+
+function addFavoriteStarsToStyles() {
+    var container = document.querySelector('.style_selections .wrap[data-testid="checkbox-group"]');
+    if (!container) return;
+
+    var labels = container.querySelectorAll('label');
+    labels.forEach(function(label) {
+        if (label.classList.contains('style-item')) return;
+
+        label.classList.add('style-item');
+
+        var styleName = getStyleNameFromLabel(label);
+        if (!styleName) return;
+
+        var existingStar = label.querySelector('.style_favorite_star');
+        if (existingStar) {
+            existingStar.remove();
+        }
+
+        var star = document.createElement('span');
+        star.className = 'style_favorite_star';
+        star.innerHTML = '☆';
+        star.title = 'Add to Favorites';
+
+        if (styleFavoritesData.favorites.includes(styleName)) {
+            star.classList.add('is_favorite');
+            star.innerHTML = '★';
+            star.title = 'Remove from Favorites';
+        }
+
+        star.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            toggleFavoriteStyle(styleName);
+        });
+
+        label.insertBefore(star, label.firstChild);
+    });
+}
+
+function toggleFavoriteStyle(styleName) {
+    var receiver = document.getElementById('gradio_receiver_favorite_toggle');
+    if (receiver) {
+        receiver.value = styleName;
+        var event = new Event('input', { bubbles: true });
+        receiver.dispatchEvent(event);
+    }
+
+    var idx = styleFavoritesData.favorites.indexOf(styleName);
+    if (idx > -1) {
+        styleFavoritesData.favorites.splice(idx, 1);
+    } else {
+        styleFavoritesData.favorites.push(styleName);
+    }
+}
+
+function setActiveStyleFilter(filter) {
+    styleFavoritesData.filter = filter;
+
+    document.querySelectorAll('.style_filter_btn').forEach(function(btn) {
+        btn.classList.remove('style_filter_active');
+    });
+
+    var filterLabels = {
+        'all': 'All',
+        'favorites': 'Favorites',
+        'recent': 'Recent'
+    };
+
+    document.querySelectorAll('.style_filter_btn').forEach(function(btn) {
+        var btnText = btn.textContent.trim();
+        if (btnText === filterLabels[filter]) {
+            btn.classList.add('style_filter_active');
+        }
+    });
+}
+
+function setActiveGroupBy(groupBy) {
+    var groupKey = groupBy.toLowerCase();
+    if (groupKey === 'none' || groupKey === 'source' || groupKey === 'favorites') {
+        styleFavoritesData.groupBy = groupKey;
+    } else {
+        styleFavoritesData.groupBy = 'none';
+    }
+}
+
+function addStyleGroupHeaders() {
+    var container = document.querySelector('.style_selections .wrap[data-testid="checkbox-group"]');
+    if (!container) return;
+
+    container.querySelectorAll('.style_group_header').forEach(function(h) {
+        h.remove();
+    });
+
+    if (styleFavoritesData.groupBy === 'none') {
+        return;
+    }
+
+    var labels = container.querySelectorAll('label.style-item');
+    var currentGroup = null;
+
+    labels.forEach(function(label) {
+        var styleName = getStyleNameFromLabel(label);
+        if (!styleName) return;
+
+        var group = getStyleGroup(styleName);
+
+        if (group !== currentGroup) {
+            var header = document.createElement('div');
+            header.className = 'style_group_header';
+            header.textContent = group;
+            container.insertBefore(header, label);
+            currentGroup = group;
+        }
+    });
+}
+
+function getStyleGroup(styleName) {
+    if (['Fooocus V2', 'Random Style'].includes(styleName)) {
+        return 'Quick Access';
+    }
+
+    if (styleFavoritesData.groupBy === 'favorites') {
+        return styleFavoritesData.favorites.includes(styleName) ? 'Favorites' : 'All Styles';
+    }
+
+    if (styleFavoritesData.groupBy === 'source') {
+        var sourceLabels = {
+            'sdxl_styles_fooocus.json': 'Fooocus',
+            'sdxl_styles_sai.json': 'SAI',
+            'sdxl_styles_mre.json': 'MRE',
+            'sdxl_styles_twri.json': 'Twri',
+            'sdxl_styles_diva.json': 'Diva',
+            'sdxl_styles_marc_k3nt3l.json': 'Marc K3nt3l'
+        };
+
+        for (var source in styleFavoritesData.sourceMap || {}) {
+            if (styleFavoritesData.sourceMap[source].includes(styleName)) {
+                return sourceLabels[source] || source;
+            }
+        }
+        return 'Other';
+    }
+
+    return 'All Styles';
+}
+
+function initializeStyleManagement() {
+    loadStyleMetadata();
+    enhanceStyleSelections();
+}
+
+function loadStyleMetadata() {
+    var metaScript = document.getElementById('style-metadata-data');
+    if (metaScript) {
+        try {
+            var data = JSON.parse(metaScript.textContent);
+            updateStyleFavoritesData(data);
+        } catch (e) {
+            console.log('Could not parse style metadata:', e);
+        }
+    }
+}
+
+function enhanceStyleSelections() {
+    addFavoriteStarsToStyles();
+    addStyleGroupHeaders();
+}
+
+var originalRefreshStyleLocalization = window.refresh_style_localization;
+window.refresh_style_localization = function() {
+    if (originalRefreshStyleLocalization) {
+        originalRefreshStyleLocalization();
+    }
+    setTimeout(enhanceStyleSelections, 50);
+};

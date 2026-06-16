@@ -26,6 +26,8 @@ from modules.util import is_json
 
 
 def build_preset_data_from_ui(*args):
+    preset_data = {}
+
     arg_idx = 0
     default_model = args[arg_idx]; arg_idx += 1
     default_refiner = args[arg_idx]; arg_idx += 1
@@ -41,11 +43,7 @@ def build_preset_data_from_ui(*args):
     default_aspect_ratio_label = args[arg_idx]; arg_idx += 1
     default_styles = args[arg_idx]; arg_idx += 1
     default_overwrite_step = args[arg_idx]; arg_idx += 1
-    default_overwrite_switch = args[arg_idx]; arg_idx += 1
     default_inpaint_engine_version = args[arg_idx]; arg_idx += 1
-    default_image_number = args[arg_idx]; arg_idx += 1
-    default_prompt = args[arg_idx]; arg_idx += 1
-    default_prompt_negative = args[arg_idx]; arg_idx += 1
 
     lora_count = modules.config.default_max_lora_number
     default_loras = []
@@ -53,7 +51,7 @@ def build_preset_data_from_ui(*args):
         enabled = args[arg_idx]; arg_idx += 1
         model = args[arg_idx]; arg_idx += 1
         weight = args[arg_idx]; arg_idx += 1
-        default_loras.append([bool(enabled), str(model) if model else 'None', float(weight)])
+        default_loras.append([enabled, model if model else 'None', float(weight)])
 
     if '×' in str(default_aspect_ratio_label):
         ratio_part = str(default_aspect_ratio_label).split(' ')[0]
@@ -61,30 +59,29 @@ def build_preset_data_from_ui(*args):
     else:
         default_aspect_ratio = str(default_aspect_ratio_label).replace('×', '*')
 
-    raw_preset_data = {
-        'default_model': str(default_model) if default_model else 'model.safetensors',
-        'default_refiner': str(default_refiner) if default_refiner else 'None',
+    preset_data = {
+        'default_model': default_model if default_model else 'model.safetensors',
+        'default_refiner': default_refiner if default_refiner else 'None',
         'default_refiner_switch': float(default_refiner_switch),
         'default_loras': default_loras,
         'default_cfg_scale': float(default_cfg_scale),
         'default_sample_sharpness': float(default_sample_sharpness),
         'default_cfg_tsnr': float(default_cfg_tsnr),
         'default_clip_skip': int(default_clip_skip),
-        'default_sampler': str(default_sampler),
-        'default_scheduler': str(default_scheduler),
-        'default_vae': str(default_vae),
-        'default_performance': str(default_performance),
+        'default_sampler': default_sampler,
+        'default_scheduler': default_scheduler,
+        'default_vae': default_vae if default_vae != modules.flags.default_vae else 'Default (model)',
+        'default_performance': default_performance,
         'default_aspect_ratio': default_aspect_ratio,
         'default_styles': list(default_styles) if default_styles else [],
         'default_overwrite_step': int(default_overwrite_step),
-        'default_overwrite_switch': int(default_overwrite_switch),
-        'default_inpaint_engine_version': str(default_inpaint_engine_version),
-        'default_image_number': int(default_image_number),
-        'default_prompt': str(default_prompt) if default_prompt else '',
-        'default_prompt_negative': str(default_prompt_negative) if default_prompt_negative else '',
+        'default_inpaint_engine_version': default_inpaint_engine_version,
+        'checkpoint_downloads': {},
+        'embeddings_downloads': {},
+        'lora_downloads': {},
+        'vae_downloads': {},
     }
-
-    return modules.config.normalize_preset_data(raw_preset_data)
+    return preset_data
 
 
 def format_preset_details_html(preset_name):
@@ -96,95 +93,31 @@ def format_preset_details_html(preset_name):
     ptype = details['type']
     type_labels = {'initial': '⚪ Initial', 'builtin': '🔷 Built-in', 'user': '⭐ User'}
     type_label = type_labels.get(ptype, ptype)
-    covered_fields = details.get('covered_fields', set())
-    covered_count = len(covered_fields)
 
     html_parts = [
-        f'<div style="margin-bottom: 10px; padding: 10px; background: #f0f0f0; border-radius: 6px;">',
+        f'<div style="margin-bottom: 10px; padding: 8px; background: #f0f0f0; border-radius: 6px;">',
         f'<div style="font-weight: bold; font-size: 14px;">{name}</div>',
-        f'<div style="color: #666; font-size: 12px; margin-top: 2px;">{type_label}</div>',
-        f'<div style="color: #888; font-size: 11px; margin-top: 4px;">',
-        f'Overrides <span style="font-weight: 600; color: #059669;">{covered_count}</span> of {len(modules.config.get_standard_preset_schema())} parameters',
-        f'</div>',
-        '</div>'
+        f'<div style="color: #666; font-size: 12px;">{type_label}</div>',
+        '</div>',
+        '<div style="max-height: 300px; overflow-y: auto; padding: 4px;">'
     ]
 
-    if ptype == 'initial' or covered_count == 0:
-        html_parts.append('<div style="padding: 12px; background: #f8f8f8; border-radius: 6px; text-align: center; color: #666; font-style: italic;">')
-        html_parts.append('Using system defaults — no parameters overridden<br>')
-        html_parts.append('<span style="font-size: 11px;">Adjust settings and click "Save Current as Preset" to create a preset</span>')
-        html_parts.append('</div>')
+    if not details['details']:
+        html_parts.append('<div style="color: #888; font-style: italic;">(uses current default settings)</div>')
     else:
-        schema_defaults = modules.config.get_standard_preset_schema()
-        display_info = modules.config.PRESET_SCHEMA_DISPLAY_INFO
-
-        html_parts.append('<div style="margin-bottom: 8px; padding: 6px 8px; background: #ecfdf5; border-left: 3px solid #10b981; border-radius: 4px; font-size: 12px; font-weight: 600; color: #065f46;">')
-        html_parts.append('✓  Parameters overridden by this preset')
-        html_parts.append('</div>')
-
-        html_parts.append('<div style="max-height: 280px; overflow-y: auto; padding: 4px;">')
-
-        for config_key, (display_name, description) in display_info.items():
-            if config_key not in covered_fields:
-                continue
-
-            current_value = details.get('normalized_content', {}).get(config_key, schema_defaults.get(config_key))
-            default_value = schema_defaults.get(config_key)
-
-            html_parts.append(f'<div style="margin: 6px 0; padding: 8px; background: #fafafa; border-radius: 6px;">')
-            html_parts.append(f'<div style="display: flex; justify-content: space-between; align-items: baseline;">')
-            html_parts.append(f'<span style="font-weight: 600; color: #374151; font-size: 13px;">{display_name}</span>')
-            html_parts.append(f'<span style="font-size: 11px; color: #9ca3af;" title="{description}">ⓘ</span>')
-            html_parts.append('</div>')
-
-            if config_key == 'default_loras' and isinstance(current_value, list):
-                lora_items = []
-                for lora in current_value:
-                    if isinstance(lora, list) and len(lora) >= 3:
-                        enabled, name, weight = lora
-                        if name and name != 'None':
-                            status = '✓' if enabled else '✗'
-                            lora_items.append(f'<li style="padding: 2px 0; color: #2563eb;">{status} {name} <span style="color: #6b7280;">(weight={weight})</span></li>')
-                if lora_items:
-                    html_parts.append(f'<ul style="margin: 4px 0 0 16px; padding: 0;">{"".join(lora_items)}</ul>')
-                else:
-                    html_parts.append(f'<div style="margin-top: 4px; color: #6b7280; font-size: 12px;">(all LoRA slots empty)</div>')
-            elif config_key == 'default_styles' and isinstance(current_value, list):
-                if current_value:
-                    style_items = ''.join([f'<li style="padding: 2px 0; color: #2563eb;">{s}</li>' for s in current_value])
-                    html_parts.append(f'<ul style="margin: 4px 0 0 16px; padding: 0;">{style_items}</ul>')
-                else:
-                    html_parts.append(f'<div style="margin-top: 4px; color: #6b7280; font-size: 12px;">(no default styles)</div>')
-            elif config_key.endswith('_downloads') and isinstance(current_value, dict):
-                if current_value:
-                    model_names = list(current_value.keys())
-                    items = ''.join([f'<li style="padding: 2px 0; color: #2563eb; font-size: 12px;">{name}</li>' for name in model_names])
-                    html_parts.append(f'<div style="margin-top: 4px; font-size: 11px; color: #6b7280;">Auto-downloads on first use:</div>')
-                    html_parts.append(f'<ul style="margin: 4px 0 0 16px; padding: 0;">{items}</ul>')
-            elif config_key == 'previous_default_models' and isinstance(current_value, list):
-                if current_value:
-                    items = ''.join([f'<li style="padding: 1px 0; color: #6b7280; font-size: 11px;">{name}</li>' for name in current_value])
-                    html_parts.append(f'<ul style="margin: 4px 0 0 16px; padding: 0;">{items}</ul>')
+        for key, value in details['details'].items():
+            html_parts.append(f'<div style="margin: 4px 0; padding: 4px 0; border-bottom: 1px solid #eee;">')
+            html_parts.append(f'<span style="font-weight: 600; color: #444;">{key}:</span> ')
+            if isinstance(value, list):
+                html_parts.append('<ul style="margin: 4px 0 0 20px; padding: 0;">')
+                for item in value:
+                    html_parts.append(f'<li style="font-size: 12px; color: #555;">{item}</li>')
+                html_parts.append('</ul>')
             else:
-                value_str = str(current_value)
-                default_str = str(default_value)
-                if value_str == default_str and config_key not in ['default_styles', 'default_loras']:
-                    html_parts.append(f'<div style="margin-top: 4px; color: #2563eb; font-size: 13px;">{value_str}</div>')
-                else:
-                    html_parts.append(f'<div style="margin-top: 4px; color: #2563eb; font-size: 13px;">{value_str}</div>')
-                    if default_value != current_value:
-                        html_parts.append(f'<div style="margin-top: 2px; font-size: 11px; color: #9ca3af;">Default: <span style="text-decoration: line-through;">{default_str}</span></div>')
-
+                html_parts.append(f'<span style="color: #2563eb;">{value}</span>')
             html_parts.append('</div>')
 
-        html_parts.append('</div>')
-
-        if covered_count < 15:
-            default_count = len(schema_defaults) - covered_count
-            html_parts.append(f'<div style="margin-top: 10px; padding: 8px; background: #f3f4f6; border-radius: 6px; font-size: 11px; color: #6b7280;">')
-            html_parts.append(f'Uses system defaults for remaining {default_count} parameters (not shown)')
-            html_parts.append('</div>')
-
+    html_parts.append('</div>')
     return ''.join(html_parts)
 
 
@@ -319,6 +252,26 @@ shared.gradio_root = gr.Blocks(title=title).queue()
 with shared.gradio_root:
     currentTask = gr.State(worker.AsyncTask(args=[]))
     inpaint_engine_state = gr.State('empty')
+
+    def get_style_metadata():
+        import json
+        from modules import style_sorter, sdxl_styles, style_prefs
+        source_map = {}
+        for style_name in sdxl_styles.style_keys:
+            source = sdxl_styles.get_style_source(style_name)
+            if source not in source_map:
+                source_map[source] = []
+            source_map[source].append(style_name)
+        metadata = {
+            'favorites': style_sorter.get_favorites(),
+            'recentlyUsed': style_sorter.get_recently_used(),
+            'groupBy': style_sorter.get_group_by(),
+            'filter': style_sorter.get_filter(),
+            'sourceMap': source_map
+        }
+        return f'<script id="style-metadata-data" type="application/json">{json.dumps(metadata, ensure_ascii=False)}</script>'
+
+    style_metadata_html = gr.HTML(value=get_style_metadata(), visible=False, elem_id='style_metadata_container')
     with gr.Row():
         with gr.Column(scale=2):
             with gr.Row():
@@ -828,6 +781,42 @@ with shared.gradio_root:
                     style_names=legal_style_names,
                     default_selected=modules.config.default_styles)
 
+                initial_filter = style_sorter.get_filter()
+                initial_group = style_sorter.get_group_by()
+                initial_group_label = initial_group.capitalize() if initial_group != 'none' else 'None'
+
+                filter_all_classes = ['style_filter_btn']
+                filter_fav_classes = ['style_filter_btn']
+                filter_recent_classes = ['style_filter_btn']
+                if initial_filter == 'all':
+                    filter_all_classes.append('style_filter_active')
+                    filter_all_variant = 'primary'
+                    filter_fav_variant = 'secondary'
+                    filter_recent_variant = 'secondary'
+                elif initial_filter == 'favorites':
+                    filter_fav_classes.append('style_filter_active')
+                    filter_all_variant = 'secondary'
+                    filter_fav_variant = 'primary'
+                    filter_recent_variant = 'secondary'
+                else:
+                    filter_recent_classes.append('style_filter_active')
+                    filter_all_variant = 'secondary'
+                    filter_fav_variant = 'secondary'
+                    filter_recent_variant = 'primary'
+
+                with gr.Row(elem_classes=['style_filter_bar']):
+                    style_filter_all = gr.Button('All', variant=filter_all_variant, elem_classes=filter_all_classes)
+                    style_filter_favorites = gr.Button('Favorites', variant=filter_fav_variant, elem_classes=filter_fav_classes)
+                    style_filter_recent = gr.Button('Recent', variant=filter_recent_variant, elem_classes=filter_recent_classes)
+                    style_group_by = gr.Dropdown(
+                        label='Group by',
+                        choices=['None', 'Source', 'Favorites'],
+                        value=initial_group_label,
+                        elem_classes=['style_group_by'],
+                        show_label=False,
+                        container=False
+                    )
+
                 style_search_bar = gr.Textbox(show_label=False, container=False,
                                               placeholder="\U0001F50E Type here to search styles ...",
                                               value="",
@@ -838,12 +827,68 @@ with shared.gradio_root:
                                                     label='Selected Styles',
                                                     elem_classes=['style_selections'])
                 gradio_receiver_style_selections = gr.Textbox(elem_id='gradio_receiver_style_selections', visible=False)
+                gradio_receiver_favorite_toggle = gr.Textbox(elem_id='gradio_receiver_favorite_toggle', visible=False)
+                current_style_filter = gr.State('all')
+                current_style_group = gr.State('none')
 
-                shared.gradio_root.load(lambda: gr.update(choices=copy.deepcopy(style_sorter.all_styles)),
-                                        outputs=style_selections)
+                def set_filter_mode(selected, filter_mode, current_group):
+                    style_sorter.set_filter(filter_mode)
+                    return style_sorter.refresh_styles_display(selected, filter_mode, current_group), filter_mode
+
+                def set_group_mode(selected, group_mode, current_filter):
+                    group_key = group_mode.lower() if group_mode else 'none'
+                    style_sorter.set_group_by(group_key)
+                    return style_sorter.refresh_styles_display(selected, current_filter, group_key), group_key
+
+                def toggle_favorite(style_name, selected, current_filter, current_group):
+                    style_sorter.toggle_favorite(style_name)
+                    return style_sorter.refresh_styles_display(selected, current_filter, current_group)
+
+                style_filter_all.click(
+                    set_filter_mode,
+                    inputs=[style_selections, gr.State('all'), current_style_group],
+                    outputs=[style_selections, current_style_filter],
+                    queue=False,
+                    show_progress=False
+                ).then(lambda: None, _js='()=>{setActiveStyleFilter("all"); refresh_style_localization();}')
+
+                style_filter_favorites.click(
+                    set_filter_mode,
+                    inputs=[style_selections, gr.State('favorites'), current_style_group],
+                    outputs=[style_selections, current_style_filter],
+                    queue=False,
+                    show_progress=False
+                ).then(lambda: None, _js='()=>{setActiveStyleFilter("favorites"); refresh_style_localization();}')
+
+                style_filter_recent.click(
+                    set_filter_mode,
+                    inputs=[style_selections, gr.State('recent'), current_style_group],
+                    outputs=[style_selections, current_style_filter],
+                    queue=False,
+                    show_progress=False
+                ).then(lambda: None, _js='()=>{setActiveStyleFilter("recent"); refresh_style_localization();}')
+
+                style_group_by.change(
+                    set_group_mode,
+                    inputs=[style_selections, style_group_by, current_style_filter],
+                    outputs=[style_selections, current_style_group],
+                    queue=False,
+                    show_progress=False
+                ).then(lambda x: None, inputs=[style_group_by], _js='(x)=>{setActiveGroupBy(x); refresh_style_localization();}')
+
+                def initial_style_load():
+                    return style_sorter.refresh_styles_display(
+                        modules.config.default_styles,
+                        initial_filter,
+                        initial_group
+                    )
+
+                shared.gradio_root.load(initial_style_load,
+                                        outputs=style_selections).then(
+                    lambda: None, _js=f'()=>{{setActiveStyleFilter("{initial_filter}"); setActiveGroupBy("{initial_group_label}"); initializeStyleManagement(); refresh_style_localization();}}')
 
                 style_search_bar.change(style_sorter.search_styles,
-                                        inputs=[style_selections, style_search_bar],
+                                        inputs=[style_selections, style_search_bar, current_style_filter, current_style_group],
                                         outputs=style_selections,
                                         queue=False,
                                         show_progress=False).then(
@@ -855,6 +900,22 @@ with shared.gradio_root:
                                                        queue=False,
                                                        show_progress=False).then(
                     lambda: None, _js='()=>{refresh_style_localization();}')
+
+                gradio_receiver_favorite_toggle.input(
+                    toggle_favorite,
+                    inputs=[gradio_receiver_favorite_toggle, style_selections, current_style_filter, current_style_group],
+                    outputs=[style_selections],
+                    queue=False,
+                    show_progress=False
+                ).then(lambda: None, _js='()=>{refresh_style_localization();}')
+
+                style_selections.change(
+                    lambda selected: style_sorter.refresh_styles_display(selected, current_style_filter.value, current_style_group.value),
+                    inputs=[style_selections],
+                    outputs=[style_selections],
+                    queue=False,
+                    show_progress=False
+                )
 
             with gr.Tab(label='Models'):
                 with gr.Group():
@@ -1254,10 +1315,15 @@ with shared.gradio_root:
         metadata_import_button.click(trigger_metadata_import, inputs=[metadata_input_image, state_is_generating], outputs=load_data_outputs, queue=False, show_progress=True) \
             .then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)
 
+        def track_style_usage_and_get_task(selected_styles, *args):
+            if isinstance(selected_styles, (list, tuple)):
+                style_sorter.track_style_usage(list(selected_styles))
+            return get_task(*args)
+
         generate_button.click(lambda: (gr.update(visible=True, interactive=True), gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=False), [], True),
                               outputs=[stop_button, skip_button, generate_button, gallery, state_is_generating]) \
             .then(fn=refresh_seed, inputs=[seed_random, image_seed], outputs=image_seed) \
-            .then(fn=get_task, inputs=ctrls, outputs=currentTask) \
+            .then(fn=track_style_usage_and_get_task, inputs=[style_selections] + ctrls, outputs=currentTask) \
             .then(fn=generate_clicked, inputs=currentTask, outputs=[progress_html, progress_window, progress_gallery, gallery]) \
             .then(lambda: (gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=False), gr.update(visible=False, interactive=False), False),
                   outputs=[generate_button, stop_button, skip_button, state_is_generating]) \
@@ -1329,7 +1395,7 @@ with shared.gradio_root:
         if not args_manager.args.disable_preset_selection:
             def save_current_as_preset(new_name, *ui_args):
                 if not new_name or new_name.strip() == '':
-                    return gr.update(), gr.update(), gr.update(), '⚠️  Error: Preset name cannot be empty'
+                    return gr.update(), gr.update(), '⚠️  Error: Preset name cannot be empty'
                 try:
                     preset_data = build_preset_data_from_ui(*ui_args)
                     success, result = modules.config.save_user_preset(new_name.strip(), preset_data)
@@ -1338,13 +1404,12 @@ with shared.gradio_root:
                         return (
                             gr.update(choices=modules.config.available_presets, value=result),
                             format_preset_details_html(result),
-                            gr.update(value=result),
                             f'✅  Preset saved successfully: {result}'
                         )
                     else:
-                        return gr.update(), gr.update(), gr.update(), f'⚠️  Error: {result}'
+                        return gr.update(), gr.update(), f'⚠️  Error: {result}'
                 except Exception as e:
-                    return gr.update(), gr.update(), gr.update(), f'⚠️  Error saving preset: {str(e)}'
+                    return gr.update(), gr.update(), f'⚠️  Error saving preset: {str(e)}'
 
             save_preset_inputs = [new_preset_name_input]
             save_preset_inputs += [
@@ -1352,97 +1417,87 @@ with shared.gradio_root:
                 guidance_scale, sharpness, adaptive_cfg, clip_skip,
                 sampler_name, scheduler_name, vae_name,
                 performance_selection, aspect_ratios_selection,
-                style_selections, overwrite_step, overwrite_switch,
-                inpaint_engine, image_number, prompt, negative_prompt
+                style_selections, overwrite_step, inpaint_engine
             ]
             save_preset_inputs += lora_ctrls
 
             save_preset_btn.click(
                 save_current_as_preset,
                 inputs=save_preset_inputs,
-                outputs=[preset_selection, preset_details_html, preset_selection, preset_operation_msg],
+                outputs=[preset_selection, preset_details_html, preset_operation_msg],
                 queue=False,
                 show_progress=False
             )
 
             def duplicate_current_preset(current_preset, new_name):
                 if not new_name or new_name.strip() == '':
-                    return gr.update(), gr.update(), gr.update(), '⚠️  Error: New preset name is required for duplication'
+                    return gr.update(), gr.update(), '⚠️  Error: New preset name is required for duplication'
                 if current_preset == 'initial':
-                    return gr.update(), gr.update(), gr.update(), '⚠️  Error: Cannot duplicate "initial", use "Save Current as Preset" instead'
+                    return gr.update(), gr.update(), '⚠️  Error: Cannot duplicate "initial", use "Save Current as Preset" instead'
                 success, result = modules.config.duplicate_user_preset(current_preset, new_name.strip())
                 if success:
                     modules.config.update_files()
                     return (
                         gr.update(choices=modules.config.available_presets, value=result),
                         format_preset_details_html(result),
-                        gr.update(value=result),
                         f'✅  Preset duplicated: {current_preset} → {result}'
                     )
                 else:
-                    return gr.update(), gr.update(), gr.update(), f'⚠️  Error: {result}'
+                    return gr.update(), gr.update(), f'⚠️  Error: {result}'
 
             duplicate_preset_btn.click(
                 duplicate_current_preset,
                 inputs=[preset_selection, new_preset_name_input],
-                outputs=[preset_selection, preset_details_html, preset_selection, preset_operation_msg],
+                outputs=[preset_selection, preset_details_html, preset_operation_msg],
                 queue=False,
                 show_progress=False
-            ).then(preset_selection_change, inputs=[preset_selection, state_is_generating, inpaint_mode], outputs=load_data_outputs, queue=False, show_progress=True) \
-             .then(fn=style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False) \
-             .then(lambda: None, _js='()=>{refresh_style_localization();}')
+            )
 
             def rename_current_preset(current_preset, new_name):
                 if not modules.config.is_user_preset(current_preset):
-                    return gr.update(), gr.update(), gr.update(), '⚠️  Error: Can only rename user presets (marked with [User] prefix)'
+                    return gr.update(), gr.update(), '⚠️  Error: Can only rename user presets (marked with [User] prefix)'
                 if not new_name or new_name.strip() == '':
-                    return gr.update(), gr.update(), gr.update(), '⚠️  Error: New preset name cannot be empty'
+                    return gr.update(), gr.update(), '⚠️  Error: New preset name cannot be empty'
                 success, result = modules.config.rename_user_preset(current_preset, new_name.strip())
                 if success:
                     modules.config.update_files()
                     return (
                         gr.update(choices=modules.config.available_presets, value=result),
                         format_preset_details_html(result),
-                        gr.update(value=result),
                         f'✅  Preset renamed: {current_preset} → {result}'
                     )
                 else:
-                    return gr.update(), gr.update(), gr.update(), f'⚠️  Error: {result}'
+                    return gr.update(), gr.update(), f'⚠️  Error: {result}'
 
             rename_preset_btn.click(
                 rename_current_preset,
                 inputs=[preset_selection, new_preset_name_input],
-                outputs=[preset_selection, preset_details_html, preset_selection, preset_operation_msg],
+                outputs=[preset_selection, preset_details_html, preset_operation_msg],
                 queue=False,
                 show_progress=False
             )
 
             def delete_current_preset(current_preset):
                 if not modules.config.is_user_preset(current_preset):
-                    return gr.update(), gr.update(), gr.update(), '⚠️  Error: Can only delete user presets (marked with [User] prefix)'
+                    return gr.update(), gr.update(), '⚠️  Error: Can only delete user presets (marked with [User] prefix)'
                 success, result = modules.config.delete_user_preset(current_preset)
                 if success:
                     modules.config.update_files()
-                    fallback = 'initial'
                     return (
-                        gr.update(choices=modules.config.available_presets, value=fallback),
-                        format_preset_details_html(fallback),
-                        gr.update(value=fallback),
+                        gr.update(choices=modules.config.available_presets, value='initial'),
+                        format_preset_details_html('initial'),
                         f'✅  Preset deleted: {current_preset}'
                     )
                 else:
-                    return gr.update(), gr.update(), gr.update(), f'⚠️  Error: {result}'
+                    return gr.update(), gr.update(), f'⚠️  Error: {result}'
 
             delete_preset_btn.click(
                 delete_current_preset,
                 inputs=[preset_selection],
-                outputs=[preset_selection, preset_details_html, preset_selection, preset_operation_msg],
+                outputs=[preset_selection, preset_details_html, preset_operation_msg],
                 queue=False,
                 show_progress=False
-            ).then(preset_selection_change, inputs=[preset_selection, state_is_generating, inpaint_mode], outputs=load_data_outputs, queue=False, show_progress=True) \
-             .then(fn=style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False) \
-             .then(lambda: None, _js='()=>{refresh_style_localization();}') \
-             .then(inpaint_engine_state_change, inputs=[inpaint_engine_state] + enhance_inpaint_mode_ctrls, outputs=enhance_inpaint_engine_ctrls, queue=False, show_progress=False)
+            )
 
 def dump_default_english_config():
     from modules.localization import dump_english_config
