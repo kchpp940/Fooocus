@@ -580,17 +580,19 @@ with shared.gradio_root:
                                 return ('<div style="color:#ff9999;padding:12px;background:#3a1f1f;border-radius:6px;">Please select at least one image to compare.</div>',
                                         None, None)
                             data_a = modules.meta_parser.extract_comparison_data(source_a) if source_a is not None else {
-                                'fields': {}, 'loras': [], 'raw_metadata': None, 'metadata_scheme': None,
+                                'fields': {}, 'loras': [], 'raw_metadata': None, 'log_metadata': None,
+                                'merged_metadata': None, 'metadata_scheme': None, 'metadata_source': 'none',
                                 'image_path': path_a, 'error': 'No image A'
                             }
                             data_b = modules.meta_parser.extract_comparison_data(source_b) if source_b is not None else {
-                                'fields': {}, 'loras': [], 'raw_metadata': None, 'metadata_scheme': None,
+                                'fields': {}, 'loras': [], 'raw_metadata': None, 'log_metadata': None,
+                                'merged_metadata': None, 'metadata_scheme': None, 'metadata_source': 'none',
                                 'image_path': path_b, 'error': 'No image B'
                             }
                             comparison = modules.meta_parser.compare_metadata(data_a, data_b)
                             html = modules.meta_parser.render_comparison_html(comparison, data_a, data_b)
-                            raw_a = data_a.get('raw_metadata')
-                            raw_b = data_b.get('raw_metadata')
+                            raw_a = data_a.get('merged_metadata') or data_a.get('raw_metadata')
+                            raw_b = data_b.get('merged_metadata') or data_b.get('raw_metadata')
                             return html, raw_a, raw_b
 
                         compare_do_btn.click(do_compare,

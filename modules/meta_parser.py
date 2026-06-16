@@ -747,7 +747,10 @@ def extract_comparison_data(file) -> dict:
         'fields': {},
         'loras': [],
         'raw_metadata': None,
+        'log_metadata': None,
+        'merged_metadata': None,
         'metadata_scheme': None,
+        'metadata_source': 'none',
         'image_path': None,
         'error': None
     }
@@ -755,27 +758,72 @@ def extract_comparison_data(file) -> dict:
         if file is None:
             result['error'] = 'No image provided'
             return result
+        image_path = None
         if isinstance(file, str):
             result['image_path'] = file
+            image_path = file
             with Image.open(file) as img:
                 parameters, metadata_scheme = read_info_from_image(img)
         else:
             parameters, metadata_scheme = read_info_from_image(file)
         result['metadata_scheme'] = metadata_scheme.value if metadata_scheme else None
-        if parameters is None:
-            result['error'] = 'No metadata found in image'
-            return result
-        if metadata_scheme is not None:
+        embedded_parsed = None
+        has_embedded = False
+        if parameters is not None and metadata_scheme is not None:
             parser = get_metadata_parser(metadata_scheme)
-            parsed = parser.to_json(parameters) if isinstance(parameters, (dict, str)) else parameters
-        else:
-            parsed = parameters if isinstance(parameters, dict) else {}
-        result['raw_metadata'] = parsed
+            embedded_parsed = parser.to_json(parameters) if isinstance(parameters, (dict, str)) else parameters
+            if isinstance(embedded_parsed, dict) and len(embedded_parsed) > 0:
+                has_embedded = True
+                result['raw_metadata'] = embedded_parsed
+        elif isinstance(parameters, dict) and len(parameters) > 0:
+            embedded_parsed = parameters
+            has_embedded = True
+            result['raw_metadata'] = embedded_parsed
+        log_parsed = None
+        has_log = False
+        if image_path is not None:
+            try:
+                import modules.private_logger
+                log_data = modules.private_logger.lookup_metadata_from_log(image_path)
+                if log_data is not None and isinstance(log_data, dict) and len(log_data) > 0:
+                    log_parsed = log_data
+                    has_log = True
+                    result['log_metadata'] = log_data
+            except Exception:
+                pass
+        if has_embedded and has_log:
+            result['metadata_source'] = 'merged'
+        elif has_embedded:
+            result['metadata_source'] = 'embedded'
+        elif has_log:
+            result['metadata_source'] = 'log'
+        merged = {}
+        if has_embedded:
+            merged.update(embedded_parsed)
+        if has_log:
+            for k, v in log_parsed.items():
+                if k not in merged or merged.get(k) in (None, '', 'None'):
+                    merged[k] = v
+        result['merged_metadata'] = merged if merged else None
+        source = result['metadata_source']
         for key, label, ftype in COMPARISON_FIELDS:
-            value, ok = safe_extract_field(parsed, key, label, ftype)
+            value, ok = safe_extract_field(merged, key, label, ftype)
             if ok:
-                result['fields'][key] = {'label': label, 'value': value, 'type': ftype.__name__}
-        result['loras'] = safe_extract_loras(parsed)
+                field_source = 'embedded'
+                if has_embedded and has_log:
+                    emb_val, emb_ok = safe_extract_field(embedded_parsed, key, label, ftype)
+                    if not emb_ok:
+                        field_source = 'log'
+                    elif has_log:
+                        log_val, log_ok = safe_extract_field(log_parsed, key, label, ftype)
+                        if log_ok and emb_val == log_val:
+                            field_source = 'both'
+                        else:
+                            field_source = 'embedded'
+                elif has_log and not has_embedded:
+                    field_source = 'log'
+                result['fields'][key] = {'label': label, 'value': value, 'type': ftype.__name__, 'source': field_source}
+        result['loras'] = safe_extract_loras(merged)
     except Exception as e:
         result['error'] = f'Error extracting metadata: {str(e)}'
     return result
@@ -817,7 +865,9 @@ def compare_metadata(data_a: dict, data_b: dict) -> dict:
         'errors': {
             'a': data_a.get('error'),
             'b': data_b.get('error')
-        }
+        },
+        'source_a': data_a.get('metadata_source', 'none'),
+        'source_b': data_b.get('metadata_source', 'none')
     }
     fields_a = data_a.get('fields', {})
     fields_b = data_b.get('fields', {})
@@ -826,6 +876,8 @@ def compare_metadata(data_a: dict, data_b: dict) -> dict:
         in_b = key in fields_b
         val_a = fields_a[key]['value'] if in_a else None
         val_b = fields_b[key]['value'] if in_b else None
+        src_a = fields_a[key].get('source', 'unknown') if in_a else None
+        src_b = fields_b[key].get('source', 'unknown') if in_b else None
         entry = {
             'key': key,
             'label': label,
@@ -833,6 +885,8 @@ def compare_metadata(data_a: dict, data_b: dict) -> dict:
             'value_b': val_b,
             'formatted_a': format_field_value(key, val_a),
             'formatted_b': format_field_value(key, val_b),
+            'source_a': src_a,
+            'source_b': src_b,
             'in_a': in_a,
             'in_b': in_b,
             'is_different': False,
@@ -892,18 +946,46 @@ def compare_metadata(data_a: dict, data_b: dict) -> dict:
     return result
 
 
+def _source_tag(source: str | None) -> str:
+    if source is None:
+        return ''
+    labels = {
+        'embedded': ('📷', 'Embedded metadata', '#4d8066'),
+        'log': ('📝', 'Private log', '#66664d'),
+        'both': ('📷📝', 'Both (verified)', '#4d6680'),
+        'merged': ('🔗', 'Merged (embedded + log)', '#665080'),
+        'none': ('❌', 'No metadata', '#804040'),
+    }
+    emoji, title, color = labels.get(source, ('❓', source, '#666'))
+    return f'<span style="font-size:10px;color:{color};cursor:help;" title="{title}">{emoji}</span>'
+
+
+def _source_summary_label(source: str) -> str:
+    labels = {
+        'embedded': '📷 Embedded only',
+        'log': '📝 Log only',
+        'merged': '🔗 Merged (embedded + log)',
+        'both': '📷📝 Both',
+        'none': '❌ None',
+    }
+    return labels.get(source, source)
+
+
 def render_comparison_html(comparison: dict, data_a: dict, data_b: dict) -> str:
     summary = comparison['summary']
     errors = comparison['errors']
+    source_a = comparison.get('source_a', 'none')
+    source_b = comparison.get('source_b', 'none')
     css = """
     <style>
     .cmp-container { font-family: -apple-system, BlinkMacSystemFont, sans-serif; color: #e0e0e0; }
     .cmp-summary { background: #1e1e1e; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; }
-    .cmp-summary-row { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; }
+    .cmp-summary-row { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; align-items: center; }
     .cmp-badge { padding: 3px 10px; border-radius: 12px; font-weight: 600; font-size: 12px; }
     .cmp-badge-diff { background: #5c2d2d; color: #ff9999; }
     .cmp-badge-same { background: #1f4d2e; color: #90ee90; }
     .cmp-badge-miss { background: #4d4020; color: #ffd700; }
+    .cmp-badge-src { background: #2a2a3a; color: #b0b0ff; font-size: 11px; }
     .cmp-error { background: #4d1f1f; color: #ffb3b3; padding: 10px; border-radius: 6px; margin-bottom: 12px; font-size: 13px; }
     .cmp-table { width: 100%; border-collapse: collapse; font-size: 13px; background: #1a1a1a; border-radius: 8px; overflow: hidden; }
     .cmp-table th { background: #2a2a2a; padding: 10px 12px; text-align: left; font-weight: 600; color: #bbb; border-bottom: 1px solid #333; }
@@ -925,11 +1007,20 @@ def render_comparison_html(comparison: dict, data_a: dict, data_b: dict) -> str:
     .cmp-images { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
     .cmp-img-box { background: #1a1a1a; border-radius: 8px; padding: 10px; text-align: center; }
     .cmp-img-label { font-size: 12px; color: #888; margin-top: 6px; word-break: break-all; }
-    .cmp-header-row { display: grid; grid-template-columns: 20% 40% 40%; }
+    .cmp-header-row { display: grid; grid-template-columns: 18% 41% 41%; }
     .cmp-header { font-weight: 600; padding: 10px 12px; background: #2a2a2a; color: #bbb; border-bottom: 1px solid #333; }
+    .cmp-src-indicator { font-size: 10px; margin-left: 4px; opacity: 0.7; }
+    .cmp-legend { background: #1e1e1e; padding: 8px 16px; border-radius: 6px; margin-bottom: 12px; font-size: 11px; color: #aaa; }
+    .cmp-legend-item { display: inline-block; margin-right: 14px; }
     </style>
     """
     parts = [css, '<div class="cmp-container">']
+    parts.append('<div class="cmp-legend">')
+    parts.append('<span class="cmp-legend-item">📷 = Embedded metadata</span>')
+    parts.append('<span class="cmp-legend-item">📝 = Private log</span>')
+    parts.append('<span class="cmp-legend-item">📷📝 = Both (verified match)</span>')
+    parts.append('<span class="cmp-legend-item">🔗 = Merged (embedded + log)</span>')
+    parts.append('</div>')
     if errors.get('a') or errors.get('b'):
         if errors.get('a'):
             parts.append(f'<div class="cmp-error">Image A error: {errors["a"]}</div>')
@@ -943,6 +1034,8 @@ def render_comparison_html(comparison: dict, data_a: dict, data_b: dict) -> str:
     parts.append(f'<span class="cmp-badge cmp-badge-miss">Missing in B: {summary["missing_b"]}</span>')
     if summary['lora_different']:
         parts.append(f'<span class="cmp-badge cmp-badge-diff">LoRA differ</span>')
+    parts.append(f'<span class="cmp-badge cmp-badge-src">A: {_source_summary_label(source_a)}</span>')
+    parts.append(f'<span class="cmp-badge cmp-badge-src">B: {_source_summary_label(source_b)}</span>')
     parts.append('</div></div>')
     parts.append('<table class="cmp-table">')
     parts.append('<thead><tr class="cmp-header-row">')
@@ -958,8 +1051,10 @@ def render_comparison_html(comparison: dict, data_a: dict, data_b: dict) -> str:
             row_class = ' class="cmp-only-a"'
         elif entry['status'] == 'only_b':
             row_class = ' class="cmp-only-b"'
-        va = f'<span class="cmp-val-a">{entry["formatted_a"]}</span>' if entry['in_a'] else '<span class="cmp-val-miss">(not set)</span>'
-        vb = f'<span class="cmp-val-b">{entry["formatted_b"]}</span>' if entry['in_b'] else '<span class="cmp-val-miss">(not set)</span>'
+        src_tag_a = _source_tag(entry.get('source_a'))
+        src_tag_b = _source_tag(entry.get('source_b'))
+        va = f'<span class="cmp-val-a">{entry["formatted_a"]}</span> {src_tag_a}' if entry['in_a'] else '<span class="cmp-val-miss">(not set)</span>'
+        vb = f'<span class="cmp-val-b">{entry["formatted_b"]}</span> {src_tag_b}' if entry['in_b'] else '<span class="cmp-val-miss">(not set)</span>'
         parts.append(f'<tr{row_class}><td class="cmp-field">{entry["label"]}</td><td>{va}</td><td>{vb}</td></tr>')
     parts.append('</tbody></table>')
     lc = comparison['lora_comparison']
