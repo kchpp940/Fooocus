@@ -35,58 +35,70 @@ def generate_clicked(task: worker.AsyncTask):
 
     with model_management.interrupt_processing_mutex:
         model_management.interrupt_processing = False
-    # outputs=[progress_html, progress_window, progress_gallery, gallery]
 
     if len(task.args) == 0:
         return
 
     execution_start_time = time.perf_counter()
     finished = False
+    final_results = []
 
-    yield gr.update(visible=True, value=modules.html.make_progress_html(1, 'Waiting for task to start ...')), \
-        gr.update(visible=True, value=None), \
-        gr.update(visible=False, value=None), \
-        gr.update(visible=False)
+    try:
+        yield gr.update(visible=True, value=modules.html.make_progress_html(1, 'Waiting for task to start ...')), \
+            gr.update(visible=True, value=None), \
+            gr.update(visible=False, value=None), \
+            gr.update(visible=False)
 
-    worker.async_tasks.append(task)
+        worker.async_tasks.append(task)
 
-    while not finished:
-        time.sleep(0.01)
-        if len(task.yields) > 0:
-            flag, product = task.yields.pop(0)
-            if flag == 'preview':
+        while not finished:
+            time.sleep(0.01)
+            if len(task.yields) > 0:
+                flag, product = task.yields.pop(0)
+                if flag == 'preview':
 
-                # help bad internet connection by skipping duplicated preview
-                if len(task.yields) > 0:  # if we have the next item
-                    if task.yields[0][0] == 'preview':   # if the next item is also a preview
-                        # print('Skipped one preview for better internet connection.')
-                        continue
+                    # help bad internet connection by skipping duplicated preview
+                    if len(task.yields) > 0:  # if we have the next item
+                        if task.yields[0][0] == 'preview':   # if the next item is also a preview
+                            # print('Skipped one preview for better internet connection.')
+                            continue
 
-                percentage, title, image = product
-                yield gr.update(visible=True, value=modules.html.make_progress_html(percentage, title)), \
-                    gr.update(visible=True, value=image) if image is not None else gr.update(), \
-                    gr.update(), \
-                    gr.update(visible=False)
-            if flag == 'results':
-                yield gr.update(visible=True), \
-                    gr.update(visible=True), \
-                    gr.update(visible=True, value=product), \
-                    gr.update(visible=False)
-            if flag == 'finish':
-                if not args_manager.args.disable_enhance_output_sorting:
-                    product = sort_enhance_images(product, task)
+                    percentage, title, image = product
+                    yield gr.update(visible=True, value=modules.html.make_progress_html(percentage, title)), \
+                        gr.update(visible=True, value=image) if image is not None else gr.update(), \
+                        gr.update(), \
+                        gr.update(visible=False)
+                if flag == 'results':
+                    yield gr.update(visible=True), \
+                        gr.update(visible=True), \
+                        gr.update(visible=True, value=product), \
+                        gr.update(visible=False)
+                if flag == 'finish':
+                    if not args_manager.args.disable_enhance_output_sorting:
+                        product = sort_enhance_images(product, task)
 
-                yield gr.update(visible=False), \
-                    gr.update(visible=False), \
-                    gr.update(visible=False), \
-                    gr.update(visible=True, value=product)
-                finished = True
+                    final_results = product
 
-                # delete Fooocus temp images, only keep gradio temp images
-                if args_manager.args.disable_image_log:
-                    for filepath in product:
-                        if isinstance(filepath, str) and os.path.exists(filepath):
-                            os.remove(filepath)
+                    yield gr.update(visible=False), \
+                        gr.update(visible=False), \
+                        gr.update(visible=False), \
+                        gr.update(visible=True, value=product)
+                    finished = True
+
+                    # delete Fooocus temp images, only keep gradio temp images
+                    if args_manager.args.disable_image_log:
+                        for filepath in product:
+                            if isinstance(filepath, str) and os.path.exists(filepath):
+                                os.remove(filepath)
+    finally:
+        if not finished:
+            if not args_manager.args.disable_enhance_output_sorting:
+                final_results = sort_enhance_images(task.results, task)
+
+            yield gr.update(visible=False), \
+                gr.update(visible=False), \
+                gr.update(visible=False), \
+                gr.update(visible=True, value=final_results) if len(final_results) > 0 else gr.update(visible=True)
 
     execution_time = time.perf_counter() - execution_start_time
     print(f'Total time: {execution_time:.2f} seconds')
@@ -186,14 +198,14 @@ with shared.gradio_root:
                     def stop_clicked(currentTask):
                         import ldm_patched.modules.model_management as model_management
                         currentTask.last_stop = 'stop'
-                        if (currentTask.processing):
+                        if currentTask.processing:
                             model_management.interrupt_current_processing()
                         return currentTask
 
                     def skip_clicked(currentTask):
                         import ldm_patched.modules.model_management as model_management
                         currentTask.last_stop = 'skip'
-                        if (currentTask.processing):
+                        if currentTask.processing:
                             model_management.interrupt_current_processing()
                         return currentTask
 
