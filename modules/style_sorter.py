@@ -16,12 +16,32 @@ def _get_sorted_styles_path():
 
 all_styles = []
 _special_styles = ['Fooocus V2', 'Random Style']
+_valid_style_set = set()
+
+
+def _rebuild_valid_style_set():
+    global _valid_style_set
+    _valid_style_set = set(all_styles) | set(_special_styles)
+
+
+def _validate_style_list(lst, context='unknown'):
+    if not _valid_style_set:
+        _rebuild_valid_style_set()
+    invalid = [s for s in lst if s not in _valid_style_set]
+    if invalid:
+        raise ValueError(
+            'Style validation failed ({}): {} entries are not real style names: {}'.format(
+                context, len(invalid), invalid[:5]
+            )
+        )
 
 
 def try_load_sorted_styles(style_names, default_selected):
     global all_styles
 
     all_styles = style_names
+    _rebuild_valid_style_set()
+    _validate_style_list(default_selected, 'default_selected')
 
     sorted_styles_path = _get_sorted_styles_path()
     try:
@@ -139,6 +159,8 @@ def build_metadata_html():
 def refresh_style_choices(selected, filter_mode='all', group_by='none', query=''):
     global all_styles
 
+    _validate_style_list(selected, 'input selected')
+
     styles_list = list(all_styles)
 
     styles_list = _apply_filter(styles_list, filter_mode, selected)
@@ -146,6 +168,9 @@ def refresh_style_choices(selected, filter_mode='all', group_by='none', query=''
     styles_list = _apply_priority_sort(styles_list, selected, query)
 
     valid_selected = [s for s in selected if s in styles_list]
+
+    _validate_style_list(styles_list, 'output choices')
+    _validate_style_list(valid_selected, 'output value')
 
     return (
         gr.CheckboxGroup.update(choices=styles_list, value=valid_selected),
@@ -155,10 +180,13 @@ def refresh_style_choices(selected, filter_mode='all', group_by='none', query=''
 
 def sort_styles(selected):
     global all_styles
+    _validate_style_list(selected, 'drag sort selected')
     unselected = [y for y in all_styles if y not in selected]
     sorted_styles = selected + unselected
+    _validate_style_list(sorted_styles, 'drag sort result')
     _save_sorted_styles(sorted_styles)
     all_styles = sorted_styles
+    _rebuild_valid_style_set()
     return refresh_style_choices(selected)
 
 
@@ -187,7 +215,10 @@ def search_styles(selected, query, filter_mode, group_by):
 def track_style_usage(style_names):
     for style in style_names:
         if style not in _special_styles:
-            style_prefs.add_to_recently_used(style)
+            if style in _valid_style_set or style in set(all_styles):
+                style_prefs.add_to_recently_used(style)
+            else:
+                print('Warning: skip tracking unknown style name:', style)
 
 
 def get_favorites():

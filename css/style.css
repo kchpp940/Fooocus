@@ -499,6 +499,11 @@ div:has(> #positive_prompt) {
   text-transform: uppercase;
   letter-spacing: 0.5px;
   pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  z-index: 1;
+  cursor: default;
   border-radius: 0 4px 4px 0;
 }
 
