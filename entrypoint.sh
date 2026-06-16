@@ -29,5 +29,11 @@ mklink outputs
 # Import old files
 import outputs
 
+# user presets
+mklink user_presets
+# Import old files
+import user_presets
+
 # Start application
+export FOOOCUS_USER_DATA_DIR="$DATADIR"
 python launch.py $*

@@ -15,6 +15,33 @@ from modules.flags import OutputFormat, Performance, MetadataScheme
 _root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def get_user_data_dir():
+    env_dir = os.getenv('FOOOCUS_USER_DATA_DIR')
+    if env_dir:
+        user_dir = os.path.abspath(env_dir)
+    else:
+        config_path_val = os.getenv('config_path')
+        if config_path_val:
+            user_dir = os.path.dirname(os.path.abspath(config_path_val))
+        else:
+            home = os.path.expanduser('~')
+            user_dir = os.path.join(home, '.fooocus')
+            if not os.path.exists(user_dir):
+                try:
+                    os.makedirs(user_dir, exist_ok=True)
+                except (PermissionError, OSError):
+                    user_dir = os.path.join(_root_dir, 'user_data')
+                    print(f'Cannot create user data dir in home, falling back to: {user_dir}')
+    os.makedirs(user_dir, exist_ok=True)
+    return user_dir
+
+
+def get_user_presets_dir():
+    user_presets_dir = os.path.join(get_user_data_dir(), 'user_presets')
+    os.makedirs(user_presets_dir, exist_ok=True)
+    return user_presets_dir
+
+
 def get_config_path(key, default_value):
     env = os.getenv(key)
     if env is not None and isinstance(env, str):
@@ -101,34 +128,231 @@ def try_load_deprecated_user_path_config():
 
 try_load_deprecated_user_path_config()
 
-def get_presets():
-    preset_folder = os.path.join(_root_dir, 'presets')
-    presets = ['initial']
-    if not os.path.exists(preset_folder):
-        print('No presets found.')
-        return presets
+USER_PRESET_PREFIX = '[User] '
 
-    return presets + [f[:f.index(".json")] for f in os.listdir(preset_folder) if f.endswith('.json')]
+
+def get_builtin_presets_dir():
+    return os.path.join(_root_dir, 'presets')
+
+
+def is_user_preset(preset_name):
+    return isinstance(preset_name, str) and preset_name.startswith(USER_PRESET_PREFIX)
+
+
+def strip_user_prefix(preset_name):
+    if is_user_preset(preset_name):
+        return preset_name[len(USER_PRESET_PREFIX):]
+    return preset_name
+
+
+def add_user_prefix(preset_name):
+    if not is_user_preset(preset_name):
+        return USER_PRESET_PREFIX + preset_name
+    return preset_name
+
+
+def get_builtin_presets():
+    preset_folder = get_builtin_presets_dir()
+    if not os.path.exists(preset_folder):
+        return []
+    return [f[:-5] for f in os.listdir(preset_folder) if f.endswith('.json')]
+
+
+def get_user_presets():
+    preset_folder = get_user_presets_dir()
+    if not os.path.exists(preset_folder):
+        return []
+    return [add_user_prefix(f[:-5]) for f in os.listdir(preset_folder) if f.endswith('.json')]
+
+
+def get_presets():
+    presets = ['initial']
+    builtin = get_builtin_presets()
+    user = get_user_presets()
+    return presets + builtin + user
+
 
 def update_presets():
     global available_presets
     available_presets = get_presets()
 
+
 def try_get_preset_content(preset):
-    if isinstance(preset, str):
-        preset_path = os.path.join(_root_dir, 'presets', f'{preset}.json')
-        try:
-            if os.path.exists(preset_path):
-                with open(preset_path, "r", encoding="utf-8") as json_file:
-                    json_content = json.load(json_file)
-                    print(f'Loaded preset: {preset_path}')
-                    return json_content
-            else:
-                raise FileNotFoundError
-        except Exception as e:
-            print(f'Load preset [{preset_path}] failed')
-            print(e)
+    if not isinstance(preset, str):
+        return {}
+
+    if preset == 'initial':
+        return {}
+
+    if is_user_preset(preset):
+        preset_name = strip_user_prefix(preset)
+        preset_path = os.path.join(get_user_presets_dir(), f'{preset_name}.json')
+    else:
+        preset_path = os.path.join(get_builtin_presets_dir(), f'{preset}.json')
+
+    try:
+        if os.path.exists(preset_path):
+            with open(preset_path, "r", encoding="utf-8") as json_file:
+                json_content = json.load(json_file)
+                print(f'Loaded preset: {preset_path}')
+                return json_content
+        else:
+            raise FileNotFoundError
+    except Exception as e:
+        print(f'Load preset [{preset_path}] failed')
+        print(e)
     return {}
+
+
+def save_user_preset(preset_name, preset_data):
+    if not isinstance(preset_name, str) or preset_name.strip() == '':
+        return False, 'Preset name cannot be empty'
+
+    preset_name = strip_user_prefix(preset_name).strip()
+
+    invalid_chars = '<>:"/\\|?*'
+    if any(c in preset_name for c in invalid_chars):
+        return False, f'Preset name contains invalid characters: {invalid_chars}'
+
+    builtin_presets = get_builtin_presets()
+    if preset_name in builtin_presets:
+        return False, 'Cannot overwrite built-in preset'
+
+    preset_path = os.path.join(get_user_presets_dir(), f'{preset_name}.json')
+
+    try:
+        with open(preset_path, "w", encoding="utf-8") as json_file:
+            json.dump(preset_data, json_file, indent=4, ensure_ascii=False)
+        print(f'User preset saved: {preset_path}')
+        update_presets()
+        return True, add_user_prefix(preset_name)
+    except Exception as e:
+        print(f'Save user preset [{preset_name}] failed')
+        print(e)
+        return False, str(e)
+
+
+def delete_user_preset(preset_name):
+    if not is_user_preset(preset_name):
+        return False, 'Can only delete user presets'
+
+    preset_name = strip_user_prefix(preset_name)
+    preset_path = os.path.join(get_user_presets_dir(), f'{preset_name}.json')
+
+    try:
+        if os.path.exists(preset_path):
+            os.remove(preset_path)
+            print(f'User preset deleted: {preset_path}')
+            update_presets()
+            return True, 'Deleted successfully'
+        else:
+            return False, 'Preset not found'
+    except Exception as e:
+        print(f'Delete user preset [{preset_name}] failed')
+        print(e)
+        return False, str(e)
+
+
+def rename_user_preset(old_preset_name, new_preset_name):
+    if not is_user_preset(old_preset_name):
+        return False, 'Can only rename user presets'
+
+    old_name = strip_user_prefix(old_preset_name)
+    new_name = strip_user_prefix(new_preset_name).strip()
+
+    if new_name == '':
+        return False, 'New preset name cannot be empty'
+
+    invalid_chars = '<>:"/\\|?*'
+    if any(c in new_name for c in invalid_chars):
+        return False, f'Preset name contains invalid characters: {invalid_chars}'
+
+    builtin_presets = get_builtin_presets()
+    if new_name in builtin_presets:
+        return False, 'Name conflicts with built-in preset'
+
+    user_presets = get_user_presets()
+    if add_user_prefix(new_name) in user_presets and new_name != old_name:
+        return False, 'A user preset with this name already exists'
+
+    old_path = os.path.join(get_user_presets_dir(), f'{old_name}.json')
+    new_path = os.path.join(get_user_presets_dir(), f'{new_name}.json')
+
+    try:
+        if not os.path.exists(old_path):
+            return False, 'Source preset not found'
+        os.rename(old_path, new_path)
+        print(f'User preset renamed: {old_path} -> {new_path}')
+        update_presets()
+        return True, add_user_prefix(new_name)
+    except Exception as e:
+        print(f'Rename user preset [{old_name}] -> [{new_name}] failed')
+        print(e)
+        return False, str(e)
+
+
+def duplicate_user_preset(source_preset_name, new_preset_name):
+    source_content = try_get_preset_content(source_preset_name)
+    if not source_content:
+        return False, 'Source preset content is empty or not found'
+
+    return save_user_preset(new_preset_name, source_content)
+
+
+def get_preset_details(preset_name):
+    content = try_get_preset_content(preset_name)
+    if not content:
+        if preset_name == 'initial':
+            return {'name': preset_name, 'type': 'initial', 'details': {}, 'description': 'Initial default settings'}
+        return None
+
+    result = {
+        'name': preset_name,
+        'type': 'user' if is_user_preset(preset_name) else 'builtin',
+        'details': {},
+        'description': ''
+    }
+
+    display_keys = {
+        'default_model': 'Base Model',
+        'default_refiner': 'Refiner Model',
+        'default_refiner_switch': 'Refiner Switch',
+        'default_loras': 'LoRAs',
+        'default_cfg_scale': 'CFG Scale',
+        'default_sample_sharpness': 'Sharpness',
+        'default_cfg_tsnr': 'Adaptive CFG (TSNR)',
+        'default_clip_skip': 'CLIP Skip',
+        'default_sampler': 'Sampler',
+        'default_scheduler': 'Scheduler',
+        'default_performance': 'Performance',
+        'default_styles': 'Default Styles',
+        'default_aspect_ratio': 'Aspect Ratio',
+        'default_overwrite_step': 'Steps (overwrite)',
+        'default_vae': 'VAE',
+        'default_inpaint_engine_version': 'Inpaint Engine',
+    }
+
+    for config_key, display_name in display_keys.items():
+        if config_key in content:
+            value = content[config_key]
+            if config_key == 'default_loras' and isinstance(value, list):
+                lora_strs = []
+                for lora in value:
+                    if isinstance(lora, list) and len(lora) >= 2:
+                        if len(lora) == 3:
+                            enabled, name, weight = lora
+                            status = '✓' if enabled else '✗'
+                            lora_strs.append(f'{status} {name} (w={weight})')
+                        else:
+                            name, weight = lora[0], lora[1]
+                            lora_strs.append(f'{name} (w={weight})')
+                result['details'][display_name] = lora_strs if lora_strs else 'None'
+            elif config_key == 'default_styles' and isinstance(value, list):
+                result['details'][display_name] = value
+            else:
+                result['details'][display_name] = value
+
+    return result
 
 available_presets = get_presets()
 preset = args_manager.args.preset
@@ -181,10 +405,10 @@ def get_dir_or_set_default(key, default_value, as_array=False, make_directory=Fa
         for path in default_value:
             abs_path = os.path.abspath(os.path.join(os.path.dirname(__file__), path))
             dp.append(abs_path)
-            makedirs_with_log(abs_path)
+            os.makedirs(abs_path, exist_ok=True)
     else:
         dp = os.path.abspath(os.path.join(os.path.dirname(__file__), default_value))
-        makedirs_with_log(dp)
+        os.makedirs(dp, exist_ok=True)
         if as_array:
             dp = [dp]
     config_dict[key] = dp
@@ -205,67 +429,6 @@ path_wildcards = get_dir_or_set_default('path_wildcards', '../wildcards/')
 path_safety_checker = get_dir_or_set_default('path_safety_checker', '../models/safety_checker/')
 path_sam = get_dir_or_set_default('path_sam', '../models/sam/')
 path_outputs = get_path_output()
-
-
-def _resolve_path_user_data():
-    global config_dict, visited_keys, always_save_keys
-
-    if 'path_user_data' not in visited_keys:
-        visited_keys.append('path_user_data')
-
-    env_explicit = os.getenv('path_user_data')
-    env_datadir = os.getenv('DATADIR')
-
-    has_explicit_env = env_explicit is not None and isinstance(env_explicit, str) and env_explicit.strip() != ''
-    has_datadir = env_datadir is not None and isinstance(env_datadir, str) and env_datadir.strip() != ''
-
-    if has_explicit_env:
-        print(f"Environment: path_user_data = {env_explicit}")
-        resolved = env_explicit
-        if 'path_user_data' not in always_save_keys:
-            always_save_keys.append('path_user_data')
-    elif has_datadir:
-        resolved = env_datadir
-        if 'path_user_data' in always_save_keys:
-            always_save_keys.remove('path_user_data')
-    else:
-        from_config = config_dict.get('path_user_data', None)
-        if isinstance(from_config, str) and from_config.strip() != '':
-            resolved = from_config
-        else:
-            resolved = '../user_data/'
-        if 'path_user_data' in always_save_keys:
-            always_save_keys.remove('path_user_data')
-
-    if not os.path.isabs(resolved):
-        resolved = os.path.abspath(os.path.join(os.path.dirname(__file__), resolved))
-
-    makedirs_with_log(resolved)
-
-    if not (os.path.exists(resolved) and os.path.isdir(resolved)):
-        print(f'Failed to resolve path_user_data: {resolved} is invalid or does not exist.')
-
-    config_dict['path_user_data'] = resolved
-
-    if not has_explicit_env:
-        try:
-            if os.path.exists(config_path):
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    disk_config = json.load(f)
-                if 'path_user_data' in disk_config:
-                    del disk_config['path_user_data']
-                    with open(config_path, 'w', encoding='utf-8') as f:
-                        json.dump(disk_config, f, indent=4)
-                    reason = 'DATADIR override' if has_datadir else 'path_user_data is no longer persisted in config'
-                    print(f'Migrated config: removed stale path_user_data from {config_path} ({reason})')
-        except Exception as e:
-            print(f'Warning: Failed to migrate config path_user_data: {e}')
-
-    return resolved
-
-
-path_user_data = _resolve_path_user_data()
-sorted_styles_path = os.path.join(path_user_data, 'sorted_styles.json')
 
 
 def get_config_item_or_set_default(key, default_value, validator, disable_empty_as_none=False, expected_type=None):

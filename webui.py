@@ -24,6 +24,103 @@ from modules.ui_gradio_extensions import reload_javascript
 from modules.auth import auth_enabled, check_auth
 from modules.util import is_json
 
+
+def build_preset_data_from_ui(*args):
+    preset_data = {}
+
+    arg_idx = 0
+    default_model = args[arg_idx]; arg_idx += 1
+    default_refiner = args[arg_idx]; arg_idx += 1
+    default_refiner_switch = args[arg_idx]; arg_idx += 1
+    default_cfg_scale = args[arg_idx]; arg_idx += 1
+    default_sample_sharpness = args[arg_idx]; arg_idx += 1
+    default_cfg_tsnr = args[arg_idx]; arg_idx += 1
+    default_clip_skip = args[arg_idx]; arg_idx += 1
+    default_sampler = args[arg_idx]; arg_idx += 1
+    default_scheduler = args[arg_idx]; arg_idx += 1
+    default_vae = args[arg_idx]; arg_idx += 1
+    default_performance = args[arg_idx]; arg_idx += 1
+    default_aspect_ratio_label = args[arg_idx]; arg_idx += 1
+    default_styles = args[arg_idx]; arg_idx += 1
+    default_overwrite_step = args[arg_idx]; arg_idx += 1
+    default_inpaint_engine_version = args[arg_idx]; arg_idx += 1
+
+    lora_count = modules.config.default_max_lora_number
+    default_loras = []
+    for _ in range(lora_count):
+        enabled = args[arg_idx]; arg_idx += 1
+        model = args[arg_idx]; arg_idx += 1
+        weight = args[arg_idx]; arg_idx += 1
+        default_loras.append([enabled, model if model else 'None', float(weight)])
+
+    if '×' in str(default_aspect_ratio_label):
+        ratio_part = str(default_aspect_ratio_label).split(' ')[0]
+        default_aspect_ratio = ratio_part.replace('×', '*')
+    else:
+        default_aspect_ratio = str(default_aspect_ratio_label).replace('×', '*')
+
+    preset_data = {
+        'default_model': default_model if default_model else 'model.safetensors',
+        'default_refiner': default_refiner if default_refiner else 'None',
+        'default_refiner_switch': float(default_refiner_switch),
+        'default_loras': default_loras,
+        'default_cfg_scale': float(default_cfg_scale),
+        'default_sample_sharpness': float(default_sample_sharpness),
+        'default_cfg_tsnr': float(default_cfg_tsnr),
+        'default_clip_skip': int(default_clip_skip),
+        'default_sampler': default_sampler,
+        'default_scheduler': default_scheduler,
+        'default_vae': default_vae if default_vae != modules.flags.default_vae else 'Default (model)',
+        'default_performance': default_performance,
+        'default_aspect_ratio': default_aspect_ratio,
+        'default_styles': list(default_styles) if default_styles else [],
+        'default_overwrite_step': int(default_overwrite_step),
+        'default_inpaint_engine_version': default_inpaint_engine_version,
+        'checkpoint_downloads': {},
+        'embeddings_downloads': {},
+        'lora_downloads': {},
+        'vae_downloads': {},
+    }
+    return preset_data
+
+
+def format_preset_details_html(preset_name):
+    details = modules.config.get_preset_details(preset_name)
+    if details is None:
+        return '<div style="color: #888;">No preset selected</div>'
+
+    name = details['name']
+    ptype = details['type']
+    type_labels = {'initial': '⚪ Initial', 'builtin': '🔷 Built-in', 'user': '⭐ User'}
+    type_label = type_labels.get(ptype, ptype)
+
+    html_parts = [
+        f'<div style="margin-bottom: 10px; padding: 8px; background: #f0f0f0; border-radius: 6px;">',
+        f'<div style="font-weight: bold; font-size: 14px;">{name}</div>',
+        f'<div style="color: #666; font-size: 12px;">{type_label}</div>',
+        '</div>',
+        '<div style="max-height: 300px; overflow-y: auto; padding: 4px;">'
+    ]
+
+    if not details['details']:
+        html_parts.append('<div style="color: #888; font-style: italic;">(uses current default settings)</div>')
+    else:
+        for key, value in details['details'].items():
+            html_parts.append(f'<div style="margin: 4px 0; padding: 4px 0; border-bottom: 1px solid #eee;">')
+            html_parts.append(f'<span style="font-weight: 600; color: #444;">{key}:</span> ')
+            if isinstance(value, list):
+                html_parts.append('<ul style="margin: 4px 0 0 20px; padding: 0;">')
+                for item in value:
+                    html_parts.append(f'<li style="font-size: 12px; color: #555;">{item}</li>')
+                html_parts.append('</ul>')
+            else:
+                html_parts.append(f'<span style="color: #2563eb;">{value}</span>')
+            html_parts.append('</div>')
+
+    html_parts.append('</div>')
+    return ''.join(html_parts)
+
+
 def get_task(*args):
     args = list(args)
     args.pop(0)
@@ -563,6 +660,47 @@ with shared.gradio_root:
                                                    value=args_manager.args.preset if args_manager.args.preset else "initial",
                                                    interactive=True)
 
+                    with gr.Accordion(label='Preset Details & Management', open=True):
+                        preset_details_html = gr.HTML(
+                            value=format_preset_details_html(
+                                args_manager.args.preset if args_manager.args.preset else "initial"
+                            )
+                        )
+
+                        with gr.Row():
+                            new_preset_name_input = gr.Textbox(
+                                label='New Preset Name',
+                                placeholder='Enter preset name...',
+                                interactive=True,
+                                scale=3
+                            )
+                            save_preset_btn = gr.Button(
+                                label='💾 Save Current as Preset',
+                                variant='primary',
+                                scale=2
+                            )
+
+                        with gr.Row():
+                            duplicate_preset_btn = gr.Button(
+                                label='📋 Duplicate Current',
+                                variant='secondary'
+                            )
+                            rename_preset_btn = gr.Button(
+                                label='✏️ Rename',
+                                variant='secondary'
+                            )
+                            delete_preset_btn = gr.Button(
+                                label='🗑️ Delete',
+                                variant='stop'
+                            )
+
+                        preset_operation_msg = gr.Textbox(
+                            label='Status',
+                            value='',
+                            interactive=False,
+                            show_label=True
+                        )
+
                 performance_selection = gr.Radio(label='Performance',
                                                  choices=flags.Performance.values(),
                                                  value=modules.config.default_performance,
@@ -937,6 +1075,17 @@ with shared.gradio_root:
                 .then(lambda: None, _js='()=>{refresh_style_localization();}') \
                 .then(inpaint_engine_state_change, inputs=[inpaint_engine_state] + enhance_inpaint_mode_ctrls, outputs=enhance_inpaint_engine_ctrls, queue=False, show_progress=False)
 
+            def preset_selection_update_details(preset_name):
+                return format_preset_details_html(preset_name)
+
+            preset_selection.change(
+                preset_selection_update_details,
+                inputs=[preset_selection],
+                outputs=[preset_details_html],
+                queue=False,
+                show_progress=False
+            )
+
         performance_selection.change(lambda x: [gr.update(interactive=not flags.Performance.has_restricted_features(x))] * 11 +
                                                [gr.update(visible=not flags.Performance.has_restricted_features(x))] * 1 +
                                                [gr.update(value=flags.Performance.has_restricted_features(x))] * 1,
@@ -1109,6 +1258,113 @@ with shared.gradio_root:
                       outputs=[prompt, style_selections], show_progress=True, queue=True) \
                 .then(fn=style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False) \
                 .then(lambda: None, _js='()=>{refresh_style_localization();}')
+
+        if not args_manager.args.disable_preset_selection:
+            def save_current_as_preset(new_name, *ui_args):
+                if not new_name or new_name.strip() == '':
+                    return gr.update(), gr.update(), '⚠️  Error: Preset name cannot be empty'
+                try:
+                    preset_data = build_preset_data_from_ui(*ui_args)
+                    success, result = modules.config.save_user_preset(new_name.strip(), preset_data)
+                    if success:
+                        modules.config.update_files()
+                        return (
+                            gr.update(choices=modules.config.available_presets, value=result),
+                            format_preset_details_html(result),
+                            f'✅  Preset saved successfully: {result}'
+                        )
+                    else:
+                        return gr.update(), gr.update(), f'⚠️  Error: {result}'
+                except Exception as e:
+                    return gr.update(), gr.update(), f'⚠️  Error saving preset: {str(e)}'
+
+            save_preset_inputs = [new_preset_name_input]
+            save_preset_inputs += [
+                base_model, refiner_model, refiner_switch,
+                guidance_scale, sharpness, adaptive_cfg, clip_skip,
+                sampler_name, scheduler_name, vae_name,
+                performance_selection, aspect_ratios_selection,
+                style_selections, overwrite_step, inpaint_engine
+            ]
+            save_preset_inputs += lora_ctrls
+
+            save_preset_btn.click(
+                save_current_as_preset,
+                inputs=save_preset_inputs,
+                outputs=[preset_selection, preset_details_html, preset_operation_msg],
+                queue=False,
+                show_progress=False
+            )
+
+            def duplicate_current_preset(current_preset, new_name):
+                if not new_name or new_name.strip() == '':
+                    return gr.update(), gr.update(), '⚠️  Error: New preset name is required for duplication'
+                if current_preset == 'initial':
+                    return gr.update(), gr.update(), '⚠️  Error: Cannot duplicate "initial", use "Save Current as Preset" instead'
+                success, result = modules.config.duplicate_user_preset(current_preset, new_name.strip())
+                if success:
+                    modules.config.update_files()
+                    return (
+                        gr.update(choices=modules.config.available_presets, value=result),
+                        format_preset_details_html(result),
+                        f'✅  Preset duplicated: {current_preset} → {result}'
+                    )
+                else:
+                    return gr.update(), gr.update(), f'⚠️  Error: {result}'
+
+            duplicate_preset_btn.click(
+                duplicate_current_preset,
+                inputs=[preset_selection, new_preset_name_input],
+                outputs=[preset_selection, preset_details_html, preset_operation_msg],
+                queue=False,
+                show_progress=False
+            )
+
+            def rename_current_preset(current_preset, new_name):
+                if not modules.config.is_user_preset(current_preset):
+                    return gr.update(), gr.update(), '⚠️  Error: Can only rename user presets (marked with [User] prefix)'
+                if not new_name or new_name.strip() == '':
+                    return gr.update(), gr.update(), '⚠️  Error: New preset name cannot be empty'
+                success, result = modules.config.rename_user_preset(current_preset, new_name.strip())
+                if success:
+                    modules.config.update_files()
+                    return (
+                        gr.update(choices=modules.config.available_presets, value=result),
+                        format_preset_details_html(result),
+                        f'✅  Preset renamed: {current_preset} → {result}'
+                    )
+                else:
+                    return gr.update(), gr.update(), f'⚠️  Error: {result}'
+
+            rename_preset_btn.click(
+                rename_current_preset,
+                inputs=[preset_selection, new_preset_name_input],
+                outputs=[preset_selection, preset_details_html, preset_operation_msg],
+                queue=False,
+                show_progress=False
+            )
+
+            def delete_current_preset(current_preset):
+                if not modules.config.is_user_preset(current_preset):
+                    return gr.update(), gr.update(), '⚠️  Error: Can only delete user presets (marked with [User] prefix)'
+                success, result = modules.config.delete_user_preset(current_preset)
+                if success:
+                    modules.config.update_files()
+                    return (
+                        gr.update(choices=modules.config.available_presets, value='initial'),
+                        format_preset_details_html('initial'),
+                        f'✅  Preset deleted: {current_preset}'
+                    )
+                else:
+                    return gr.update(), gr.update(), f'⚠️  Error: {result}'
+
+            delete_preset_btn.click(
+                delete_current_preset,
+                inputs=[preset_selection],
+                outputs=[preset_selection, preset_details_html, preset_operation_msg],
+                queue=False,
+                show_progress=False
+            )
 
 def dump_default_english_config():
     from modules.localization import dump_english_config
