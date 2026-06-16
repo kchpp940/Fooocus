@@ -511,6 +511,12 @@ div:has(> #positive_prompt) {
   margin-top: 0;
 }
 
+.style_group_header.selected_only_group {
+  background: linear-gradient(90deg, var(--primary-100), transparent);
+  border-left-color: var(--primary-600);
+  color: var(--primary-700);
+}
+
 .style_selections label.style-item {
   position: relative;
 }

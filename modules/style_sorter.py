@@ -81,23 +81,51 @@ def localization_key(x):
 
 
 def _apply_filter(styles_list, filter_mode, selected):
+    selected_set = set(selected)
+
     if filter_mode == 'all':
-        return styles_list
+        result = styles_list
+        selected_only = set()
+        return result, selected_only
+
     elif filter_mode == 'favorites':
-        favorites = style_prefs.get_favorites()
-        return [s for s in styles_list if s in favorites or s in selected or s in _special_styles]
+        favorites = set(style_prefs.get_favorites())
+        matches = [s for s in styles_list if s in favorites or s in _special_styles]
+
     elif filter_mode == 'recent':
-        recent = style_prefs.get_recently_used()
-        return [s for s in styles_list if s in recent or s in selected or s in _special_styles]
-    return styles_list
+        recent = set(style_prefs.get_recently_used())
+        matches = [s for s in styles_list if s in recent or s in _special_styles]
+
+    else:
+        matches = styles_list
+
+    match_set = set(matches)
+    selected_only = selected_set - match_set
+    result = list(styles_list)
+
+    return result, selected_only
 
 
-def _apply_grouping(styles_list, group_by, selected):
+def _apply_grouping(styles_list, group_by, selected, selected_only=None, query=''):
+    if selected_only is None:
+        selected_only = set()
+
     if group_by == 'none':
+        if query and selected_only:
+            special = [s for s in styles_list if s in _special_styles]
+            selected = [s for s in styles_list if s in selected_only]
+            others = [s for s in styles_list if s not in _special_styles and s not in selected_only]
+            return special + selected + others
         return styles_list
 
     special = [s for s in styles_list if s in _special_styles]
-    regular = [s for s in styles_list if s not in _special_styles]
+    selected_only_list = [s for s in styles_list if s in selected_only]
+    regular = [s for s in styles_list if s not in _special_styles and s not in selected_only]
+
+    result = list(special)
+
+    if selected_only_list:
+        result.extend(selected_only_list)
 
     if group_by == 'source':
         groups = {}
@@ -107,18 +135,17 @@ def _apply_grouping(styles_list, group_by, selected):
                 groups[source] = []
             groups[source].append(s)
 
-        result = list(special)
         for source in sorted(groups.keys()):
             result.extend(groups[source])
         return result
 
     elif group_by == 'favorites':
-        favorites = style_prefs.get_favorites()
+        favorites = set(style_prefs.get_favorites())
         fav_styles = [s for s in regular if s in favorites]
         other_styles = [s for s in regular if s not in favorites]
-        return list(special) + fav_styles + other_styles
+        return result + fav_styles + other_styles
 
-    return styles_list
+    return result
 
 
 def _apply_priority_sort(styles_list, selected, query=''):
@@ -130,26 +157,43 @@ def _apply_priority_sort(styles_list, selected, query=''):
     selected_list = [s for s in styles_list if s in selected]
     unselected = [s for s in styles_list if s not in selected]
 
-    favorites = style_prefs.get_favorites()
+    favorites = set(style_prefs.get_favorites())
     fav_unselected = [s for s in unselected if s in favorites]
     other_unselected = [s for s in unselected if s not in favorites]
 
     return selected_list + fav_unselected + other_unselected
 
 
-def build_metadata_html():
+def _get_group_for_style(style_name, group_by, selected_only):
+    if style_name in selected_only:
+        return 'Selected Styles'
+    if style_name in _special_styles:
+        return 'Quick Access'
+    if group_by == 'favorites':
+        return 'Favorites' if style_prefs.is_favorite(style_name) else 'All Styles'
+    if group_by == 'source':
+        return sdxl_styles.get_source_label(sdxl_styles.get_style_source(style_name))
+    return 'All Styles'
+
+
+def build_metadata_html(selected_only=None, filter_mode=None, group_by=None):
     source_map = {}
     for style_name in sdxl_styles.style_keys:
         source = sdxl_styles.get_style_source(style_name)
         if source not in source_map:
             source_map[source] = []
         source_map[source].append(style_name)
+
+    current_filter = filter_mode if filter_mode is not None else style_prefs.get_filter()
+    current_group = group_by if group_by is not None else style_prefs.get_group_by()
+
     metadata = {
         'favorites': style_prefs.get_favorites(),
         'recentlyUsed': style_prefs.get_recently_used(),
-        'groupBy': style_prefs.get_group_by(),
-        'filter': style_prefs.get_filter(),
-        'sourceMap': source_map
+        'groupBy': current_group,
+        'filter': current_filter,
+        'sourceMap': source_map,
+        'selectedOnly': list(selected_only) if selected_only else []
     }
     return '<script id="style-metadata-data" type="application/json">{}</script>'.format(
         json.dumps(metadata, ensure_ascii=False)
@@ -163,18 +207,26 @@ def refresh_style_choices(selected, filter_mode='all', group_by='none', query=''
 
     styles_list = list(all_styles)
 
-    styles_list = _apply_filter(styles_list, filter_mode, selected)
-    styles_list = _apply_grouping(styles_list, group_by, selected)
+    styles_list, selected_only = _apply_filter(styles_list, filter_mode, selected)
+
+    if query and query.strip():
+        selected_set = set(selected)
+        all_matched = [s for s in styles_list if query.lower() in localization_key(s).lower()]
+        match_set = set(all_matched)
+        query_selected_only = selected_set - match_set
+        selected_only = selected_only | query_selected_only
+
+    styles_list = _apply_grouping(styles_list, group_by, selected, selected_only, query)
     styles_list = _apply_priority_sort(styles_list, selected, query)
 
-    valid_selected = [s for s in selected if s in styles_list]
+    full_selected = list(selected)
 
     _validate_style_list(styles_list, 'output choices')
-    _validate_style_list(valid_selected, 'output value')
+    _validate_style_list(full_selected, 'output value')
 
     return (
-        gr.CheckboxGroup.update(choices=styles_list, value=valid_selected),
-        build_metadata_html()
+        gr.CheckboxGroup.update(choices=styles_list, value=full_selected),
+        build_metadata_html(selected_only, filter_mode, group_by)
     )
 
 

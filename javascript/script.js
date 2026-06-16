@@ -365,7 +365,8 @@ function addStyleGroupHeaders() {
         h.remove();
     });
 
-    if (styleFavoritesData.groupBy === 'none') {
+    var hasSelectedOnly = styleFavoritesData.selectedOnly && styleFavoritesData.selectedOnly.length > 0;
+    if (styleFavoritesData.groupBy === 'none' && !hasSelectedOnly) {
         return;
     }
 
@@ -381,6 +382,9 @@ function addStyleGroupHeaders() {
         if (group !== currentGroup) {
             var header = document.createElement('div');
             header.className = 'style_group_header';
+            if (styleFavoritesData.selectedOnly && styleFavoritesData.selectedOnly.indexOf(styleName) > -1) {
+                header.classList.add('selected_only_group');
+            }
             header.textContent = group;
             container.insertBefore(header, label);
             currentGroup = group;
@@ -389,6 +393,10 @@ function addStyleGroupHeaders() {
 }
 
 function getStyleGroup(styleName) {
+    if (styleFavoritesData.selectedOnly && styleFavoritesData.selectedOnly.indexOf(styleName) > -1) {
+        return 'Selected Styles';
+    }
+
     if (['Fooocus V2', 'Random Style'].indexOf(styleName) > -1) {
         return 'Quick Access';
     }
