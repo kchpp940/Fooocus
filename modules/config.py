@@ -216,19 +216,26 @@ def _resolve_path_user_data():
     env_explicit = os.getenv('path_user_data')
     env_datadir = os.getenv('DATADIR')
 
-    if env_explicit is not None and isinstance(env_explicit, str) and env_explicit.strip() != '':
+    has_explicit_env = env_explicit is not None and isinstance(env_explicit, str) and env_explicit.strip() != ''
+    has_datadir = env_datadir is not None and isinstance(env_datadir, str) and env_datadir.strip() != ''
+
+    if has_explicit_env:
         print(f"Environment: path_user_data = {env_explicit}")
         resolved = env_explicit
         if 'path_user_data' not in always_save_keys:
             always_save_keys.append('path_user_data')
-    elif env_datadir is not None and isinstance(env_datadir, str) and env_datadir.strip() != '':
+    elif has_datadir:
         resolved = env_datadir
+        if 'path_user_data' in always_save_keys:
+            always_save_keys.remove('path_user_data')
     else:
         from_config = config_dict.get('path_user_data', None)
         if isinstance(from_config, str) and from_config.strip() != '':
             resolved = from_config
         else:
             resolved = '../user_data/'
+        if 'path_user_data' in always_save_keys:
+            always_save_keys.remove('path_user_data')
 
     if not os.path.isabs(resolved):
         resolved = os.path.abspath(os.path.join(os.path.dirname(__file__), resolved))
@@ -239,6 +246,20 @@ def _resolve_path_user_data():
         print(f'Failed to resolve path_user_data: {resolved} is invalid or does not exist.')
 
     config_dict['path_user_data'] = resolved
+
+    if not has_explicit_env:
+        try:
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    disk_config = json.load(f)
+                if 'path_user_data' in disk_config:
+                    del disk_config['path_user_data']
+                    with open(config_path, 'w', encoding='utf-8') as f:
+                        json.dump(disk_config, f, indent=4)
+                    reason = 'DATADIR override' if has_datadir else 'path_user_data is no longer persisted in config'
+                    print(f'Migrated config: removed stale path_user_data from {config_path} ({reason})')
+        except Exception as e:
+            print(f'Warning: Failed to migrate config path_user_data: {e}')
 
     return resolved
 
