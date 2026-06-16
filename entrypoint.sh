@@ -29,9 +29,7 @@ mklink outputs
 # Import old files
 import outputs
 
-# user presets
-mklink user_presets
-# Import old files
+# Import user presets (goes to $DATADIR/user_presets, picked up by path_user_data)
 import user_presets
 
 # Start application

@@ -10,7 +10,8 @@ services:
     environment:
       - CMDARGS=--listen    # Arguments for launch.py.
       - DATADIR=/content/data   # Directory which stores models, outputs dir
-      - FOOOCUS_USER_DATA_DIR=/content/data   # Directory which stores user presets and other user data
+      - FOOOCUS_USER_DATA_DIR=/content/data   # Directory which stores user presets, sorted styles, and other user state
+      - path_user_data=/content/data          # Same as above, consistent naming with other path_* configs
       - config_path=/content/data/config.txt
       - config_example_path=/content/data/config_modification_tutorial.txt
       - path_checkpoints=/content/data/models/checkpoints/
@@ -22,7 +23,6 @@ services:
       - path_controlnet=/content/data/models/controlnet/
       - path_clip_vision=/content/data/models/clip_vision/
       - path_fooocus_expansion=/content/data/models/prompt_expansion/fooocus_expansion/
-      - sorted_styles_path=/content/data/sorted_styles.json
       - path_outputs=/content/app/outputs/    # Warning: If it is not located under '/content/app', you can't see history log!
     volumes:
       - fooocus-data:/content/data

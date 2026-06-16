@@ -14,32 +14,59 @@ from modules.flags import OutputFormat, Performance, MetadataScheme
 
 _root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+_user_data_dir = None
+
 
 def get_user_data_dir():
-    env_dir = os.getenv('FOOOCUS_USER_DATA_DIR')
+    """
+    Get the user data root directory.
+    Uses the same path_user_data config as other path_* settings.
+    
+    Priority:
+      1. FOOOCUS_USER_DATA_DIR environment variable (explicit)
+      2. path_user_data environment variable (consistent with other path_* keys)
+      3. path_user_data from config.txt
+      4. Default: ./user_data/ in project root
+    """
+    global _user_data_dir
+    if _user_data_dir is not None:
+        return _user_data_dir
+
+    env_dir = os.getenv('FOOOCUS_USER_DATA_DIR') or os.getenv('path_user_data')
     if env_dir:
-        user_dir = os.path.abspath(env_dir)
-    else:
-        config_path_val = os.getenv('config_path')
-        if config_path_val:
-            user_dir = os.path.dirname(os.path.abspath(config_path_val))
+        _user_data_dir = os.path.abspath(env_dir)
+    elif 'path_user_data' in config_dict and config_dict['path_user_data']:
+        path_val = config_dict['path_user_data']
+        if isinstance(path_val, list) and len(path_val) > 0:
+            _user_data_dir = os.path.abspath(path_val[0])
+        elif isinstance(path_val, str):
+            _user_data_dir = os.path.abspath(path_val)
         else:
-            home = os.path.expanduser('~')
-            user_dir = os.path.join(home, '.fooocus')
-            if not os.path.exists(user_dir):
-                try:
-                    os.makedirs(user_dir, exist_ok=True)
-                except (PermissionError, OSError):
-                    user_dir = os.path.join(_root_dir, 'user_data')
-                    print(f'Cannot create user data dir in home, falling back to: {user_dir}')
-    os.makedirs(user_dir, exist_ok=True)
-    return user_dir
+            _user_data_dir = os.path.join(_root_dir, 'user_data')
+    else:
+        _user_data_dir = os.path.join(_root_dir, 'user_data')
+
+    os.makedirs(_user_data_dir, exist_ok=True)
+    config_dict['path_user_data'] = _user_data_dir
+    return _user_data_dir
 
 
 def get_user_presets_dir():
     user_presets_dir = os.path.join(get_user_data_dir(), 'user_presets')
     os.makedirs(user_presets_dir, exist_ok=True)
     return user_presets_dir
+
+
+def get_sorted_styles_path():
+    """
+    Get the path to sorted_styles.json.
+    Unified under path_user_data for consistent user state location.
+    Can be overridden by SORTED_STYLES_PATH / sorted_styles_path env var for backward compatibility.
+    """
+    env_path = os.getenv('sorted_styles_path') or os.getenv('SORTED_STYLES_PATH')
+    if env_path:
+        return os.path.abspath(env_path)
+    return os.path.join(get_user_data_dir(), 'sorted_styles.json')
 
 
 def get_config_path(key, default_value):
@@ -604,6 +631,7 @@ path_fooocus_expansion = get_dir_or_set_default('path_fooocus_expansion', '../mo
 path_wildcards = get_dir_or_set_default('path_wildcards', '../wildcards/')
 path_safety_checker = get_dir_or_set_default('path_safety_checker', '../models/safety_checker/')
 path_sam = get_dir_or_set_default('path_sam', '../models/sam/')
+path_user_data = get_dir_or_set_default('path_user_data', '../user_data/', make_directory=True)
 path_outputs = get_path_output()
 
 
