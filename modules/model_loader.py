@@ -45,12 +45,14 @@ def _check_expected_size(filepath: str, expected_size: int) -> tuple[bool, str]:
 def _check_expected_hash(filepath: str, expected_hash: str) -> tuple[bool, str]:
     """Check if file hash matches expected hash.
 
+    Uses the public hash_cache.is_valid_hash() API only.
+
     Returns (matches, reason) tuple.
     """
     from modules.util import sha256
-    from modules.hash_cache import _is_valid_hash
+    from modules.hash_cache import is_valid_hash
 
-    if not _is_valid_hash(expected_hash):
+    if not is_valid_hash(expected_hash):
         return False, f'expected hash is invalid: {expected_hash}'
 
     try:
@@ -64,32 +66,38 @@ def _check_expected_hash(filepath: str, expected_hash: str) -> tuple[bool, str]:
     return True, 'ok'
 
 
-def _refresh_hash_cache(filepath: str) -> None:
-    """Recalculate and update hash cache for a file.
+def _verify_cache_consistency(filepath: str) -> None:
+    """Check whether a file's cached hash is consistent with the file on disk.
 
-    Does not delete the file; just refreshes the cache entry.
+    If the cache entry is invalid or has diverged, refresh it via the
+    public hash_cache.refresh_cache_entry() API.
+
+    This function never triggers a file redownload; only the cache is updated.
     """
     try:
-        from modules.hash_cache import hash_cache, save_cache_to_file, _hash_cache_lock
-        from modules.util import sha256
+        from modules.hash_cache import get_cached_hash, sha256_from_cache
     except ImportError:
         return
 
-    try:
-        current_hash = sha256(filepath)
-    except Exception as e:
-        print(f'[Cache] Failed to compute hash for {filepath}: {e}')
+    cached = get_cached_hash(filepath)
+    if cached is None:
         return
 
-    with _hash_cache_lock:
-        old_hash = hash_cache.get(filepath)
-        hash_cache[filepath] = current_hash
-        save_cache_to_file(filepath, current_hash)
+    from modules.util import sha256
+    try:
+        current = sha256(filepath)
+    except Exception:
+        print(f'[Cache] Cannot verify cache for {filepath}: hash computation failed')
+        return
 
-    if old_hash and old_hash != current_hash:
-        print(f'[Cache] Hash updated for {filepath}: {old_hash} -> {current_hash}')
-    else:
-        print(f'[Cache] Hash cached for {filepath}: {current_hash}')
+    if current != cached:
+        from modules.hash_cache import is_valid_hash
+        if is_valid_hash(current):
+            print(f'[Cache] Hash diverged for {filepath}, refreshing cache ...')
+            from modules.hash_cache import refresh_cache_entry
+            refresh_cache_entry(filepath, force=True)
+        else:
+            print(f'[Cache] Cannot refresh cache for {filepath}: computed hash is invalid')
 
 
 def _verify_existing_file(
@@ -104,8 +112,7 @@ def _verify_existing_file(
     1. Basic readability (non-zero, readable)
     2. Expected size (if provided)
     3. Expected hash (if provided)
-
-    Hash cache mismatch does NOT trigger redownload; we just refresh the cache.
+    4. Cache consistency (only refreshes cache, never triggers redownload)
 
     Returns (is_valid, reason) tuple.
     """
@@ -123,25 +130,7 @@ def _verify_existing_file(
         if not ok:
             return False, reason
 
-    try:
-        from modules.hash_cache import hash_cache, _validate_cache_entry
-    except ImportError:
-        return True, 'file is valid (hash cache not available)'
-
-    if filepath in hash_cache:
-        cached_hash = hash_cache[filepath]
-        if not _validate_cache_entry(filepath, cached_hash):
-            print(f'[Cache] Invalid cache entry for {filepath}, refreshing ...')
-            _refresh_hash_cache(filepath)
-        else:
-            from modules.util import sha256
-            try:
-                current_hash = sha256(filepath)
-            except Exception:
-                current_hash = None
-            if current_hash and cached_hash != current_hash:
-                print(f'[Cache] Hash diverged for {filepath}, refreshing cache ...')
-                _refresh_hash_cache(filepath)
+    _verify_cache_consistency(filepath)
 
     return True, 'file is valid'
 
@@ -166,6 +155,9 @@ def load_file_from_url(
     - If expected_size provided: exact size match
     - If expected_hash provided: exact hash match
     - Hash cache mismatch does NOT trigger redownload; cache is simply refreshed.
+
+    After a successful download, updates the hash cache via the public
+    hash_cache.refresh_cache_entry() API.
 
     Args:
         url: URL to download from.
@@ -272,6 +264,10 @@ def load_file_from_url(
             pass
         raise RuntimeError(f'Failed to finalize download: {e}')
 
-    _refresh_hash_cache(cached_file)
+    try:
+        from modules.hash_cache import refresh_cache_entry
+        refresh_cache_entry(cached_file, force=True)
+    except Exception as e:
+        print(f'[Download] Warning: could not refresh hash cache for {cached_file}: {e}')
 
     return cached_file

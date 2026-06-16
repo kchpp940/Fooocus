@@ -15,7 +15,11 @@ _hash_cache_lock = threading.Lock()
 _hash_valid_pattern = re.compile(r'^[0-9a-fA-F]+$')
 
 
-def _is_valid_hash(hash_value):
+def is_valid_hash(hash_value):
+    """Public: check if a hash string is well-formed.
+
+    Returns True iff hash_value is a string of correct length and hex chars only.
+    """
     if not isinstance(hash_value, str):
         return False
     if len(hash_value) != HASH_SHA256_LENGTH:
@@ -30,30 +34,84 @@ def _validate_cache_entry(filepath, hash_value):
         return False
     if not os.path.isfile(filepath):
         return False
-    if not _is_valid_hash(hash_value):
+    if not is_valid_hash(hash_value):
         return False
     return True
 
 
-def sha256_from_cache(filepath):
+def get_cached_hash(filepath):
+    """Public: get the cached hash for a single file.
+
+    Returns the cached hash string if present and valid, otherwise None.
+    Does NOT compute a new hash or modify the cache.
+    """
+    with _hash_cache_lock:
+        if filepath in hash_cache:
+            cached = hash_cache[filepath]
+            if _validate_cache_entry(filepath, cached):
+                return cached
+    return None
+
+
+def refresh_cache_entry(filepath, force=False):
+    """Public: recompute and update the cache entry for a single file.
+
+    This is the unified entry point for refreshing a file's hash.
+    Always acquires the lock, validates the computed hash, and writes
+    through the normal save path (with atomic replacement for full writes).
+
+    Args:
+        filepath: Absolute path to the model file.
+        force: If True, recompute even if a valid cached entry exists.
+
+    Returns:
+        The new (or existing valid) hash string.
+    """
     global hash_cache
 
-    if filepath in hash_cache:
-        cached_hash = hash_cache[filepath]
-        if _validate_cache_entry(filepath, cached_hash):
-            return cached_hash
-        print(f'[Cache] Invalidating stale cache entry for {filepath}')
-        del hash_cache[filepath]
+    filepath = os.path.abspath(filepath)
 
-    print(f"[Cache] Calculating sha256 for {filepath}")
-    hash_value = sha256(filepath)
-    print(f"[Cache] sha256 for {filepath}: {hash_value}")
+    if not force:
+        existing = get_cached_hash(filepath)
+        if existing is not None:
+            return existing
+
+    if not os.path.isfile(filepath):
+        print(f'[Cache] Cannot refresh hash: file does not exist {filepath}')
+        return None
+
+    try:
+        new_hash = sha256(filepath)
+    except Exception as e:
+        print(f'[Cache] Failed to compute sha256 for {filepath}: {e}')
+        return None
+
+    if not is_valid_hash(new_hash):
+        print(f'[Cache] Computed hash is invalid for {filepath}: {new_hash}')
+        return None
 
     with _hash_cache_lock:
-        hash_cache[filepath] = hash_value
-        save_cache_to_file(filepath, hash_value)
+        old_hash = hash_cache.get(filepath)
+        hash_cache[filepath] = new_hash
+        save_cache_to_file(filepath, new_hash)
 
-    return hash_value
+    if old_hash is not None and old_hash != new_hash:
+        print(f'[Cache] Hash updated for {filepath}: {old_hash} -> {new_hash}')
+    elif old_hash is None:
+        print(f'[Cache] Hash cached for {filepath}: {new_hash}')
+
+    return new_hash
+
+
+def sha256_from_cache(filepath):
+    """Public: get the sha256 for a file, using cache when available.
+
+    Falls back to recomputing via refresh_cache_entry.
+    """
+    cached = get_cached_hash(filepath)
+    if cached is not None:
+        return cached
+    return refresh_cache_entry(filepath, force=True)
 
 
 def load_cache_from_file():
@@ -164,7 +222,7 @@ def rebuild_cache(lora_filenames, model_filenames, paths_checkpoints, paths_lora
     def thread(filename, paths):
         filepath = get_file_from_folder_list(filename, paths)
         if os.path.isfile(filepath):
-            sha256_from_cache(filepath)
+            refresh_cache_entry(filepath, force=True)
         else:
             print(f'[Cache] Skipping missing file: {filename}')
 
