@@ -742,6 +742,121 @@ def safe_extract_loras(data: dict) -> list:
     return result
 
 
+def _normalize_model_filename(value, filenames_list):
+    try:
+        if value in (None, '', 'None'):
+            return value
+        for filename in filenames_list:
+            path = Path(filename)
+            if value == filename or value == str(path):
+                return filename
+            if value == path.stem or value == path.name:
+                return filename
+        return value
+    except Exception:
+        return value
+
+
+def _normalize_lora_filename(value, filenames_list):
+    try:
+        if value in (None, '', 'None'):
+            return value
+        if isinstance(value, str) and ' : ' in value:
+            parts = value.split(' : ')
+            if len(parts) == 2:
+                name, weight = parts
+                for filename in filenames_list:
+                    path = Path(filename)
+                    if name == filename or name == str(path) or name == path.stem or name == path.name:
+                        return f'{filename} : {weight}'
+            elif len(parts) == 3:
+                enabled, name, weight = parts
+                for filename in filenames_list:
+                    path = Path(filename)
+                    if name == filename or name == str(path) or name == path.stem or name == path.name:
+                        return f'{enabled} : {filename} : {weight}'
+        return value
+    except Exception:
+        return value
+
+
+def _has_valid_field(data, key):
+    if not isinstance(data, dict):
+        return False
+    if key not in data:
+        return False
+    val = data[key]
+    return val is not None and val != '' and val != 'None'
+
+
+def build_standard_apply_metadata(image_path: str | None, embedded_parsed: dict | None,
+                                  log_parsed: dict | None, metadata_scheme=None) -> dict:
+    result = {}
+
+    if embedded_parsed is not None and isinstance(embedded_parsed, dict):
+        for k, v in embedded_parsed.items():
+            if _has_valid_field(embedded_parsed, k):
+                result[k] = v
+
+    fill_fields = ['prompt', 'negative_prompt', 'styles', 'performance', 'steps',
+                   'overwrite_switch', 'resolution', 'guidance_scale', 'sharpness',
+                   'adm_guidance', 'refiner_swap_method', 'adaptive_cfg', 'clip_skip',
+                   'base_model', 'refiner_model', 'refiner_switch',
+                   'sampler', 'scheduler', 'vae', 'seed',
+                   'inpaint_engine_version', 'inpaint_method', 'freeu']
+
+    try:
+        model_filenames = modules.config.model_filenames
+    except Exception:
+        model_filenames = []
+    try:
+        vae_filenames = modules.config.vae_filenames
+    except Exception:
+        vae_filenames = []
+    try:
+        lora_filenames = modules.config.lora_filenames
+    except Exception:
+        lora_filenames = []
+    try:
+        max_loras = modules.config.default_max_lora_number
+    except Exception:
+        max_loras = 5
+
+    if log_parsed is not None and isinstance(log_parsed, dict):
+        for key in fill_fields:
+            if _has_valid_field(result, key):
+                continue
+            if not _has_valid_field(log_parsed, key):
+                continue
+            val = log_parsed[key]
+            try:
+                if key in ('base_model', 'refiner_model'):
+                    val = _normalize_model_filename(val, model_filenames)
+                elif key == 'vae':
+                    val = _normalize_model_filename(val, vae_filenames)
+            except Exception:
+                pass
+            result[key] = val
+
+        for i in range(max_loras):
+            lora_key = f'lora_combined_{i + 1}'
+            if _has_valid_field(result, lora_key):
+                continue
+            if not _has_valid_field(log_parsed, lora_key):
+                continue
+            val = log_parsed[lora_key]
+            try:
+                val = _normalize_lora_filename(val, lora_filenames)
+            except Exception:
+                pass
+            result[lora_key] = val
+
+    if 'image_number' not in result:
+        result['image_number'] = 1
+
+    return result
+
+
 def extract_comparison_data(file) -> dict:
     result = {
         'fields': {},
@@ -749,6 +864,7 @@ def extract_comparison_data(file) -> dict:
         'raw_metadata': None,
         'log_metadata': None,
         'merged_metadata': None,
+        'apply_metadata': None,
         'metadata_scheme': None,
         'metadata_source': 'none',
         'image_path': None,
@@ -805,7 +921,12 @@ def extract_comparison_data(file) -> dict:
                 if k not in merged or merged.get(k) in (None, '', 'None'):
                     merged[k] = v
         result['merged_metadata'] = merged if merged else None
-        source = result['metadata_source']
+        try:
+            result['apply_metadata'] = build_standard_apply_metadata(
+                image_path, embedded_parsed, log_parsed, metadata_scheme
+            )
+        except Exception:
+            result['apply_metadata'] = {}
         for key, label, ftype in COMPARISON_FIELDS:
             value, ok = safe_extract_field(merged, key, label, ftype)
             if ok:
