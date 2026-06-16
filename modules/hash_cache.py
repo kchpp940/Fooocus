@@ -11,7 +11,8 @@ from modules.util import sha256, HASH_SHA256_LENGTH, get_file_from_folder_list
 
 hash_cache_filename = 'hash_cache.txt'
 hash_cache = {}
-_hash_cache_lock = threading.Lock()
+_hash_cache_lock = threading.RLock()
+_file_write_lock = threading.Lock()
 _hash_valid_pattern = re.compile(r'^[0-9a-fA-F]+$')
 
 
@@ -53,19 +54,87 @@ def get_cached_hash(filepath):
     return None
 
 
-def refresh_cache_entry(filepath, force=False):
+def _update_memory_entry(filepath, new_hash):
+    """Update the in-memory cache dict only (no disk I/O).
+
+    Caller must hold _hash_cache_lock.
+
+    Returns:
+        (old_hash, is_new) tuple. old_hash is None if no previous entry.
+        is_new is True if this is a new entry or the hash changed.
+    """
+    old_hash = hash_cache.get(filepath)
+    hash_cache[filepath] = new_hash
+
+    if old_hash is None:
+        return None, True
+    if old_hash != new_hash:
+        return old_hash, True
+    return old_hash, False
+
+
+def _append_single_entry_to_disk(filepath, hash_value):
+    """Append a single {filepath: hash_value} line to hash_cache.txt.
+
+    Uses _file_write_lock to prevent line interleaving in multi-threaded
+    appends. Does NOT touch _hash_cache_lock.
+    """
+    with _file_write_lock:
+        try:
+            with open(hash_cache_filename, 'at', encoding='utf-8') as fp:
+                json.dump({filepath: hash_value}, fp)
+                fp.write('\n')
+        except Exception as e:
+            print(f'[Cache] Append to {hash_cache_filename} failed: {e}')
+
+
+def _rewrite_entire_cache_to_disk(items):
+    """Atomically rewrite the entire hash_cache.txt from a sorted list of items.
+
+    Uses tempfile + os.replace for atomicity. Uses _file_write_lock to
+    exclude concurrent appenders. Does NOT touch _hash_cache_lock
+    (caller should snapshot memory first).
+    """
+    dir_name = os.path.dirname(os.path.abspath(hash_cache_filename)) or '.'
+
+    with _file_write_lock:
+        fd, temp_path = tempfile.mkstemp(dir=dir_name, prefix='.hash_cache_', suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as fp:
+                for filepath, hv in items:
+                    json.dump({filepath: hv}, fp)
+                    fp.write('\n')
+            os.replace(temp_path, hash_cache_filename)
+        except Exception:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+            raise
+
+
+def refresh_cache_entry(filepath, force=False, defer_write=False):
     """Public: recompute and update the cache entry for a single file.
 
     This is the unified entry point for refreshing a file's hash.
-    Always acquires the lock, validates the computed hash, and writes
-    through the normal save path (with atomic replacement for full writes).
+
+    Lock discipline:
+    - Hash computation happens OUTSIDE any lock (I/O heavy, does not need
+      the memory dict to be stable).
+    - Memory update happens INSIDE _hash_cache_lock (fast, in-memory only).
+    - Disk write happens OUTSIDE _hash_cache_lock (protected by
+      _file_write_lock only, so we never hold both locks simultaneously).
 
     Args:
         filepath: Absolute path to the model file.
         force: If True, recompute even if a valid cached entry exists.
+        defer_write: If True, update memory but skip disk write. Used by
+            rebuild_cache() to batch I/O: all threads update memory, then
+            the main thread does one full atomic rewrite.
 
     Returns:
-        The new (or existing valid) hash string.
+        The new (or existing valid) hash string, or None on error.
     """
     global hash_cache
 
@@ -91,14 +160,15 @@ def refresh_cache_entry(filepath, force=False):
         return None
 
     with _hash_cache_lock:
-        old_hash = hash_cache.get(filepath)
-        hash_cache[filepath] = new_hash
-        save_cache_to_file(filepath, new_hash)
+        old_hash, changed = _update_memory_entry(filepath, new_hash)
 
-    if old_hash is not None and old_hash != new_hash:
+    if changed and old_hash is not None:
         print(f'[Cache] Hash updated for {filepath}: {old_hash} -> {new_hash}')
-    elif old_hash is None:
+    elif changed:
         print(f'[Cache] Hash cached for {filepath}: {new_hash}')
+
+    if changed and not defer_write:
+        _append_single_entry_to_disk(filepath, new_hash)
 
     return new_hash
 
@@ -115,6 +185,7 @@ def sha256_from_cache(filepath):
 
 
 def load_cache_from_file():
+    """Load hash_cache.txt into memory, skipping invalid entries."""
     global hash_cache
 
     loaded_entries = {}
@@ -153,40 +224,34 @@ def load_cache_from_file():
 
 
 def save_cache_to_file(filename=None, hash_value=None):
+    """Save cache to disk.
+
+    Two modes:
+    1. Single-entry append (filename and hash_value provided):
+       - Uses _file_write_lock only
+       - Appends one line
+       - Does not take _hash_cache_lock
+    2. Full rewrite (no arguments):
+       - Takes _hash_cache_lock to snapshot memory
+       - Releases memory lock before writing
+       - Uses _file_write_lock + tempfile + os.replace for atomic rewrite
+
+    This function is safe to call from outside callers and is the
+    canonical way to persist the cache.
+    """
     global hash_cache
 
-    with _hash_cache_lock:
-        if filename is not None and hash_value is not None:
-            items = [(filename, hash_value)]
-            mode = 'at'
-        else:
-            items = sorted(hash_cache.items())
-            mode = 'wt'
+    if filename is not None and hash_value is not None:
+        _append_single_entry_to_disk(filename, hash_value)
+        return
 
-        try:
-            if mode == 'wt':
-                dir_name = os.path.dirname(os.path.abspath(hash_cache_filename)) or '.'
-                fd, temp_path = tempfile.mkstemp(dir=dir_name, prefix='.hash_cache_', suffix='.tmp')
-                try:
-                    with os.fdopen(fd, 'w', encoding='utf-8') as fp:
-                        for filepath, hv in items:
-                            json.dump({filepath: hv}, fp)
-                            fp.write('\n')
-                    os.replace(temp_path, hash_cache_filename)
-                except Exception:
-                    if os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                        except OSError:
-                            pass
-                    raise
-            else:
-                with open(hash_cache_filename, mode, encoding='utf-8') as fp:
-                    for filepath, hv in items:
-                        json.dump({filepath: hv}, fp)
-                        fp.write('\n')
-        except Exception as e:
-            print(f'[Cache] Saving failed: {e}')
+    with _hash_cache_lock:
+        items = sorted(hash_cache.items())
+
+    try:
+        _rewrite_entire_cache_to_disk(items)
+    except Exception as e:
+        print(f'[Cache] Full rewrite failed: {e}')
 
 
 def init_cache(model_filenames, paths_checkpoints, lora_filenames, paths_loras,
@@ -215,6 +280,13 @@ def rebuild_cache(lora_filenames, model_filenames, paths_checkpoints, paths_lora
                   vae_filenames=None, path_vae=None,
                   embedding_filenames=None, path_embeddings=None,
                   max_workers=cpu_count()):
+    """Rebuild the entire cache from scratch.
+
+    I/O optimization: each worker thread only updates the in-memory dict
+    (defer_write=True). When all threads are done, the main thread does
+    ONE atomic full rewrite of hash_cache.txt. This reduces O(N) I/O
+    operations to O(1), which matters for large model collections.
+    """
     global hash_cache
 
     print('[Cache] Rebuilding hash cache')
@@ -222,7 +294,7 @@ def rebuild_cache(lora_filenames, model_filenames, paths_checkpoints, paths_lora
     def thread(filename, paths):
         filepath = get_file_from_folder_list(filename, paths)
         if os.path.isfile(filepath):
-            refresh_cache_entry(filepath, force=True)
+            refresh_cache_entry(filepath, force=True, defer_write=True)
         else:
             print(f'[Cache] Skipping missing file: {filename}')
 
@@ -244,4 +316,6 @@ def rebuild_cache(lora_filenames, model_filenames, paths_checkpoints, paths_lora
         for future in futures:
             future.result()
 
+    print('[Cache] All hashes computed, writing full cache to disk ...')
+    save_cache_to_file()
     print('[Cache] Done rebuilding hash cache')
