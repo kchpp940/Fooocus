@@ -20,7 +20,7 @@ import fooocus_version
 
 from build_launcher import build_launcher
 from modules.launch_util import is_installed, run, python, run_pip, requirements_met, delete_folder_content
-from modules.model_loader import load_file_from_url
+from modules.model_loader import load_file_from_url, is_file_sane
 
 REINSTALL_ALL = False
 TRY_INSTALL_XFORMERS = False
@@ -100,6 +100,15 @@ if config.temp_path_cleanup_on_launch:
         print(f"[Cleanup] Failed to delete content of temp dir.")
 
 
+def _check_model_available(model_name, paths):
+    from modules.util import get_file_from_folder_list
+    filepath = get_file_from_folder_list(model_name, paths)
+    if not os.path.isfile(filepath):
+        return False, None
+    sane, _ = is_file_sane(filepath)
+    return sane, filepath
+
+
 def download_models(default_model, previous_default_models, checkpoint_downloads, embeddings_downloads, lora_downloads, vae_downloads):
     from modules.util import get_file_from_folder_list
 
@@ -117,9 +126,11 @@ def download_models(default_model, previous_default_models, checkpoint_downloads
         return default_model, checkpoint_downloads
 
     if not args.always_download_new_model:
-        if not os.path.isfile(get_file_from_folder_list(default_model, config.paths_checkpoints)):
+        default_available, _ = _check_model_available(default_model, config.paths_checkpoints)
+        if not default_available:
             for alternative_model_name in previous_default_models:
-                if os.path.isfile(get_file_from_folder_list(alternative_model_name, config.paths_checkpoints)):
+                alt_available, _ = _check_model_available(alternative_model_name, config.paths_checkpoints)
+                if alt_available:
                     print(f'You do not have [{default_model}] but you have [{alternative_model_name}].')
                     print(f'Fooocus will use [{alternative_model_name}] to avoid downloading new models, '
                           f'but you are not using the latest models.')

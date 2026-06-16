@@ -7,6 +7,36 @@ from urllib.parse import urlparse
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+MIN_SANE_FILE_SIZES = {
+    '.safetensors': 100 * 1024 * 1024,
+    '.ckpt': 100 * 1024 * 1024,
+    '.bin': 1 * 1024 * 1024,
+    '.pth': 1 * 1024 * 1024,
+    '.pt': 100 * 1024,
+}
+DEFAULT_MIN_SANE_SIZE = 10 * 1024
+
+
+def _get_min_sane_size(filepath):
+    ext = os.path.splitext(filepath)[1].lower()
+    return MIN_SANE_FILE_SIZES.get(ext, DEFAULT_MIN_SANE_SIZE)
+
+
+def _is_file_sane(filepath):
+    try:
+        stat = os.stat(filepath)
+    except OSError as e:
+        return False, f'stat failed: {e}'
+
+    if stat.st_size == 0:
+        return False, 'file is zero bytes'
+
+    min_size = _get_min_sane_size(filepath)
+    if stat.st_size < min_size:
+        return False, f'file too small ({stat.st_size} bytes < {min_size} bytes)'
+
+    return True, 'ok'
+
 
 def imwrite(img, file_path, params=None, auto_mkdir=True):
     """Write image to file.
@@ -61,6 +91,9 @@ def load_file_from_url(url, model_dir=None, progress=True, file_name=None, save_
 
     Uses atomic download pattern: downloads to a temporary .part file first,
     then atomically renames to the final filename.
+
+    Performs integrity checks on existing files: zero-byte or too small files
+    will trigger a fresh download.
     """
     if model_dir is None:
         hub_dir = get_dir()
@@ -77,7 +110,14 @@ def load_file_from_url(url, model_dir=None, progress=True, file_name=None, save_
     cached_file = os.path.abspath(os.path.join(save_dir, filename))
 
     if os.path.exists(cached_file):
-        return cached_file
+        sane, reason = _is_file_sane(cached_file)
+        if sane:
+            return cached_file
+        print(f'[Download] Re-downloading {cached_file}: {reason}')
+        try:
+            os.remove(cached_file)
+        except OSError as e:
+            print(f'[Download] Warning: could not remove invalid file {cached_file}: {e}')
 
     temp_file = cached_file + '.part'
 
@@ -102,6 +142,14 @@ def load_file_from_url(url, model_dir=None, progress=True, file_name=None, save_
 
     if not os.path.exists(temp_file):
         raise RuntimeError(f'Download failed: temp file {temp_file} was not created')
+
+    sane, reason = _is_file_sane(temp_file)
+    if not sane:
+        try:
+            os.remove(temp_file)
+        except OSError:
+            pass
+        raise RuntimeError(f'Downloaded file failed integrity check: {reason}')
 
     try:
         os.replace(temp_file, cached_file)
