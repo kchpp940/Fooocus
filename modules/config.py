@@ -20,34 +20,59 @@ _user_data_dir = None
 def get_user_data_dir():
     """
     Get the user data root directory.
-    Uses the same path_user_data config as other path_* settings.
     
-    Priority:
-      1. FOOOCUS_USER_DATA_DIR environment variable (explicit)
-      2. path_user_data environment variable (consistent with other path_* keys)
-      3. path_user_data from config.txt
-      4. Default: ./user_data/ in project root
+    Resolution priority (highest to lowest):
+      1. FOOOCUS_USER_DATA_DIR / DATADIR env var (runtime override, never persisted)
+      2. path_user_data env var (user explicit, persists to config.txt)
+      3. path_user_data from config.txt (persisted user setting)
+      4. Default: ./user_data/ in project root (never persisted)
+    
+    Persistence rules:
+      - Value from source 1 (FOOOCUS_USER_DATA_DIR/DATADIR): never written back to config.txt
+      - Value from source 2 (path_user_data env): written back to config.txt (user explicit)
+      - Value from source 3 (config.txt): kept as-is
+      - Value from source 4 (default): never written back to config.txt
+    
+    This ensures Docker-mounted old config.txt cannot override runtime DATADIR.
     """
     global _user_data_dir
     if _user_data_dir is not None:
         return _user_data_dir
 
-    env_dir = os.getenv('FOOOCUS_USER_DATA_DIR') or os.getenv('path_user_data')
-    if env_dir:
-        _user_data_dir = os.path.abspath(env_dir)
-    elif 'path_user_data' in config_dict and config_dict['path_user_data']:
-        path_val = config_dict['path_user_data']
-        if isinstance(path_val, list) and len(path_val) > 0:
-            _user_data_dir = os.path.abspath(path_val[0])
-        elif isinstance(path_val, str):
-            _user_data_dir = os.path.abspath(path_val)
+    runtime_env = os.getenv('FOOOCUS_USER_DATA_DIR') or os.getenv('DATADIR')
+    user_env = os.getenv('path_user_data')
+    config_val = config_dict.get('path_user_data')
+    default_dir = os.path.join(_root_dir, 'user_data')
+
+    source = 'default'
+
+    if runtime_env:
+        _user_data_dir = os.path.abspath(runtime_env)
+        source = 'runtime_env'
+    elif user_env:
+        _user_data_dir = os.path.abspath(user_env)
+        source = 'user_env'
+    elif config_val:
+        if isinstance(config_val, list) and len(config_val) > 0:
+            _user_data_dir = os.path.abspath(config_val[0])
+        elif isinstance(config_val, str):
+            _user_data_dir = os.path.abspath(config_val)
         else:
-            _user_data_dir = os.path.join(_root_dir, 'user_data')
+            _user_data_dir = default_dir
+        source = 'config'
     else:
-        _user_data_dir = os.path.join(_root_dir, 'user_data')
+        _user_data_dir = default_dir
+        source = 'default'
 
     os.makedirs(_user_data_dir, exist_ok=True)
-    config_dict['path_user_data'] = _user_data_dir
+
+    if source == 'user_env':
+        config_dict['path_user_data'] = _user_data_dir
+        if 'path_user_data' not in always_save_keys:
+            always_save_keys.append('path_user_data')
+    elif source == 'config':
+        config_dict['path_user_data'] = _user_data_dir
+
     return _user_data_dir
 
 
@@ -631,7 +656,6 @@ path_fooocus_expansion = get_dir_or_set_default('path_fooocus_expansion', '../mo
 path_wildcards = get_dir_or_set_default('path_wildcards', '../wildcards/')
 path_safety_checker = get_dir_or_set_default('path_safety_checker', '../models/safety_checker/')
 path_sam = get_dir_or_set_default('path_sam', '../models/sam/')
-path_user_data = get_dir_or_set_default('path_user_data', '../user_data/', make_directory=True)
 path_outputs = get_path_output()
 
 
