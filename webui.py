@@ -26,8 +26,6 @@ from modules.util import is_json
 
 
 def build_preset_data_from_ui(*args):
-    preset_data = {}
-
     arg_idx = 0
     default_model = args[arg_idx]; arg_idx += 1
     default_refiner = args[arg_idx]; arg_idx += 1
@@ -43,7 +41,11 @@ def build_preset_data_from_ui(*args):
     default_aspect_ratio_label = args[arg_idx]; arg_idx += 1
     default_styles = args[arg_idx]; arg_idx += 1
     default_overwrite_step = args[arg_idx]; arg_idx += 1
+    default_overwrite_switch = args[arg_idx]; arg_idx += 1
     default_inpaint_engine_version = args[arg_idx]; arg_idx += 1
+    default_image_number = args[arg_idx]; arg_idx += 1
+    default_prompt = args[arg_idx]; arg_idx += 1
+    default_prompt_negative = args[arg_idx]; arg_idx += 1
 
     lora_count = modules.config.default_max_lora_number
     default_loras = []
@@ -51,7 +53,7 @@ def build_preset_data_from_ui(*args):
         enabled = args[arg_idx]; arg_idx += 1
         model = args[arg_idx]; arg_idx += 1
         weight = args[arg_idx]; arg_idx += 1
-        default_loras.append([enabled, model if model else 'None', float(weight)])
+        default_loras.append([bool(enabled), str(model) if model else 'None', float(weight)])
 
     if '×' in str(default_aspect_ratio_label):
         ratio_part = str(default_aspect_ratio_label).split(' ')[0]
@@ -59,29 +61,30 @@ def build_preset_data_from_ui(*args):
     else:
         default_aspect_ratio = str(default_aspect_ratio_label).replace('×', '*')
 
-    preset_data = {
-        'default_model': default_model if default_model else 'model.safetensors',
-        'default_refiner': default_refiner if default_refiner else 'None',
+    raw_preset_data = {
+        'default_model': str(default_model) if default_model else 'model.safetensors',
+        'default_refiner': str(default_refiner) if default_refiner else 'None',
         'default_refiner_switch': float(default_refiner_switch),
         'default_loras': default_loras,
         'default_cfg_scale': float(default_cfg_scale),
         'default_sample_sharpness': float(default_sample_sharpness),
         'default_cfg_tsnr': float(default_cfg_tsnr),
         'default_clip_skip': int(default_clip_skip),
-        'default_sampler': default_sampler,
-        'default_scheduler': default_scheduler,
-        'default_vae': default_vae if default_vae != modules.flags.default_vae else 'Default (model)',
-        'default_performance': default_performance,
+        'default_sampler': str(default_sampler),
+        'default_scheduler': str(default_scheduler),
+        'default_vae': str(default_vae),
+        'default_performance': str(default_performance),
         'default_aspect_ratio': default_aspect_ratio,
         'default_styles': list(default_styles) if default_styles else [],
         'default_overwrite_step': int(default_overwrite_step),
-        'default_inpaint_engine_version': default_inpaint_engine_version,
-        'checkpoint_downloads': {},
-        'embeddings_downloads': {},
-        'lora_downloads': {},
-        'vae_downloads': {},
+        'default_overwrite_switch': int(default_overwrite_switch),
+        'default_inpaint_engine_version': str(default_inpaint_engine_version),
+        'default_image_number': int(default_image_number),
+        'default_prompt': str(default_prompt) if default_prompt else '',
+        'default_prompt_negative': str(default_prompt_negative) if default_prompt_negative else '',
     }
-    return preset_data
+
+    return modules.config.normalize_preset_data(raw_preset_data)
 
 
 def format_preset_details_html(preset_name):
@@ -93,31 +96,95 @@ def format_preset_details_html(preset_name):
     ptype = details['type']
     type_labels = {'initial': '⚪ Initial', 'builtin': '🔷 Built-in', 'user': '⭐ User'}
     type_label = type_labels.get(ptype, ptype)
+    covered_fields = details.get('covered_fields', set())
+    covered_count = len(covered_fields)
 
     html_parts = [
-        f'<div style="margin-bottom: 10px; padding: 8px; background: #f0f0f0; border-radius: 6px;">',
+        f'<div style="margin-bottom: 10px; padding: 10px; background: #f0f0f0; border-radius: 6px;">',
         f'<div style="font-weight: bold; font-size: 14px;">{name}</div>',
-        f'<div style="color: #666; font-size: 12px;">{type_label}</div>',
-        '</div>',
-        '<div style="max-height: 300px; overflow-y: auto; padding: 4px;">'
+        f'<div style="color: #666; font-size: 12px; margin-top: 2px;">{type_label}</div>',
+        f'<div style="color: #888; font-size: 11px; margin-top: 4px;">',
+        f'Overrides <span style="font-weight: 600; color: #059669;">{covered_count}</span> of {len(modules.config.get_standard_preset_schema())} parameters',
+        f'</div>',
+        '</div>'
     ]
 
-    if not details['details']:
-        html_parts.append('<div style="color: #888; font-style: italic;">(uses current default settings)</div>')
+    if ptype == 'initial' or covered_count == 0:
+        html_parts.append('<div style="padding: 12px; background: #f8f8f8; border-radius: 6px; text-align: center; color: #666; font-style: italic;">')
+        html_parts.append('Using system defaults — no parameters overridden<br>')
+        html_parts.append('<span style="font-size: 11px;">Adjust settings and click "Save Current as Preset" to create a preset</span>')
+        html_parts.append('</div>')
     else:
-        for key, value in details['details'].items():
-            html_parts.append(f'<div style="margin: 4px 0; padding: 4px 0; border-bottom: 1px solid #eee;">')
-            html_parts.append(f'<span style="font-weight: 600; color: #444;">{key}:</span> ')
-            if isinstance(value, list):
-                html_parts.append('<ul style="margin: 4px 0 0 20px; padding: 0;">')
-                for item in value:
-                    html_parts.append(f'<li style="font-size: 12px; color: #555;">{item}</li>')
-                html_parts.append('</ul>')
-            else:
-                html_parts.append(f'<span style="color: #2563eb;">{value}</span>')
+        schema_defaults = modules.config.get_standard_preset_schema()
+        display_info = modules.config.PRESET_SCHEMA_DISPLAY_INFO
+
+        html_parts.append('<div style="margin-bottom: 8px; padding: 6px 8px; background: #ecfdf5; border-left: 3px solid #10b981; border-radius: 4px; font-size: 12px; font-weight: 600; color: #065f46;">')
+        html_parts.append('✓  Parameters overridden by this preset')
+        html_parts.append('</div>')
+
+        html_parts.append('<div style="max-height: 280px; overflow-y: auto; padding: 4px;">')
+
+        for config_key, (display_name, description) in display_info.items():
+            if config_key not in covered_fields:
+                continue
+
+            current_value = details.get('normalized_content', {}).get(config_key, schema_defaults.get(config_key))
+            default_value = schema_defaults.get(config_key)
+
+            html_parts.append(f'<div style="margin: 6px 0; padding: 8px; background: #fafafa; border-radius: 6px;">')
+            html_parts.append(f'<div style="display: flex; justify-content: space-between; align-items: baseline;">')
+            html_parts.append(f'<span style="font-weight: 600; color: #374151; font-size: 13px;">{display_name}</span>')
+            html_parts.append(f'<span style="font-size: 11px; color: #9ca3af;" title="{description}">ⓘ</span>')
             html_parts.append('</div>')
 
-    html_parts.append('</div>')
+            if config_key == 'default_loras' and isinstance(current_value, list):
+                lora_items = []
+                for lora in current_value:
+                    if isinstance(lora, list) and len(lora) >= 3:
+                        enabled, name, weight = lora
+                        if name and name != 'None':
+                            status = '✓' if enabled else '✗'
+                            lora_items.append(f'<li style="padding: 2px 0; color: #2563eb;">{status} {name} <span style="color: #6b7280;">(weight={weight})</span></li>')
+                if lora_items:
+                    html_parts.append(f'<ul style="margin: 4px 0 0 16px; padding: 0;">{"".join(lora_items)}</ul>')
+                else:
+                    html_parts.append(f'<div style="margin-top: 4px; color: #6b7280; font-size: 12px;">(all LoRA slots empty)</div>')
+            elif config_key == 'default_styles' and isinstance(current_value, list):
+                if current_value:
+                    style_items = ''.join([f'<li style="padding: 2px 0; color: #2563eb;">{s}</li>' for s in current_value])
+                    html_parts.append(f'<ul style="margin: 4px 0 0 16px; padding: 0;">{style_items}</ul>')
+                else:
+                    html_parts.append(f'<div style="margin-top: 4px; color: #6b7280; font-size: 12px;">(no default styles)</div>')
+            elif config_key.endswith('_downloads') and isinstance(current_value, dict):
+                if current_value:
+                    model_names = list(current_value.keys())
+                    items = ''.join([f'<li style="padding: 2px 0; color: #2563eb; font-size: 12px;">{name}</li>' for name in model_names])
+                    html_parts.append(f'<div style="margin-top: 4px; font-size: 11px; color: #6b7280;">Auto-downloads on first use:</div>')
+                    html_parts.append(f'<ul style="margin: 4px 0 0 16px; padding: 0;">{items}</ul>')
+            elif config_key == 'previous_default_models' and isinstance(current_value, list):
+                if current_value:
+                    items = ''.join([f'<li style="padding: 1px 0; color: #6b7280; font-size: 11px;">{name}</li>' for name in current_value])
+                    html_parts.append(f'<ul style="margin: 4px 0 0 16px; padding: 0;">{items}</ul>')
+            else:
+                value_str = str(current_value)
+                default_str = str(default_value)
+                if value_str == default_str and config_key not in ['default_styles', 'default_loras']:
+                    html_parts.append(f'<div style="margin-top: 4px; color: #2563eb; font-size: 13px;">{value_str}</div>')
+                else:
+                    html_parts.append(f'<div style="margin-top: 4px; color: #2563eb; font-size: 13px;">{value_str}</div>')
+                    if default_value != current_value:
+                        html_parts.append(f'<div style="margin-top: 2px; font-size: 11px; color: #9ca3af;">Default: <span style="text-decoration: line-through;">{default_str}</span></div>')
+
+            html_parts.append('</div>')
+
+        html_parts.append('</div>')
+
+        if covered_count < 15:
+            default_count = len(schema_defaults) - covered_count
+            html_parts.append(f'<div style="margin-top: 10px; padding: 8px; background: #f3f4f6; border-radius: 6px; font-size: 11px; color: #6b7280;">')
+            html_parts.append(f'Uses system defaults for remaining {default_count} parameters (not shown)')
+            html_parts.append('</div>')
+
     return ''.join(html_parts)
 
 
@@ -1284,7 +1351,8 @@ with shared.gradio_root:
                 guidance_scale, sharpness, adaptive_cfg, clip_skip,
                 sampler_name, scheduler_name, vae_name,
                 performance_selection, aspect_ratios_selection,
-                style_selections, overwrite_step, inpaint_engine
+                style_selections, overwrite_step, overwrite_switch,
+                inpaint_engine, image_number, prompt, negative_prompt
             ]
             save_preset_inputs += lora_ctrls
 

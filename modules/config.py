@@ -177,12 +177,12 @@ def update_presets():
     available_presets = get_presets()
 
 
-def try_get_preset_content(preset):
+def try_get_preset_content(preset, normalize=True):
     if not isinstance(preset, str):
         return {}
 
     if preset == 'initial':
-        return {}
+        return normalize_preset_data({}) if normalize else {}
 
     if is_user_preset(preset):
         preset_name = strip_user_prefix(preset)
@@ -195,13 +195,15 @@ def try_get_preset_content(preset):
             with open(preset_path, "r", encoding="utf-8") as json_file:
                 json_content = json.load(json_file)
                 print(f'Loaded preset: {preset_path}')
+                if normalize:
+                    return normalize_preset_data(json_content)
                 return json_content
         else:
             raise FileNotFoundError
     except Exception as e:
         print(f'Load preset [{preset_path}] failed')
         print(e)
-    return {}
+        return {}
 
 
 def save_user_preset(preset_name, preset_data):
@@ -218,11 +220,12 @@ def save_user_preset(preset_name, preset_data):
     if preset_name in builtin_presets:
         return False, 'Cannot overwrite built-in preset'
 
+    normalized_data = normalize_preset_data(preset_data)
     preset_path = os.path.join(get_user_presets_dir(), f'{preset_name}.json')
 
     try:
         with open(preset_path, "w", encoding="utf-8") as json_file:
-            json.dump(preset_data, json_file, indent=4, ensure_ascii=False)
+            json.dump(normalized_data, json_file, indent=4, ensure_ascii=False)
         print(f'User preset saved: {preset_path}')
         update_presets()
         return True, add_user_prefix(preset_name)
@@ -292,67 +295,240 @@ def rename_user_preset(old_preset_name, new_preset_name):
 
 
 def duplicate_user_preset(source_preset_name, new_preset_name):
-    source_content = try_get_preset_content(source_preset_name)
-    if not source_content:
+    raw_content = try_get_preset_content(source_preset_name, normalize=False)
+    if not raw_content:
         return False, 'Source preset content is empty or not found'
+    return save_user_preset(new_preset_name, raw_content)
 
-    return save_user_preset(new_preset_name, source_content)
+
+PRESET_SCHEMA_DISPLAY_INFO = {
+    'default_model': ('Base Model', 'SDXL 1.0 base checkpoint'),
+    'default_refiner': ('Refiner Model', 'SDXL refiner checkpoint'),
+    'default_refiner_switch': ('Refiner Switch', 'Step to switch to refiner'),
+    'previous_default_models': ('Previous Models', 'Fallback model names for compatibility'),
+    'default_loras_min_weight': ('LoRA Min Weight', 'Minimum LoRA weight slider value'),
+    'default_loras_max_weight': ('LoRA Max Weight', 'Maximum LoRA weight slider value'),
+    'default_loras': ('LoRAs', 'List of LoRA models and weights'),
+    'default_cfg_scale': ('CFG Scale', 'Classifier-Free Guidance scale'),
+    'default_sample_sharpness': ('Sharpness', 'Sampling sharpness'),
+    'default_cfg_tsnr': ('Adaptive CFG (TSNR)', 'Timestep-Normalized CFG'),
+    'default_clip_skip': ('CLIP Skip', 'CLIP layers to skip'),
+    'default_sampler': ('Sampler', 'Sampling method'),
+    'default_scheduler': ('Scheduler', 'Noise schedule'),
+    'default_overwrite_step': ('Overwrite Steps', 'Force step count (-1 = use performance default)'),
+    'default_overwrite_switch': ('Overwrite Switch', 'Force refiner switch step (-1 = use default)'),
+    'default_performance': ('Performance', 'Speed / Quality tradeoff'),
+    'default_image_number': ('Image Number', 'Default batch size'),
+    'default_prompt': ('Default Prompt', 'Auto-filled positive prompt'),
+    'default_prompt_negative': ('Default Negative', 'Auto-filled negative prompt'),
+    'default_styles': ('Default Styles', 'Auto-applied style templates'),
+    'default_aspect_ratio': ('Aspect Ratio', 'Default image dimensions'),
+    'default_save_metadata_to_images': ('Save Metadata', 'Embed generation metadata in images'),
+    'checkpoint_downloads': ('Checkpoint URLs', 'Model download URLs'),
+    'embeddings_downloads': ('Embedding URLs', 'Embedding download URLs'),
+    'lora_downloads': ('LoRA URLs', 'LoRA download URLs'),
+    'vae_downloads': ('VAE URLs', 'VAE download URLs'),
+    'default_vae': ('VAE', 'Variational Autoencoder'),
+    'default_inpaint_engine_version': ('Inpaint Engine', 'Inpainting model version'),
+}
+
+
+def get_standard_preset_schema():
+    num_loras = default_max_lora_number
+    default_loras = [[True, 'None', 1.0] for _ in range(num_loras)]
+
+    return {
+        'default_model': 'model.safetensors',
+        'default_refiner': 'None',
+        'default_refiner_switch': 0.5,
+        'previous_default_models': [],
+        'default_loras_min_weight': -1.0,
+        'default_loras_max_weight': 2.0,
+        'default_loras': default_loras,
+        'default_cfg_scale': 7.0,
+        'default_sample_sharpness': 2.0,
+        'default_cfg_tsnr': 7.0,
+        'default_clip_skip': 2,
+        'default_sampler': 'dpmpp_2m_sde_gpu',
+        'default_scheduler': 'karras',
+        'default_overwrite_step': -1,
+        'default_overwrite_switch': -1,
+        'default_performance': 'Speed',
+        'default_image_number': 2,
+        'default_prompt': '',
+        'default_prompt_negative': '',
+        'default_styles': [],
+        'default_aspect_ratio': '1152*896',
+        'default_save_metadata_to_images': True,
+        'checkpoint_downloads': {},
+        'embeddings_downloads': {},
+        'lora_downloads': {},
+        'vae_downloads': {},
+        'default_vae': 'Default (model)',
+        'default_inpaint_engine_version': 'v2.6',
+    }
+
+
+def normalize_preset_data(preset_data):
+    if not isinstance(preset_data, dict):
+        preset_data = {}
+
+    schema = get_standard_preset_schema()
+    normalized = dict(schema)
+
+    for key in schema:
+        if key in preset_data:
+            value = preset_data[key]
+            default_value = schema[key]
+
+            if isinstance(value, type(default_value)):
+                if key == 'default_loras' and isinstance(value, list):
+                    normalized[key] = _normalize_lora_list(value, len(default_value))
+                elif key == 'default_styles' and isinstance(value, list):
+                    normalized[key] = [s for s in value if isinstance(s, str)]
+                elif key == 'default_aspect_ratio' and isinstance(value, str):
+                    normalized[key] = value.replace('×', '*')
+                elif key == 'default_vae' and isinstance(value, str):
+                    if not value or value.lower() == 'default':
+                        normalized[key] = 'Default (model)'
+                    else:
+                        normalized[key] = value
+                else:
+                    normalized[key] = value
+            else:
+                if isinstance(default_value, list) or isinstance(default_value, dict):
+                    normalized[key] = default_value
+                else:
+                    try:
+                        if isinstance(default_value, bool):
+                            normalized[key] = bool(value)
+                        elif isinstance(default_value, int):
+                            normalized[key] = int(value)
+                        elif isinstance(default_value, float):
+                            normalized[key] = float(value)
+                        elif isinstance(default_value, str):
+                            normalized[key] = str(value)
+                    except (ValueError, TypeError):
+                        normalized[key] = default_value
+
+    return normalized
+
+
+def _normalize_lora_list(lora_list, expected_length):
+    result = []
+    for i in range(expected_length):
+        if i < len(lora_list) and isinstance(lora_list[i], list):
+            lora = lora_list[i]
+            if len(lora) >= 3:
+                enabled = bool(lora[0])
+                name = str(lora[1]) if lora[1] else 'None'
+                weight = float(lora[2])
+            elif len(lora) == 2:
+                enabled = True
+                name = str(lora[0]) if lora[0] else 'None'
+                weight = float(lora[1])
+            else:
+                enabled = True
+                name = 'None'
+                weight = 1.0
+            result.append([enabled, name, weight])
+        else:
+            result.append([True, 'None', 1.0])
+    return result
+
+
+def get_preset_covered_fields(preset_data):
+    schema = get_standard_preset_schema()
+    if not isinstance(preset_data, dict):
+        return set()
+
+    covered = set()
+    normalized = normalize_preset_data(preset_data)
+
+    for key in schema:
+        if key in preset_data:
+            raw_value = preset_data[key]
+            norm_value = normalized[key]
+            if norm_value != schema[key]:
+                covered.add(key)
+            elif key == 'default_styles' and isinstance(raw_value, list) and len(raw_value) > 0:
+                covered.add(key)
+            elif key == 'default_loras' and isinstance(raw_value, list):
+                for lora in raw_value:
+                    if isinstance(lora, list) and len(lora) >= 2:
+                        name = lora[1] if len(lora) >= 3 else lora[0]
+                        if isinstance(name, str) and name != 'None':
+                            covered.add(key)
+                            break
+
+    return covered
 
 
 def get_preset_details(preset_name):
+    if preset_name == 'initial':
+        return {
+            'name': preset_name,
+            'type': 'initial',
+            'details': {},
+            'covered_fields': set(),
+            'raw_content': {},
+            'normalized_content': normalize_preset_data({}),
+            'description': 'Initial default settings - no preset applied'
+        }
+
     content = try_get_preset_content(preset_name)
     if not content:
-        if preset_name == 'initial':
-            return {'name': preset_name, 'type': 'initial', 'details': {}, 'description': 'Initial default settings'}
         return None
+
+    raw_content = try_get_preset_content(preset_name, normalize=False)
+    raw_content = dict(raw_content) if isinstance(raw_content, dict) else {}
+    normalized_content = normalize_preset_data(raw_content)
+    covered_fields = get_preset_covered_fields(raw_content)
 
     result = {
         'name': preset_name,
         'type': 'user' if is_user_preset(preset_name) else 'builtin',
         'details': {},
+        'covered_fields': covered_fields,
+        'raw_content': raw_content,
+        'normalized_content': normalized_content,
         'description': ''
     }
 
-    display_keys = {
-        'default_model': 'Base Model',
-        'default_refiner': 'Refiner Model',
-        'default_refiner_switch': 'Refiner Switch',
-        'default_loras': 'LoRAs',
-        'default_cfg_scale': 'CFG Scale',
-        'default_sample_sharpness': 'Sharpness',
-        'default_cfg_tsnr': 'Adaptive CFG (TSNR)',
-        'default_clip_skip': 'CLIP Skip',
-        'default_sampler': 'Sampler',
-        'default_scheduler': 'Scheduler',
-        'default_performance': 'Performance',
-        'default_styles': 'Default Styles',
-        'default_aspect_ratio': 'Aspect Ratio',
-        'default_overwrite_step': 'Steps (overwrite)',
-        'default_vae': 'VAE',
-        'default_inpaint_engine_version': 'Inpaint Engine',
-    }
+    schema_defaults = get_standard_preset_schema()
 
-    for config_key, display_name in display_keys.items():
-        if config_key in content:
-            value = content[config_key]
-            if config_key == 'default_loras' and isinstance(value, list):
-                lora_strs = []
-                for lora in value:
-                    if isinstance(lora, list) and len(lora) >= 2:
-                        if len(lora) == 3:
-                            enabled, name, weight = lora
-                            status = '✓' if enabled else '✗'
-                            lora_strs.append(f'{status} {name} (w={weight})')
-                        else:
-                            name, weight = lora[0], lora[1]
-                            lora_strs.append(f'{name} (w={weight})')
-                result['details'][display_name] = lora_strs if lora_strs else 'None'
-            elif config_key == 'default_styles' and isinstance(value, list):
+    for config_key, (display_name, description) in PRESET_SCHEMA_DISPLAY_INFO.items():
+        if config_key not in covered_fields:
+            continue
+
+        value = normalized_content.get(config_key, schema_defaults.get(config_key))
+
+        if config_key == 'default_loras' and isinstance(value, list):
+            lora_strs = []
+            for lora in value:
+                if isinstance(lora, list) and len(lora) >= 2:
+                    if len(lora) == 3:
+                        enabled, name, weight = lora
+                        status = '✓' if enabled else '✗'
+                        lora_strs.append(f'{status} {name} (w={weight})')
+                    else:
+                        name, weight = lora[0], lora[1]
+                        lora_strs.append(f'{name} (w={weight})')
+            non_empty = [s for s in lora_strs if 'None' not in s]
+            result['details'][display_name] = non_empty if non_empty else 'None'
+        elif config_key == 'default_styles' and isinstance(value, list):
+            result['details'][display_name] = value
+        elif config_key == 'previous_default_models' and isinstance(value, list):
+            if len(value) > 0:
                 result['details'][display_name] = value
-            else:
-                result['details'][display_name] = value
+        elif config_key.endswith('_downloads') and isinstance(value, dict):
+            if len(value) > 0:
+                result['details'][display_name] = list(value.keys())
+        else:
+            result['details'][display_name] = value
 
     return result
+
 
 available_presets = get_presets()
 preset = args_manager.args.preset
