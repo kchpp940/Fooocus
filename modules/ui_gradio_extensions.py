@@ -23,14 +23,14 @@ def webpath(fn):
 
 
 def javascript_html():
-    script_js_path = webpath('javascript/script.js')
-    context_menus_js_path = webpath('javascript/contextMenus.js')
-    localization_js_path = webpath('javascript/localization.js')
-    zoom_js_path = webpath('javascript/zoom.js')
-    edit_attention_js_path = webpath('javascript/edit-attention.js')
-    viewer_js_path = webpath('javascript/viewer.js')
-    image_viewer_js_path = webpath('javascript/imageviewer.js')
-    samples_path = webpath(os.path.abspath('./sdxl_styles/samples/fooocus_v2.jpg'))
+    script_js_path = webpath(os.path.join(script_path, 'javascript', 'script.js'))
+    context_menus_js_path = webpath(os.path.join(script_path, 'javascript', 'contextMenus.js'))
+    localization_js_path = webpath(os.path.join(script_path, 'javascript', 'localization.js'))
+    zoom_js_path = webpath(os.path.join(script_path, 'javascript', 'zoom.js'))
+    edit_attention_js_path = webpath(os.path.join(script_path, 'javascript', 'edit-attention.js'))
+    viewer_js_path = webpath(os.path.join(script_path, 'javascript', 'viewer.js'))
+    image_viewer_js_path = webpath(os.path.join(script_path, 'javascript', 'imageviewer.js'))
+    samples_path = webpath(os.path.join(script_path, 'sdxl_styles', 'samples', 'fooocus_v2.jpg'))
     head = f'<script type="text/javascript">{localization_js(args_manager.args.language)}</script>\n'
     head += f'<script type="text/javascript" src="{script_js_path}"></script>\n'
     head += f'<script type="text/javascript" src="{context_menus_js_path}"></script>\n'
@@ -48,7 +48,7 @@ def javascript_html():
 
 
 def css_html():
-    style_css_path = webpath('css/style.css')
+    style_css_path = webpath(os.path.join(script_path, 'css', 'style.css'))
     head = f'<link rel="stylesheet" property="stylesheet" href="{style_css_path}">'
     return head
 

@@ -12,6 +12,8 @@ from modules.model_loader import load_file_from_url
 from modules.extra_utils import makedirs_with_log, get_files_from_folder, try_eval_env_var
 from modules.flags import OutputFormat, Performance, MetadataScheme
 
+_root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def get_config_path(key, default_value):
     env = os.getenv(key)
@@ -22,14 +24,14 @@ def get_config_path(key, default_value):
         return os.path.abspath(default_value)
 
 wildcards_max_bfs_depth = 64
-config_path = get_config_path('config_path', "./config.txt")
-config_example_path = get_config_path('config_example_path', "config_modification_tutorial.txt")
+config_path = get_config_path('config_path', os.path.join(_root_dir, 'config.txt'))
+config_example_path = get_config_path('config_example_path', os.path.join(_root_dir, 'config_modification_tutorial.txt'))
 config_dict = {}
 always_save_keys = []
 visited_keys = []
 
 try:
-    with open(os.path.abspath(f'./presets/default.json'), "r", encoding="utf-8") as json_file:
+    with open(os.path.join(_root_dir, 'presets', 'default.json'), "r", encoding="utf-8") as json_file:
         config_dict.update(json.load(json_file))
 except Exception as e:
     print(f'Load default preset failed.')
@@ -52,11 +54,12 @@ except Exception as e:
 def try_load_deprecated_user_path_config():
     global config_dict
 
-    if not os.path.exists('user_path_config.txt'):
+    deprecated_user_path_config = os.path.join(_root_dir, 'user_path_config.txt')
+    if not os.path.exists(deprecated_user_path_config):
         return
 
     try:
-        deprecated_config_dict = json.load(open('user_path_config.txt', "r", encoding="utf-8"))
+        deprecated_config_dict = json.load(open(deprecated_user_path_config, "r", encoding="utf-8"))
 
         def replace_config(old_key, new_key):
             if old_key in deprecated_config_dict:
@@ -75,7 +78,7 @@ def try_load_deprecated_user_path_config():
         replace_config('temp_outputs_path', 'path_outputs')
 
         if deprecated_config_dict.get("default_model", None) == 'juggernautXL_version6Rundiffusion.safetensors':
-            os.replace('user_path_config.txt', 'user_path_config-deprecated.txt')
+            os.replace(deprecated_user_path_config, os.path.join(_root_dir, 'user_path_config-deprecated.txt'))
             print('Config updated successfully in silence. '
                   'A backup of previous config is written to "user_path_config-deprecated.txt".')
             return
@@ -86,7 +89,7 @@ def try_load_deprecated_user_path_config():
             print('Loading using deprecated old models and deprecated old configs.')
             return
         else:
-            os.replace('user_path_config.txt', 'user_path_config-deprecated.txt')
+            os.replace(deprecated_user_path_config, os.path.join(_root_dir, 'user_path_config-deprecated.txt'))
             print('Config updated successfully by user. '
                   'A backup of previous config is written to "user_path_config-deprecated.txt".')
             return
@@ -99,7 +102,7 @@ def try_load_deprecated_user_path_config():
 try_load_deprecated_user_path_config()
 
 def get_presets():
-    preset_folder = 'presets'
+    preset_folder = os.path.join(_root_dir, 'presets')
     presets = ['initial']
     if not os.path.exists(preset_folder):
         print('No presets found.')
@@ -113,7 +116,7 @@ def update_presets():
 
 def try_get_preset_content(preset):
     if isinstance(preset, str):
-        preset_path = os.path.abspath(f'./presets/{preset}.json')
+        preset_path = os.path.join(_root_dir, 'presets', f'{preset}.json')
         try:
             if os.path.exists(preset_path):
                 with open(preset_path, "r", encoding="utf-8") as json_file:
@@ -757,7 +760,7 @@ possible_preset_keys = {
 REWRITE_PRESET = False
 
 if REWRITE_PRESET and isinstance(args_manager.args.preset, str):
-    save_path = 'presets/' + args_manager.args.preset + '.json'
+    save_path = os.path.join(_root_dir, 'presets', args_manager.args.preset + '.json')
     with open(save_path, "w", encoding="utf-8") as json_file:
         json.dump({k: config_dict[k] for k in possible_preset_keys}, json_file, indent=4)
     print(f'Preset saved to {save_path}. Exiting ...')

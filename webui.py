@@ -35,97 +35,58 @@ def generate_clicked(task: worker.AsyncTask):
 
     with model_management.interrupt_processing_mutex:
         model_management.interrupt_processing = False
+    # outputs=[progress_html, progress_window, progress_gallery, gallery]
 
     if len(task.args) == 0:
         return
 
     execution_start_time = time.perf_counter()
     finished = False
-    final_results = []
 
-    def yield_finish(task_status, results, error=None):
-        if not args_manager.args.disable_enhance_output_sorting:
-            results = sort_enhance_images(results, task)
+    yield gr.update(visible=True, value=modules.html.make_progress_html(1, 'Waiting for task to start ...')), \
+        gr.update(visible=True, value=None), \
+        gr.update(visible=False, value=None), \
+        gr.update(visible=False)
 
-        progress_title = None
-        if task_status is not None:
-            from modules.async_worker import TaskStatus
-            if task_status == TaskStatus.STOPPED.value:
-                progress_title = 'Generation stopped by user'
-            elif task_status == TaskStatus.SKIPPED.value:
-                progress_title = 'Generation skipped by user'
-            elif task_status == TaskStatus.FAILED.value:
-                progress_title = f'Generation failed: {error}' if error else 'Generation failed'
+    worker.async_tasks.append(task)
 
-        if progress_title is None and error:
-            progress_title = f'Generation failed: {error}'
+    while not finished:
+        time.sleep(0.01)
+        if len(task.yields) > 0:
+            flag, product = task.yields.pop(0)
+            if flag == 'preview':
 
-        if progress_title:
-            progress_html_update = gr.update(visible=True, value=modules.html.make_progress_html(100, progress_title))
-        else:
-            progress_html_update = gr.update(visible=False)
+                # help bad internet connection by skipping duplicated preview
+                if len(task.yields) > 0:  # if we have the next item
+                    if task.yields[0][0] == 'preview':   # if the next item is also a preview
+                        # print('Skipped one preview for better internet connection.')
+                        continue
 
-        return progress_html_update, \
-            gr.update(visible=False), \
-            gr.update(visible=False), \
-            gr.update(visible=True, value=results)
+                percentage, title, image = product
+                yield gr.update(visible=True, value=modules.html.make_progress_html(percentage, title)), \
+                    gr.update(visible=True, value=image) if image is not None else gr.update(), \
+                    gr.update(), \
+                    gr.update(visible=False)
+            if flag == 'results':
+                yield gr.update(visible=True), \
+                    gr.update(visible=True), \
+                    gr.update(visible=True, value=product), \
+                    gr.update(visible=False)
+            if flag == 'finish':
+                if not args_manager.args.disable_enhance_output_sorting:
+                    product = sort_enhance_images(product, task)
 
-    try:
-        yield gr.update(visible=True, value=modules.html.make_progress_html(1, 'Waiting for task to start ...')), \
-            gr.update(visible=True, value=None), \
-            gr.update(visible=False, value=None), \
-            gr.update(visible=False)
+                yield gr.update(visible=False), \
+                    gr.update(visible=False), \
+                    gr.update(visible=False), \
+                    gr.update(visible=True, value=product)
+                finished = True
 
-        worker.async_tasks.append(task)
-
-        while not finished:
-            time.sleep(0.01)
-            if len(task.yields) > 0:
-                flag, product = task.yields.pop(0)
-                if flag == 'preview':
-
-                    # help bad internet connection by skipping duplicated preview
-                    if len(task.yields) > 0:  # if we have the next item
-                        if task.yields[0][0] == 'preview':   # if the next item is also a preview
-                            continue
-
-                    percentage, title, image = product
-                    yield gr.update(visible=True, value=modules.html.make_progress_html(percentage, title)), \
-                        gr.update(visible=True, value=image) if image is not None else gr.update(), \
-                        gr.update(), \
-                        gr.update(visible=False)
-                if flag == 'results':
-                    yield gr.update(visible=True), \
-                        gr.update(visible=True), \
-                        gr.update(visible=True, value=product), \
-                        gr.update(visible=False)
-                if flag == 'finish':
-                    envelope = product
-                    if isinstance(envelope, dict):
-                        task_status = envelope.get('status')
-                        results = envelope.get('results', [])
-                        error = envelope.get('error')
-                    else:
-                        task_status = None
-                        results = envelope if envelope is not None else []
-                        error = None
-
-                    final_results = results
-
-                    yield yield_finish(task_status, results, error)
-                    finished = True
-
-                    # delete Fooocus temp images, only keep gradio temp images
-                    if args_manager.args.disable_image_log:
-                        for filepath in results:
-                            if isinstance(filepath, str) and os.path.exists(filepath):
-                                os.remove(filepath)
-    finally:
-        if not finished:
-            if not args_manager.args.disable_enhance_output_sorting:
-                final_results = sort_enhance_images(task.results, task)
-
-            yield yield_finish(None, final_results)
+                # delete Fooocus temp images, only keep gradio temp images
+                if args_manager.args.disable_image_log:
+                    for filepath in product:
+                        if isinstance(filepath, str) and os.path.exists(filepath):
+                            os.remove(filepath)
 
     execution_time = time.perf_counter() - execution_start_time
     print(f'Total time: {execution_time:.2f} seconds')
@@ -225,14 +186,14 @@ with shared.gradio_root:
                     def stop_clicked(currentTask):
                         import ldm_patched.modules.model_management as model_management
                         currentTask.last_stop = 'stop'
-                        if currentTask.processing:
+                        if (currentTask.processing):
                             model_management.interrupt_current_processing()
                         return currentTask
 
                     def skip_clicked(currentTask):
                         import ldm_patched.modules.model_management as model_management
                         currentTask.last_stop = 'skip'
-                        if currentTask.processing:
+                        if (currentTask.processing):
                             model_management.interrupt_current_processing()
                         return currentTask
 
