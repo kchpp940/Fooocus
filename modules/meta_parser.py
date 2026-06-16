@@ -648,3 +648,347 @@ def get_exif(metadata: str | None, metadata_scheme: str):
     # 0x927C = MakerNote
     exif[0x927C] = metadata_scheme
     return exif
+
+
+COMPARISON_FIELDS = [
+    ('prompt', 'Prompt', str),
+    ('negative_prompt', 'Negative Prompt', str),
+    ('styles', 'Styles', list),
+    ('performance', 'Performance', str),
+    ('steps', 'Steps', int),
+    ('base_model', 'Base Model', str),
+    ('refiner_model', 'Refiner Model', str),
+    ('refiner_switch', 'Refiner Switch', float),
+    ('sampler', 'Sampler', str),
+    ('scheduler', 'Scheduler', str),
+    ('vae', 'VAE', str),
+    ('guidance_scale', 'CFG Scale', float),
+    ('sharpness', 'Sharpness', float),
+    ('adaptive_cfg', 'Adaptive CFG', float),
+    ('clip_skip', 'CLIP Skip', int),
+    ('seed', 'Seed', int),
+    ('resolution', 'Resolution', tuple),
+    ('inpaint_engine_version', 'Inpaint Engine', str),
+    ('inpaint_method', 'Inpaint Method', str),
+    ('adm_guidance', 'ADM Guidance', tuple),
+    ('freeu', 'FreeU', tuple),
+]
+
+
+def safe_extract_field(data: dict, key: str, fallback: str, field_type):
+    try:
+        if not isinstance(data, dict):
+            return None, False
+        raw = data.get(key, data.get(fallback))
+        if raw is None or raw == '' or raw == 'None':
+            return None, False
+        if field_type == str:
+            return str(raw), True
+        elif field_type == int:
+            return int(raw), True
+        elif field_type == float:
+            return float(raw), True
+        elif field_type == list:
+            if isinstance(raw, str):
+                parsed = eval(raw)
+                if isinstance(parsed, list):
+                    return parsed, True
+            elif isinstance(raw, list):
+                return raw, True
+            return None, False
+        elif field_type == tuple:
+            if isinstance(raw, str):
+                parsed = eval(raw)
+                if isinstance(parsed, (tuple, list)):
+                    return tuple(parsed), True
+            elif isinstance(raw, (tuple, list)):
+                return tuple(raw), True
+            return None, False
+        return None, False
+    except Exception:
+        return None, False
+
+
+def safe_extract_loras(data: dict) -> list:
+    result = []
+    try:
+        if not isinstance(data, dict):
+            return result
+        max_loras = modules.config.default_max_lora_number
+        for i in range(max_loras):
+            key = f'lora_combined_{i + 1}'
+            fallback = f'LoRA {i + 1}'
+            try:
+                raw = data.get(key, data.get(fallback))
+                if raw is None or raw == '' or raw == 'None':
+                    continue
+                if isinstance(raw, str):
+                    split_data = raw.split(' : ')
+                    if len(split_data) == 2:
+                        name, weight = split_data
+                        weight = float(weight)
+                        if name != 'None':
+                            result.append({'enabled': True, 'name': Path(name).stem, 'weight': weight, 'raw': raw})
+                    elif len(split_data) == 3:
+                        enabled = split_data[0] == 'True'
+                        name = split_data[1]
+                        weight = float(split_data[2])
+                        if name != 'None':
+                            result.append({'enabled': enabled, 'name': Path(name).stem, 'weight': weight, 'raw': raw})
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return result
+
+
+def extract_comparison_data(file) -> dict:
+    result = {
+        'fields': {},
+        'loras': [],
+        'raw_metadata': None,
+        'metadata_scheme': None,
+        'image_path': None,
+        'error': None
+    }
+    try:
+        if file is None:
+            result['error'] = 'No image provided'
+            return result
+        if isinstance(file, str):
+            result['image_path'] = file
+            with Image.open(file) as img:
+                parameters, metadata_scheme = read_info_from_image(img)
+        else:
+            parameters, metadata_scheme = read_info_from_image(file)
+        result['metadata_scheme'] = metadata_scheme.value if metadata_scheme else None
+        if parameters is None:
+            result['error'] = 'No metadata found in image'
+            return result
+        if metadata_scheme is not None:
+            parser = get_metadata_parser(metadata_scheme)
+            parsed = parser.to_json(parameters) if isinstance(parameters, (dict, str)) else parameters
+        else:
+            parsed = parameters if isinstance(parameters, dict) else {}
+        result['raw_metadata'] = parsed
+        for key, label, ftype in COMPARISON_FIELDS:
+            value, ok = safe_extract_field(parsed, key, label, ftype)
+            if ok:
+                result['fields'][key] = {'label': label, 'value': value, 'type': ftype.__name__}
+        result['loras'] = safe_extract_loras(parsed)
+    except Exception as e:
+        result['error'] = f'Error extracting metadata: {str(e)}'
+    return result
+
+
+def format_field_value(key: str, value) -> str:
+    if value is None:
+        return '(not set)'
+    if key == 'styles' and isinstance(value, list):
+        return ', '.join(value) if value else '(none)'
+    if key == 'resolution' and isinstance(value, tuple) and len(value) >= 2:
+        return f'{value[0]} × {value[1]}'
+    if key == 'adm_guidance' and isinstance(value, tuple) and len(value) >= 3:
+        return f'P:{value[0]}, N:{value[1]}, E:{value[2]}'
+    if key == 'freeu' and isinstance(value, tuple) and len(value) >= 4:
+        return f'b1:{value[0]}, b2:{value[1]}, s1:{value[2]}, s2:{value[3]}'
+    if isinstance(value, float):
+        return f'{value:.4g}'
+    return str(value)
+
+
+def compare_metadata(data_a: dict, data_b: dict) -> dict:
+    result = {
+        'summary': {
+            'total_fields': len(COMPARISON_FIELDS),
+            'different': 0,
+            'same': 0,
+            'missing_a': 0,
+            'missing_b': 0,
+            'lora_different': False
+        },
+        'field_comparison': [],
+        'lora_comparison': {
+            'only_in_a': [],
+            'only_in_b': [],
+            'both_different_weight': [],
+            'both_same': []
+        },
+        'errors': {
+            'a': data_a.get('error'),
+            'b': data_b.get('error')
+        }
+    }
+    fields_a = data_a.get('fields', {})
+    fields_b = data_b.get('fields', {})
+    for key, label, ftype in COMPARISON_FIELDS:
+        in_a = key in fields_a
+        in_b = key in fields_b
+        val_a = fields_a[key]['value'] if in_a else None
+        val_b = fields_b[key]['value'] if in_b else None
+        entry = {
+            'key': key,
+            'label': label,
+            'value_a': val_a,
+            'value_b': val_b,
+            'formatted_a': format_field_value(key, val_a),
+            'formatted_b': format_field_value(key, val_b),
+            'in_a': in_a,
+            'in_b': in_b,
+            'is_different': False,
+            'status': 'same'
+        }
+        if in_a and in_b:
+            if val_a != val_b:
+                entry['is_different'] = True
+                entry['status'] = 'different'
+                result['summary']['different'] += 1
+            else:
+                result['summary']['same'] += 1
+        elif in_a and not in_b:
+            entry['status'] = 'only_a'
+            result['summary']['missing_b'] += 1
+            result['summary']['different'] += 1
+            entry['is_different'] = True
+        elif not in_a and in_b:
+            entry['status'] = 'only_b'
+            result['summary']['missing_a'] += 1
+            result['summary']['different'] += 1
+            entry['is_different'] = True
+        result['field_comparison'].append(entry)
+    loras_a = data_a.get('loras', [])
+    loras_b = data_b.get('loras', [])
+    names_a = {l['name']: l for l in loras_a}
+    names_b = {l['name']: l for l in loras_b}
+    all_names = set(names_a.keys()) | set(names_b.keys())
+    for name in all_names:
+        in_a = name in names_a
+        in_b = name in names_b
+        if in_a and in_b:
+            la, lb = names_a[name], names_b[name]
+            if la['weight'] != lb['weight'] or la['enabled'] != lb['enabled']:
+                result['lora_comparison']['both_different_weight'].append({
+                    'name': name,
+                    'a': {'enabled': la['enabled'], 'weight': la['weight']},
+                    'b': {'enabled': lb['enabled'], 'weight': lb['weight']}
+                })
+                result['summary']['lora_different'] = True
+            else:
+                result['lora_comparison']['both_same'].append({
+                    'name': name, 'weight': la['weight'], 'enabled': la['enabled']
+                })
+        elif in_a:
+            la = names_a[name]
+            result['lora_comparison']['only_in_a'].append({
+                'name': name, 'enabled': la['enabled'], 'weight': la['weight']
+            })
+            result['summary']['lora_different'] = True
+        elif in_b:
+            lb = names_b[name]
+            result['lora_comparison']['only_in_b'].append({
+                'name': name, 'enabled': lb['enabled'], 'weight': lb['weight']
+            })
+            result['summary']['lora_different'] = True
+    return result
+
+
+def render_comparison_html(comparison: dict, data_a: dict, data_b: dict) -> str:
+    summary = comparison['summary']
+    errors = comparison['errors']
+    css = """
+    <style>
+    .cmp-container { font-family: -apple-system, BlinkMacSystemFont, sans-serif; color: #e0e0e0; }
+    .cmp-summary { background: #1e1e1e; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; }
+    .cmp-summary-row { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; }
+    .cmp-badge { padding: 3px 10px; border-radius: 12px; font-weight: 600; font-size: 12px; }
+    .cmp-badge-diff { background: #5c2d2d; color: #ff9999; }
+    .cmp-badge-same { background: #1f4d2e; color: #90ee90; }
+    .cmp-badge-miss { background: #4d4020; color: #ffd700; }
+    .cmp-error { background: #4d1f1f; color: #ffb3b3; padding: 10px; border-radius: 6px; margin-bottom: 12px; font-size: 13px; }
+    .cmp-table { width: 100%; border-collapse: collapse; font-size: 13px; background: #1a1a1a; border-radius: 8px; overflow: hidden; }
+    .cmp-table th { background: #2a2a2a; padding: 10px 12px; text-align: left; font-weight: 600; color: #bbb; border-bottom: 1px solid #333; }
+    .cmp-table td { padding: 8px 12px; border-bottom: 1px solid #252525; vertical-align: top; }
+    .cmp-table tr.cmp-diff td { background: #2a1f1f; }
+    .cmp-table tr.cmp-only-a td { background: #1f2a2a; }
+    .cmp-table tr.cmp-only-b td { background: #2a2a1f; }
+    .cmp-field { font-weight: 600; color: #9ecbff; }
+    .cmp-val-a { color: #90ee90; }
+    .cmp-val-b { color: #87ceeb; }
+    .cmp-val-miss { color: #888; font-style: italic; }
+    .cmp-lora-section { margin-top: 16px; background: #1a1a1a; border-radius: 8px; padding: 12px; }
+    .cmp-lora-title { font-weight: 600; color: #bbb; margin-bottom: 8px; font-size: 14px; }
+    .cmp-lora-item { padding: 6px 10px; border-radius: 4px; margin: 4px 0; font-size: 12px; }
+    .cmp-lora-a { background: #1f3a2a; color: #90ee90; }
+    .cmp-lora-b { background: #1f2e3a; color: #87ceeb; }
+    .cmp-lora-diff { background: #3a2a1f; color: #ffd08a; }
+    .cmp-lora-same { background: #2a2a2a; color: #aaa; }
+    .cmp-images { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+    .cmp-img-box { background: #1a1a1a; border-radius: 8px; padding: 10px; text-align: center; }
+    .cmp-img-label { font-size: 12px; color: #888; margin-top: 6px; word-break: break-all; }
+    .cmp-header-row { display: grid; grid-template-columns: 20% 40% 40%; }
+    .cmp-header { font-weight: 600; padding: 10px 12px; background: #2a2a2a; color: #bbb; border-bottom: 1px solid #333; }
+    </style>
+    """
+    parts = [css, '<div class="cmp-container">']
+    if errors.get('a') or errors.get('b'):
+        if errors.get('a'):
+            parts.append(f'<div class="cmp-error">Image A error: {errors["a"]}</div>')
+        if errors.get('b'):
+            parts.append(f'<div class="cmp-error">Image B error: {errors["b"]}</div>')
+    parts.append('<div class="cmp-summary">')
+    parts.append('<div class="cmp-summary-row">')
+    parts.append(f'<span class="cmp-badge cmp-badge-diff">Different: {summary["different"]}</span>')
+    parts.append(f'<span class="cmp-badge cmp-badge-same">Same: {summary["same"]}</span>')
+    parts.append(f'<span class="cmp-badge cmp-badge-miss">Missing in A: {summary["missing_a"]}</span>')
+    parts.append(f'<span class="cmp-badge cmp-badge-miss">Missing in B: {summary["missing_b"]}</span>')
+    if summary['lora_different']:
+        parts.append(f'<span class="cmp-badge cmp-badge-diff">LoRA differ</span>')
+    parts.append('</div></div>')
+    parts.append('<table class="cmp-table">')
+    parts.append('<thead><tr class="cmp-header-row">')
+    parts.append('<th class="cmp-header">Parameter</th>')
+    parts.append('<th class="cmp-header">Image A</th>')
+    parts.append('<th class="cmp-header">Image B</th>')
+    parts.append('</tr></thead><tbody>')
+    for entry in comparison['field_comparison']:
+        row_class = ''
+        if entry['status'] == 'different':
+            row_class = ' class="cmp-diff"'
+        elif entry['status'] == 'only_a':
+            row_class = ' class="cmp-only-a"'
+        elif entry['status'] == 'only_b':
+            row_class = ' class="cmp-only-b"'
+        va = f'<span class="cmp-val-a">{entry["formatted_a"]}</span>' if entry['in_a'] else '<span class="cmp-val-miss">(not set)</span>'
+        vb = f'<span class="cmp-val-b">{entry["formatted_b"]}</span>' if entry['in_b'] else '<span class="cmp-val-miss">(not set)</span>'
+        parts.append(f'<tr{row_class}><td class="cmp-field">{entry["label"]}</td><td>{va}</td><td>{vb}</td></tr>')
+    parts.append('</tbody></table>')
+    lc = comparison['lora_comparison']
+    has_lora = any(v for v in lc.values())
+    if has_lora:
+        parts.append('<div class="cmp-lora-section">')
+        parts.append(f'<div class="cmp-lora-title">LoRA Comparison</div>')
+        if lc['only_in_a']:
+            for item in lc['only_in_a']:
+                w = f"{item['weight']:.3g}"
+                on = 'ON' if item['enabled'] else 'off'
+                parts.append(f'<div class="cmp-lora-item cmp-lora-a">🅰 Only in A: <b>{item["name"]}</b> (weight={w}, {on})</div>')
+        if lc['only_in_b']:
+            for item in lc['only_in_b']:
+                w = f"{item['weight']:.3g}"
+                on = 'ON' if item['enabled'] else 'off'
+                parts.append(f'<div class="cmp-lora-item cmp-lora-b">🅱 Only in B: <b>{item["name"]}</b> (weight={w}, {on})</div>')
+        if lc['both_different_weight']:
+            for item in lc['both_different_weight']:
+                wa = f"{item['a']['weight']:.3g}"
+                wb = f"{item['b']['weight']:.3g}"
+                oa = 'ON' if item['a']['enabled'] else 'off'
+                ob = 'ON' if item['b']['enabled'] else 'off'
+                parts.append(f'<div class="cmp-lora-item cmp-lora-diff">⚡ <b>{item["name"]}</b> — A: weight={wa} ({oa}) | B: weight={wb} ({ob})</div>')
+        if lc['both_same']:
+            for item in lc['both_same']:
+                w = f"{item['weight']:.3g}"
+                on = 'ON' if item['enabled'] else 'off'
+                parts.append(f'<div class="cmp-lora-item cmp-lora-same">✓ Same: <b>{item["name"]}</b> (weight={w}, {on})</div>')
+        parts.append('</div>')
+    parts.append('</div>')
+    return ''.join(parts)

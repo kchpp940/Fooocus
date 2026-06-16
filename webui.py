@@ -19,7 +19,7 @@ import launch
 from extras.inpaint_mask import SAMOptions
 
 from modules.sdxl_styles import legal_style_names
-from modules.private_logger import get_current_html_path
+from modules.private_logger import get_current_html_path, get_history_gallery_items
 from modules.ui_gradio_extensions import reload_javascript
 from modules.auth import auth_enabled, check_auth
 from modules.util import is_json
@@ -252,11 +252,6 @@ shared.gradio_root = gr.Blocks(title=title).queue()
 with shared.gradio_root:
     currentTask = gr.State(worker.AsyncTask(args=[]))
     inpaint_engine_state = gr.State('empty')
-
-    def get_style_metadata():
-        return style_sorter.build_metadata_html()
-
-    style_metadata_html = gr.HTML(value=get_style_metadata(), visible=False, elem_id='style_metadata_container')
     with gr.Row():
         with gr.Column(scale=2):
             with gr.Row():
@@ -482,6 +477,145 @@ with shared.gradio_root:
                         metadata_input_image.upload(trigger_metadata_preview, inputs=metadata_input_image,
                                                     outputs=metadata_json, queue=False, show_progress=True)
 
+                    with gr.Tab(label='Compare', id='compare_tab') as compare_tab:
+                        compare_state_a = gr.State(None)
+                        compare_state_b = gr.State(None)
+
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                gr.HTML('<div style="font-weight:600;color:#90ee90;margin-bottom:6px;">Image A</div>')
+                                compare_input_a = grh.Image(label='Upload Image A', source='upload', type='pil')
+                                compare_gallery_a = gr.Gallery(label='History - Click to select A', object_fit='contain',
+                                                               height=300, elem_classes='image_gallery', show_label=True)
+                                compare_load_a_btn = gr.Button(value='⬅️  Set as Image A from above', variant='secondary', size='sm')
+
+                                def select_from_gallery_a(gallery, evt: gr.SelectData):
+                                    if evt.index is not None and gallery and isinstance(gallery, list) and len(gallery) > evt.index:
+                                        item = gallery[evt.index]
+                                        path = item['name'] if isinstance(item, dict) else (item[0] if isinstance(item, (list, tuple)) else str(item))
+                                        from PIL import Image as PILImage
+                                        try:
+                                            img = PILImage.open(path)
+                                            return img, path
+                                        except Exception:
+                                            return gr.update(), None
+                                    return gr.update(), None
+
+                                def get_path_from_upload_a(img):
+                                    try:
+                                        if hasattr(img, 'filename'):
+                                            return img.filename
+                                        if isinstance(img, dict) and 'name' in img:
+                                            return img['name']
+                                    except Exception:
+                                        pass
+                                    return None
+
+                                compare_upload_path_a = gr.State(None)
+                                compare_gallery_a.select(select_from_gallery_a, inputs=[compare_gallery_a],
+                                                         outputs=[compare_input_a, compare_upload_path_a], queue=False)
+                                compare_input_a.upload(get_path_from_upload_a, inputs=[compare_input_a],
+                                                       outputs=[compare_upload_path_a], queue=False)
+                                compare_load_a_btn.click(lambda x, y: (x, y), inputs=[compare_input_a, compare_upload_path_a],
+                                                         outputs=[compare_input_a, compare_upload_path_a], queue=False)
+
+                            with gr.Column(scale=1):
+                                gr.HTML('<div style="font-weight:600;color:#87ceeb;margin-bottom:6px;">Image B</div>')
+                                compare_input_b = grh.Image(label='Upload Image B', source='upload', type='pil')
+                                compare_gallery_b = gr.Gallery(label='History - Click to select B', object_fit='contain',
+                                                               height=300, elem_classes='image_gallery', show_label=True)
+                                compare_load_b_btn = gr.Button(value='⬅️  Set as Image B from above', variant='secondary', size='sm')
+
+                                def select_from_gallery_b(gallery, evt: gr.SelectData):
+                                    if evt.index is not None and gallery and isinstance(gallery, list) and len(gallery) > evt.index:
+                                        item = gallery[evt.index]
+                                        path = item['name'] if isinstance(item, dict) else (item[0] if isinstance(item, (list, tuple)) else str(item))
+                                        from PIL import Image as PILImage
+                                        try:
+                                            img = PILImage.open(path)
+                                            return img, path
+                                        except Exception:
+                                            return gr.update(), None
+                                    return gr.update(), None
+
+                                def get_path_from_upload_b(img):
+                                    try:
+                                        if hasattr(img, 'filename'):
+                                            return img.filename
+                                        if isinstance(img, dict) and 'name' in img:
+                                            return img['name']
+                                    except Exception:
+                                        pass
+                                    return None
+
+                                compare_upload_path_b = gr.State(None)
+                                compare_gallery_b.select(select_from_gallery_b, inputs=[compare_gallery_b],
+                                                         outputs=[compare_input_b, compare_upload_path_b], queue=False)
+                                compare_input_b.upload(get_path_from_upload_b, inputs=[compare_input_b],
+                                                       outputs=[compare_upload_path_b], queue=False)
+                                compare_load_b_btn.click(lambda x, y: (x, y), inputs=[compare_input_b, compare_upload_path_b],
+                                                         outputs=[compare_input_b, compare_upload_path_b], queue=False)
+
+                        def refresh_history_galleries():
+                            items = get_history_gallery_items(50)
+                            return items, items
+
+                        compare_refresh_btn = gr.Button(value='🔄  Refresh History List', variant='secondary', size='sm')
+                        compare_refresh_btn.click(refresh_history_galleries, outputs=[compare_gallery_a, compare_gallery_b],
+                                                  queue=False, show_progress=False)
+                        shared.gradio_root.load(refresh_history_galleries, outputs=[compare_gallery_a, compare_gallery_b],
+                                                queue=False, show_progress=False)
+
+                        with gr.Row():
+                            compare_do_btn = gr.Button(value='🔍  Compare Parameters', variant='primary', scale=3)
+                            apply_a_btn = gr.Button(value='📋  Apply Image A Parameters to UI', variant='secondary', scale=2)
+                            apply_b_btn = gr.Button(value='📋  Apply Image B Parameters to UI', variant='secondary', scale=2)
+
+                        compare_result_html = gr.HTML(value='<div style="color:#888;padding:20px;text-align:center;">Upload or select two images from history above, then click "Compare Parameters".</div>')
+
+                        def do_compare(img_a, path_a, img_b, path_b):
+                            source_a = path_a if path_a else img_a
+                            source_b = path_b if path_b else img_b
+                            if source_a is None and source_b is None:
+                                return ('<div style="color:#ff9999;padding:12px;background:#3a1f1f;border-radius:6px;">Please select at least one image to compare.</div>',
+                                        None, None)
+                            data_a = modules.meta_parser.extract_comparison_data(source_a) if source_a is not None else {
+                                'fields': {}, 'loras': [], 'raw_metadata': None, 'metadata_scheme': None,
+                                'image_path': path_a, 'error': 'No image A'
+                            }
+                            data_b = modules.meta_parser.extract_comparison_data(source_b) if source_b is not None else {
+                                'fields': {}, 'loras': [], 'raw_metadata': None, 'metadata_scheme': None,
+                                'image_path': path_b, 'error': 'No image B'
+                            }
+                            comparison = modules.meta_parser.compare_metadata(data_a, data_b)
+                            html = modules.meta_parser.render_comparison_html(comparison, data_a, data_b)
+                            raw_a = data_a.get('raw_metadata')
+                            raw_b = data_b.get('raw_metadata')
+                            return html, raw_a, raw_b
+
+                        compare_do_btn.click(do_compare,
+                                             inputs=[compare_input_a, compare_upload_path_a, compare_input_b, compare_upload_path_b],
+                                             outputs=[compare_result_html, compare_state_a, compare_state_b],
+                                             queue=True, show_progress=True)
+
+                        def apply_from_state(raw_metadata, is_generating, inpaint_mode):
+                            if raw_metadata is None:
+                                return modules.meta_parser.load_parameter_button_click({}, is_generating, inpaint_mode)
+                            try:
+                                return modules.meta_parser.load_parameter_button_click(raw_metadata, is_generating, inpaint_mode)
+                            except Exception:
+                                return modules.meta_parser.load_parameter_button_click({}, is_generating, inpaint_mode)
+
+                        apply_a_btn.click(apply_from_state,
+                                          inputs=[compare_state_a, state_is_generating, inpaint_mode],
+                                          outputs=load_data_outputs, queue=False, show_progress=False) \
+                            .then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)
+
+                        apply_b_btn.click(apply_from_state,
+                                          inputs=[compare_state_b, state_is_generating, inpaint_mode],
+                                          outputs=load_data_outputs, queue=False, show_progress=False) \
+                            .then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)
+
             with gr.Row(visible=modules.config.default_enhance_checkbox) as enhance_input_panel:
                 with gr.Tabs():
                     with gr.Tab(label='Upscale or Variation'):
@@ -654,6 +788,7 @@ with shared.gradio_root:
             describe_tab.select(lambda: 'desc', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
             enhance_tab.select(lambda: 'enhance', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
             metadata_tab.select(lambda: 'metadata', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
+            compare_tab.select(lambda: 'compare', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
             enhance_checkbox.change(lambda x: gr.update(visible=x), inputs=enhance_checkbox,
                                         outputs=enhance_input_panel, queue=False, show_progress=False, _js=switch_js)
 
@@ -766,26 +901,6 @@ with shared.gradio_root:
                     style_names=legal_style_names,
                     default_selected=modules.config.default_styles)
 
-                initial_filter = style_sorter.get_filter()
-                initial_group = style_sorter.get_group_by()
-                initial_group_label = initial_group.capitalize() if initial_group != 'none' else 'None'
-
-                with gr.Row(elem_classes=['style_filter_bar']):
-                    style_filter_all = gr.Button('All', variant='primary' if initial_filter == 'all' else 'secondary',
-                                                 elem_classes=['style_filter_btn'] + (['style_filter_active'] if initial_filter == 'all' else []))
-                    style_filter_favorites = gr.Button('Favorites', variant='primary' if initial_filter == 'favorites' else 'secondary',
-                                                       elem_classes=['style_filter_btn'] + (['style_filter_active'] if initial_filter == 'favorites' else []))
-                    style_filter_recent = gr.Button('Recent', variant='primary' if initial_filter == 'recent' else 'secondary',
-                                                    elem_classes=['style_filter_btn'] + (['style_filter_active'] if initial_filter == 'recent' else []))
-                    style_group_by = gr.Dropdown(
-                        label='Group by',
-                        choices=['None', 'Source', 'Favorites'],
-                        value=initial_group_label,
-                        elem_classes=['style_group_by'],
-                        show_label=False,
-                        container=False
-                    )
-
                 style_search_bar = gr.Textbox(show_label=False, container=False,
                                               placeholder="\U0001F50E Type here to search styles ...",
                                               value="",
@@ -796,74 +911,23 @@ with shared.gradio_root:
                                                     label='Selected Styles',
                                                     elem_classes=['style_selections'])
                 gradio_receiver_style_selections = gr.Textbox(elem_id='gradio_receiver_style_selections', visible=False)
-                gradio_receiver_favorite_toggle = gr.Textbox(elem_id='gradio_receiver_favorite_toggle', visible=False)
-                current_style_filter = gr.State(initial_filter)
-                current_style_group = gr.State(initial_group)
 
-                style_filter_all.click(
-                    style_sorter.set_filter_and_refresh,
-                    inputs=[style_selections, gr.State('all'), current_style_group],
-                    outputs=[style_selections, current_style_filter, style_metadata_html],
-                    queue=False,
-                    show_progress=False
-                ).then(lambda: None, _js='()=>{setActiveStyleFilter("all"); loadStyleMetadata(); refresh_style_localization();}')
-
-                style_filter_favorites.click(
-                    style_sorter.set_filter_and_refresh,
-                    inputs=[style_selections, gr.State('favorites'), current_style_group],
-                    outputs=[style_selections, current_style_filter, style_metadata_html],
-                    queue=False,
-                    show_progress=False
-                ).then(lambda: None, _js='()=>{setActiveStyleFilter("favorites"); loadStyleMetadata(); refresh_style_localization();}')
-
-                style_filter_recent.click(
-                    style_sorter.set_filter_and_refresh,
-                    inputs=[style_selections, gr.State('recent'), current_style_group],
-                    outputs=[style_selections, current_style_filter, style_metadata_html],
-                    queue=False,
-                    show_progress=False
-                ).then(lambda: None, _js='()=>{setActiveStyleFilter("recent"); loadStyleMetadata(); refresh_style_localization();}')
-
-                style_group_by.change(
-                    style_sorter.set_group_and_refresh,
-                    inputs=[style_selections, style_group_by, current_style_filter],
-                    outputs=[style_selections, current_style_group, style_metadata_html],
-                    queue=False,
-                    show_progress=False
-                ).then(lambda x: None, inputs=[style_group_by], _js='(x)=>{setActiveGroupBy(x); loadStyleMetadata(); refresh_style_localization();}')
-
-                def initial_style_load():
-                    return style_sorter.refresh_style_choices(
-                        modules.config.default_styles,
-                        initial_filter,
-                        initial_group
-                    )
-
-                shared.gradio_root.load(initial_style_load,
-                                        outputs=[style_selections, style_metadata_html]).then(
-                    lambda: None, _js=f'()=>{{setActiveStyleFilter("{initial_filter}"); setActiveGroupBy("{initial_group_label}"); initializeStyleManagement(); refresh_style_localization();}}')
+                shared.gradio_root.load(lambda: gr.update(choices=copy.deepcopy(style_sorter.all_styles)),
+                                        outputs=style_selections)
 
                 style_search_bar.change(style_sorter.search_styles,
-                                        inputs=[style_selections, style_search_bar, current_style_filter, current_style_group],
-                                        outputs=[style_selections, style_metadata_html],
+                                        inputs=[style_selections, style_search_bar],
+                                        outputs=style_selections,
                                         queue=False,
                                         show_progress=False).then(
-                    lambda: None, _js='()=>{loadStyleMetadata(); refresh_style_localization();}')
+                    lambda: None, _js='()=>{refresh_style_localization();}')
 
                 gradio_receiver_style_selections.input(style_sorter.sort_styles,
-                                                       inputs=[style_selections],
-                                                       outputs=[style_selections, style_metadata_html],
+                                                       inputs=style_selections,
+                                                       outputs=style_selections,
                                                        queue=False,
                                                        show_progress=False).then(
-                    lambda: None, _js='()=>{loadStyleMetadata(); refresh_style_localization();}')
-
-                gradio_receiver_favorite_toggle.input(
-                    style_sorter.toggle_favorite_and_refresh,
-                    inputs=[gradio_receiver_favorite_toggle, style_selections, current_style_filter, current_style_group],
-                    outputs=[style_selections, style_metadata_html],
-                    queue=False,
-                    show_progress=False
-                ).then(lambda: None, _js='()=>{loadStyleMetadata(); refresh_style_localization();}')
+                    lambda: None, _js='()=>{refresh_style_localization();}')
 
             with gr.Tab(label='Models'):
                 with gr.Group():
@@ -1261,17 +1325,12 @@ with shared.gradio_root:
             return modules.meta_parser.load_parameter_button_click(parsed_parameters, state_is_generating, inpaint_mode)
 
         metadata_import_button.click(trigger_metadata_import, inputs=[metadata_input_image, state_is_generating], outputs=load_data_outputs, queue=False, show_progress=True) \
-            .then(style_sorter.sort_styles, inputs=style_selections, outputs=[style_selections, style_metadata_html], queue=False, show_progress=False)
-
-        def track_style_usage_and_get_task(selected_styles, *args):
-            if isinstance(selected_styles, (list, tuple)):
-                style_sorter.track_style_usage(list(selected_styles))
-            return get_task(*args)
+            .then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)
 
         generate_button.click(lambda: (gr.update(visible=True, interactive=True), gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=False), [], True),
                               outputs=[stop_button, skip_button, generate_button, gallery, state_is_generating]) \
             .then(fn=refresh_seed, inputs=[seed_random, image_seed], outputs=image_seed) \
-            .then(fn=track_style_usage_and_get_task, inputs=[style_selections] + ctrls, outputs=currentTask) \
+            .then(fn=get_task, inputs=ctrls, outputs=currentTask) \
             .then(fn=generate_clicked, inputs=currentTask, outputs=[progress_html, progress_window, progress_gallery, gallery]) \
             .then(lambda: (gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=False), gr.update(visible=False, interactive=False), False),
                   outputs=[generate_button, stop_button, skip_button, state_is_generating]) \

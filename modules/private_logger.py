@@ -135,3 +135,44 @@ def log(img, metadata, metadata_parser: MetadataParser | None = None, output_for
     log_cache[html_name] = middle_part
 
     return local_temp_filename
+
+
+def list_history_images(limit: int = 100) -> list:
+    import datetime
+    from pathlib import Path
+    result = []
+    try:
+        outputs_dir = Path(modules.config.path_outputs)
+        if not outputs_dir.exists():
+            return result
+        date_dirs = sorted([d for d in outputs_dir.iterdir() if d.is_dir()], reverse=True)
+        exts = {'.png', '.jpg', '.jpeg', '.webp'}
+        for date_dir in date_dirs:
+            try:
+                files = sorted([f for f in date_dir.iterdir() if f.is_file() and f.suffix.lower() in exts],
+                               key=lambda x: x.stat().st_mtime, reverse=True)
+                for f in files:
+                    try:
+                        stat = f.stat()
+                        mtime = datetime.datetime.fromtimestamp(stat.st_mtime)
+                        result.append({
+                            'path': str(f.absolute()),
+                            'name': f.name,
+                            'date_dir': date_dir.name,
+                            'size': stat.st_size,
+                            'mtime': mtime.strftime('%Y-%m-%d %H:%M:%S')
+                        })
+                        if len(result) >= limit:
+                            return result
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return result
+
+
+def get_history_gallery_items(limit: int = 100) -> list:
+    items = list_history_images(limit)
+    return [item['path'] for item in items]
