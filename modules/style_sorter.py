@@ -80,28 +80,36 @@ def localization_key(x):
     return x + localization.current_translation.get(x, '')
 
 
-def _apply_filter(styles_list, filter_mode, selected):
+def _apply_filter(styles_list, filter_mode, selected, query=''):
     selected_set = set(selected)
+    special_set = set(_special_styles)
 
-    if filter_mode == 'all':
+    if filter_mode == 'all' and not query.strip():
         result = styles_list
         selected_only = set()
         return result, selected_only
 
-    elif filter_mode == 'favorites':
+    if filter_mode == 'favorites':
         favorites = set(style_prefs.get_favorites())
-        matches = [s for s in styles_list if s in favorites or s in _special_styles]
+        filter_matches = [s for s in styles_list if s in favorites]
 
     elif filter_mode == 'recent':
         recent = set(style_prefs.get_recently_used())
-        matches = [s for s in styles_list if s in recent or s in _special_styles]
+        filter_matches = [s for s in styles_list if s in recent]
 
     else:
-        matches = styles_list
+        filter_matches = list(styles_list)
 
-    match_set = set(matches)
-    selected_only = selected_set - match_set
-    result = list(styles_list)
+    if query and query.strip():
+        query_matches = [s for s in filter_matches if query.lower() in localization_key(s).lower()]
+        filter_set = set(query_matches)
+    else:
+        filter_set = set(filter_matches)
+
+    selected_only = selected_set - filter_set - special_set
+
+    keep_set = filter_set | selected_set | special_set
+    result = [s for s in styles_list if s in keep_set]
 
     return result, selected_only
 
@@ -207,14 +215,7 @@ def refresh_style_choices(selected, filter_mode='all', group_by='none', query=''
 
     styles_list = list(all_styles)
 
-    styles_list, selected_only = _apply_filter(styles_list, filter_mode, selected)
-
-    if query and query.strip():
-        selected_set = set(selected)
-        all_matched = [s for s in styles_list if query.lower() in localization_key(s).lower()]
-        match_set = set(all_matched)
-        query_selected_only = selected_set - match_set
-        selected_only = selected_only | query_selected_only
+    styles_list, selected_only = _apply_filter(styles_list, filter_mode, selected, query)
 
     styles_list = _apply_grouping(styles_list, group_by, selected, selected_only, query)
     styles_list = _apply_priority_sort(styles_list, selected, query)
@@ -230,16 +231,30 @@ def refresh_style_choices(selected, filter_mode='all', group_by='none', query=''
     )
 
 
-def sort_styles(selected):
+def sort_styles(new_visible_order):
     global all_styles
-    _validate_style_list(selected, 'drag sort selected')
-    unselected = [y for y in all_styles if y not in selected]
-    sorted_styles = selected + unselected
-    _validate_style_list(sorted_styles, 'drag sort result')
-    _save_sorted_styles(sorted_styles)
-    all_styles = sorted_styles
+    _validate_style_list(new_visible_order, 'drag sort new order')
+
+    all_style_set = set(all_styles)
+    visible_set = set(new_visible_order)
+
+    if visible_set == all_style_set:
+        merged_order = list(new_visible_order)
+    else:
+        visible_iter = iter(new_visible_order)
+        merged_order = []
+        for s in all_styles:
+            if s in visible_set:
+                merged_order.append(next(visible_iter))
+            else:
+                merged_order.append(s)
+
+    _validate_style_list(merged_order, 'drag sort merged result')
+    _save_sorted_styles(merged_order)
+    all_styles = merged_order
     _rebuild_valid_style_set()
-    return refresh_style_choices(selected)
+
+    return refresh_style_choices(new_visible_order)
 
 
 def toggle_favorite_and_refresh(style_name, selected, filter_mode, group_by):
