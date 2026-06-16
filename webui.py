@@ -1329,7 +1329,7 @@ with shared.gradio_root:
         if not args_manager.args.disable_preset_selection:
             def save_current_as_preset(new_name, *ui_args):
                 if not new_name or new_name.strip() == '':
-                    return gr.update(), gr.update(), '⚠️  Error: Preset name cannot be empty'
+                    return gr.update(), gr.update(), gr.update(), '⚠️  Error: Preset name cannot be empty'
                 try:
                     preset_data = build_preset_data_from_ui(*ui_args)
                     success, result = modules.config.save_user_preset(new_name.strip(), preset_data)
@@ -1338,12 +1338,13 @@ with shared.gradio_root:
                         return (
                             gr.update(choices=modules.config.available_presets, value=result),
                             format_preset_details_html(result),
+                            gr.update(value=result),
                             f'✅  Preset saved successfully: {result}'
                         )
                     else:
-                        return gr.update(), gr.update(), f'⚠️  Error: {result}'
+                        return gr.update(), gr.update(), gr.update(), f'⚠️  Error: {result}'
                 except Exception as e:
-                    return gr.update(), gr.update(), f'⚠️  Error saving preset: {str(e)}'
+                    return gr.update(), gr.update(), gr.update(), f'⚠️  Error saving preset: {str(e)}'
 
             save_preset_inputs = [new_preset_name_input]
             save_preset_inputs += [
@@ -1359,80 +1360,89 @@ with shared.gradio_root:
             save_preset_btn.click(
                 save_current_as_preset,
                 inputs=save_preset_inputs,
-                outputs=[preset_selection, preset_details_html, preset_operation_msg],
+                outputs=[preset_selection, preset_details_html, preset_selection, preset_operation_msg],
                 queue=False,
                 show_progress=False
             )
 
             def duplicate_current_preset(current_preset, new_name):
                 if not new_name or new_name.strip() == '':
-                    return gr.update(), gr.update(), '⚠️  Error: New preset name is required for duplication'
+                    return gr.update(), gr.update(), gr.update(), '⚠️  Error: New preset name is required for duplication'
                 if current_preset == 'initial':
-                    return gr.update(), gr.update(), '⚠️  Error: Cannot duplicate "initial", use "Save Current as Preset" instead'
+                    return gr.update(), gr.update(), gr.update(), '⚠️  Error: Cannot duplicate "initial", use "Save Current as Preset" instead'
                 success, result = modules.config.duplicate_user_preset(current_preset, new_name.strip())
                 if success:
                     modules.config.update_files()
                     return (
                         gr.update(choices=modules.config.available_presets, value=result),
                         format_preset_details_html(result),
+                        gr.update(value=result),
                         f'✅  Preset duplicated: {current_preset} → {result}'
                     )
                 else:
-                    return gr.update(), gr.update(), f'⚠️  Error: {result}'
+                    return gr.update(), gr.update(), gr.update(), f'⚠️  Error: {result}'
 
             duplicate_preset_btn.click(
                 duplicate_current_preset,
                 inputs=[preset_selection, new_preset_name_input],
-                outputs=[preset_selection, preset_details_html, preset_operation_msg],
+                outputs=[preset_selection, preset_details_html, preset_selection, preset_operation_msg],
                 queue=False,
                 show_progress=False
-            )
+            ).then(preset_selection_change, inputs=[preset_selection, state_is_generating, inpaint_mode], outputs=load_data_outputs, queue=False, show_progress=True) \
+             .then(fn=style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False) \
+             .then(lambda: None, _js='()=>{refresh_style_localization();}')
 
             def rename_current_preset(current_preset, new_name):
                 if not modules.config.is_user_preset(current_preset):
-                    return gr.update(), gr.update(), '⚠️  Error: Can only rename user presets (marked with [User] prefix)'
+                    return gr.update(), gr.update(), gr.update(), '⚠️  Error: Can only rename user presets (marked with [User] prefix)'
                 if not new_name or new_name.strip() == '':
-                    return gr.update(), gr.update(), '⚠️  Error: New preset name cannot be empty'
+                    return gr.update(), gr.update(), gr.update(), '⚠️  Error: New preset name cannot be empty'
                 success, result = modules.config.rename_user_preset(current_preset, new_name.strip())
                 if success:
                     modules.config.update_files()
                     return (
                         gr.update(choices=modules.config.available_presets, value=result),
                         format_preset_details_html(result),
+                        gr.update(value=result),
                         f'✅  Preset renamed: {current_preset} → {result}'
                     )
                 else:
-                    return gr.update(), gr.update(), f'⚠️  Error: {result}'
+                    return gr.update(), gr.update(), gr.update(), f'⚠️  Error: {result}'
 
             rename_preset_btn.click(
                 rename_current_preset,
                 inputs=[preset_selection, new_preset_name_input],
-                outputs=[preset_selection, preset_details_html, preset_operation_msg],
+                outputs=[preset_selection, preset_details_html, preset_selection, preset_operation_msg],
                 queue=False,
                 show_progress=False
             )
 
             def delete_current_preset(current_preset):
                 if not modules.config.is_user_preset(current_preset):
-                    return gr.update(), gr.update(), '⚠️  Error: Can only delete user presets (marked with [User] prefix)'
+                    return gr.update(), gr.update(), gr.update(), '⚠️  Error: Can only delete user presets (marked with [User] prefix)'
                 success, result = modules.config.delete_user_preset(current_preset)
                 if success:
                     modules.config.update_files()
+                    fallback = 'initial'
                     return (
-                        gr.update(choices=modules.config.available_presets, value='initial'),
-                        format_preset_details_html('initial'),
+                        gr.update(choices=modules.config.available_presets, value=fallback),
+                        format_preset_details_html(fallback),
+                        gr.update(value=fallback),
                         f'✅  Preset deleted: {current_preset}'
                     )
                 else:
-                    return gr.update(), gr.update(), f'⚠️  Error: {result}'
+                    return gr.update(), gr.update(), gr.update(), f'⚠️  Error: {result}'
 
             delete_preset_btn.click(
                 delete_current_preset,
                 inputs=[preset_selection],
-                outputs=[preset_selection, preset_details_html, preset_operation_msg],
+                outputs=[preset_selection, preset_details_html, preset_selection, preset_operation_msg],
                 queue=False,
                 show_progress=False
-            )
+            ).then(preset_selection_change, inputs=[preset_selection, state_is_generating, inpaint_mode], outputs=load_data_outputs, queue=False, show_progress=True) \
+             .then(fn=style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False) \
+             .then(lambda: None, _js='()=>{refresh_style_localization();}') \
+             .then(inpaint_engine_state_change, inputs=[inpaint_engine_state] + enhance_inpaint_mode_ctrls, outputs=enhance_inpaint_engine_ctrls, queue=False, show_progress=False)
 
 def dump_default_english_config():
     from modules.localization import dump_english_config
