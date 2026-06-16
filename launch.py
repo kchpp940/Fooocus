@@ -20,7 +20,7 @@ import fooocus_version
 
 from build_launcher import build_launcher
 from modules.launch_util import is_installed, run, python, run_pip, requirements_met, delete_folder_content
-from modules.model_loader import load_file_from_url, is_file_sane
+from modules.model_loader import load_file_from_url, is_file_readable
 
 REINSTALL_ALL = False
 TRY_INSTALL_XFORMERS = False
@@ -105,8 +105,8 @@ def _check_model_available(model_name, paths):
     filepath = get_file_from_folder_list(model_name, paths)
     if not os.path.isfile(filepath):
         return False, None
-    sane, _ = is_file_sane(filepath)
-    return sane, filepath
+    readable, _ = is_file_readable(filepath)
+    return readable, filepath
 
 
 def download_models(default_model, previous_default_models, checkpoint_downloads, embeddings_downloads, lora_downloads, vae_downloads):
