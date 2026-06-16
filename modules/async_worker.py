@@ -13,7 +13,25 @@ class TaskStatus(Enum):
     RUNNING = auto()
     FINISHING = auto()
     FINISHED = auto()
+    STOPPED = auto()
+    SKIPPED = auto()
     FAILED = auto()
+
+
+class FinishEnvelope:
+    def __init__(self, status, results=None, error=None, should_restore_ui=True):
+        self.status = status
+        self.results = results if results is not None else []
+        self.error = error
+        self.should_restore_ui = should_restore_ui
+
+    def to_dict(self):
+        return {
+            'status': self.status.value if isinstance(self.status, TaskStatus) else self.status,
+            'results': self.results,
+            'error': self.error,
+            'should_restore_ui': self.should_restore_ui,
+        }
 
 
 class AsyncTask:
@@ -174,7 +192,8 @@ class AsyncTask:
         import modules.patch as modules_patch
         import time
 
-        self.status = TaskStatus.FINISHING
+        if self.status == TaskStatus.RUNNING:
+            self.status = TaskStatus.FINISHING
 
         if self.processing and processing_start_time is not None:
             self.processing = False
@@ -1094,12 +1113,14 @@ def worker():
                 if async_task.last_stop == 'skip':
                     print('User skipped')
                     async_task.last_stop = False
+                    async_task.status = TaskStatus.SKIPPED
                     # also skip all enhance steps for this image, but add the steps to the progress bar
                     if async_task.enhance_uov_processing_order == flags.enhancement_uov_before:
                         done_steps_inpainting += len(async_task.enhance_ctrls) * enhance_steps
                     exception_result = 'continue'
                 else:
                     print('User stopped')
+                    async_task.status = TaskStatus.STOPPED
                     exception_result = 'break'
             finally:
                 done_steps_upscaling += steps
@@ -1341,9 +1362,11 @@ def worker():
                     if async_task.last_stop == 'skip':
                         print('User skipped')
                         async_task.last_stop = False
+                        async_task.status = TaskStatus.SKIPPED
                         continue
                     else:
                         print('User stopped')
+                        async_task.status = TaskStatus.STOPPED
                         break
 
                 del task['c'], task['uc']  # Save memory
@@ -1467,9 +1490,11 @@ def worker():
                         if async_task.last_stop == 'skip':
                             print('User skipped')
                             async_task.last_stop = False
+                            async_task.status = TaskStatus.SKIPPED
                             continue
                         else:
                             print('User stopped')
+                            async_task.status = TaskStatus.STOPPED
                             exception_result = 'break'
                             break
                     finally:
@@ -1516,13 +1541,26 @@ def worker():
                 handler(task)
                 if task.generate_image_grid:
                     build_image_wall(task)
-                task.mark_finished()
-                task.yields.append(['finish', task.results])
+                if task.status == TaskStatus.RUNNING:
+                    task.mark_finished()
+                should_restore = task.status in (TaskStatus.STOPPED, TaskStatus.SKIPPED, TaskStatus.FAILED)
+                envelope = FinishEnvelope(
+                    status=task.status,
+                    results=task.results,
+                    should_restore_ui=should_restore
+                )
+                task.yields.append(['finish', envelope.to_dict()])
                 pipeline.prepare_text_encoder(async_call=True)
             except Exception as e:
                 traceback.print_exc()
                 task.mark_failed(str(e))
-                task.yields.append(['finish', task.results])
+                envelope = FinishEnvelope(
+                    status=task.status,
+                    results=task.results,
+                    error=str(e),
+                    should_restore_ui=True
+                )
+                task.yields.append(['finish', envelope.to_dict()])
             finally:
                 pass
     pass

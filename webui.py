@@ -60,7 +60,6 @@ def generate_clicked(task: worker.AsyncTask):
                     # help bad internet connection by skipping duplicated preview
                     if len(task.yields) > 0:  # if we have the next item
                         if task.yields[0][0] == 'preview':   # if the next item is also a preview
-                            # print('Skipped one preview for better internet connection.')
                             continue
 
                     percentage, title, image = product
@@ -74,20 +73,47 @@ def generate_clicked(task: worker.AsyncTask):
                         gr.update(visible=True, value=product), \
                         gr.update(visible=False)
                 if flag == 'finish':
+                    envelope = product
+                    if isinstance(envelope, dict):
+                        task_status = envelope.get('status')
+                        results = envelope.get('results', [])
+                        error = envelope.get('error')
+                        should_restore_ui = envelope.get('should_restore_ui', False)
+                    else:
+                        task_status = None
+                        results = envelope if envelope is not None else []
+                        error = None
+                        should_restore_ui = False
+
                     if not args_manager.args.disable_enhance_output_sorting:
-                        product = sort_enhance_images(product, task)
+                        results = sort_enhance_images(results, task)
 
-                    final_results = product
+                    final_results = results
 
-                    yield gr.update(visible=False), \
+                    progress_title = None
+                    if error:
+                        progress_title = f'Generation failed: {error}'
+                    elif task_status is not None:
+                        from modules.async_worker import TaskStatus
+                        if task_status == TaskStatus.STOPPED.value:
+                            progress_title = 'Generation stopped by user'
+                        elif task_status == TaskStatus.SKIPPED.value:
+                            progress_title = 'Generation skipped by user'
+
+                    if progress_title:
+                        progress_html_update = gr.update(visible=True, value=modules.html.make_progress_html(100, progress_title))
+                    else:
+                        progress_html_update = gr.update(visible=False)
+
+                    yield progress_html_update, \
                         gr.update(visible=False), \
                         gr.update(visible=False), \
-                        gr.update(visible=True, value=product)
+                        gr.update(visible=True, value=results)
                     finished = True
 
                     # delete Fooocus temp images, only keep gradio temp images
                     if args_manager.args.disable_image_log:
-                        for filepath in product:
+                        for filepath in results:
                             if isinstance(filepath, str) and os.path.exists(filepath):
                                 os.remove(filepath)
     finally:
