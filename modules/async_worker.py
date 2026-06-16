@@ -1539,7 +1539,7 @@ def worker():
                 handler(task)
                 if task.generate_image_grid:
                     build_image_wall(task)
-                if task.status == TaskStatus.RUNNING:
+                if task.status in (TaskStatus.RUNNING, TaskStatus.FINISHING):
                     task.mark_finished()
                 envelope = FinishEnvelope(
                     status=task.status,
