@@ -184,6 +184,7 @@ def format_resource_center_html(selected_filter: str = "all") -> str:
         ("✅ 已存在", by_status.get("exists", 0) + by_status.get("hash_verified", 0), "#059669", "#ecfdf5"),
         ("⬇️ 下载中", by_status.get("downloading", 0), "#2563eb", "#eff6ff"),
         ("❌ 缺失", by_status.get("missing", 0) + by_status.get("download_failed", 0) + by_status.get("hash_mismatch", 0), "#dc2626", "#fef2f2"),
+        ("🔄 多路径重复", summary.get("with_duplicates", 0), "#d97706", "#fffbeb"),
     ]
 
     html_parts.append('<div style="display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap;">')
@@ -206,7 +207,7 @@ def format_resource_center_html(selected_filter: str = "all") -> str:
                 <th style="padding: 10px 12px; text-align: left; color: #374151;">状态</th>
                 <th style="padding: 10px 12px; text-align: left; color: #374151;">大小</th>
                 <th style="padding: 10px 12px; text-align: left; color: #374151;">Hash (SHA256)</th>
-                <th style="padding: 10px 12px; text-align: left; color: #374151;">目录</th>
+                <th style="padding: 10px 12px; text-align: left; color: #374151;">文件路径 (按加载优先级)</th>
                 <th style="padding: 10px 12px; text-align: left; color: #374151;">操作</th>
             </tr>
         </thead>
@@ -240,39 +241,48 @@ def format_resource_center_html(selected_filter: str = "all") -> str:
         if rd["status"] == "downloading":
             pct = round(rd["download_progress"] * 100, 1)
             speed = _format_speed(rd["download_speed"])
+            target_display = rd.get("download_target_path", "")
+            if target_display and len(target_display) > 50:
+                target_display = "..." + target_display[-47:]
+            target_info = f'<div style="font-size: 10px; color: #6b7280; margin-top: 2px;">→ {target_display}</div>' if target_display else ""
             progress_html = f'''
                 <div style="margin-top: 4px;">
                     <div style="height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden; width: 120px;">
                         <div style="height: 100%; background: #2563eb; width: {pct}%; border-radius: 3px; transition: width 0.3s;"></div>
                     </div>
                     <div style="font-size: 11px; color: #6b7280; margin-top: 2px;">{pct}% · {speed}</div>
+                    {target_info}
                 </div>
             '''
 
+        primary = rd.get("primary", {})
+        primary_hash = primary.get("current_hash", None)
+        primary_hash_status = primary.get("hash_status", "not_computed")
+
         hash_display = '<span style="color: #9ca3af; font-size: 12px;">— 未计算</span>'
-        if rd["hash_status"] == "verified":
+        if primary_hash_status == "verified":
             hash_display = f'''
                 <div>
-                    <code style="font-family: monospace; font-size: 11px; color: #059669; background: #ecfdf5; padding: 1px 6px; border-radius: 4px;">{rd["current_hash"]}</code>
+                    <code style="font-family: monospace; font-size: 11px; color: #059669; background: #ecfdf5; padding: 1px 6px; border-radius: 4px;">{primary_hash}</code>
                     <span style="font-size: 11px; color: #059669; margin-left: 4px; font-weight: 500;">✓ 可信</span>
                 </div>
                 <div style="font-size: 10px; color: #6b7280; margin-top: 2px;">与预期 hash 匹配</div>
             '''
-        elif rd["hash_status"] == "mismatch":
+        elif primary_hash_status == "mismatch":
             hash_display = f'''
                 <div>
-                    <code style="font-family: monospace; font-size: 11px; color: #dc2626; background: #fef2f2; padding: 1px 6px; border-radius: 4px;">{rd["current_hash"]}</code>
+                    <code style="font-family: monospace; font-size: 11px; color: #dc2626; background: #fef2f2; padding: 1px 6px; border-radius: 4px;">{primary_hash}</code>
                     <span style="font-size: 11px; color: #dc2626; margin-left: 4px; font-weight: 500;">✗ 不匹配</span>
                 </div>
                 <div style="font-size: 10px; color: #dc2626; margin-top: 2px;">文件可能被篡改或版本错误</div>
             '''
-        elif rd["hash_status"] == "computed_unverified":
+        elif primary_hash_status == "computed_unverified":
             source_label = "内置来源" if rd["is_builtin"] else "未知来源"
             badge_color = "#f59e0b" if rd["is_builtin"] else "#6b7280"
             badge_bg = "#fffbeb" if rd["is_builtin"] else "#f3f4f6"
             hash_display = f'''
                 <div>
-                    <code style="font-family: monospace; font-size: 11px; color: {badge_color}; background: {badge_bg}; padding: 1px 6px; border-radius: 4px;">{rd["current_hash"]}</code>
+                    <code style="font-family: monospace; font-size: 11px; color: {badge_color}; background: {badge_bg}; padding: 1px 6px; border-radius: 4px;">{primary_hash}</code>
                 </div>
                 <div style="font-size: 10px; color: {badge_color}; margin-top: 2px;">⚠ {source_label}，未验证</div>
             '''
@@ -291,40 +301,153 @@ def format_resource_center_html(selected_filter: str = "all") -> str:
 
         builtin_badge = ' <span style="font-size: 10px; background: #e0e7ff; color: #4338ca; padding: 1px 6px; border-radius: 10px; margin-left: 4px;">内置</span>' if rd["is_builtin"] else ""
 
+        duplicate_badge = ""
+        if rd.get("has_duplicates", False):
+            num = rd.get("num_matches", 0)
+            duplicate_badge = f' <span style="font-size: 10px; background: #fef3c7; color: #92400e; padding: 1px 6px; border-radius: 10px; margin-left: 4px;" title="同名文件存在于 {num} 个目录">⚠️ {num}个位置</span>'
+
+        paths_html_parts = []
+        all_matches = rd.get("all_matches", [])
+        existing_matches = [m for m in all_matches if m.get("exists", False)]
+        possible_matches = [m for m in all_matches if not m.get("exists", False)]
+
+        for match in existing_matches:
+            is_primary = match.get("is_primary", False)
+            dir_priority = match.get("dir_priority", -1)
+            full_path = match.get("full_path", "")
+            size_human = match.get("file_size_human", "0 B")
+            m_hash = match.get("current_hash", None)
+            m_hash_status = match.get("hash_status", "not_computed")
+
+            path_display = full_path
+            if len(path_display) > 50:
+                path_display = "..." + path_display[-47:]
+
+            hash_badge = ""
+            if m_hash_status == "verified":
+                hash_badge = ' <span style="font-size: 10px; background: #d1fae5; color: #065f46; padding: 1px 5px; border-radius: 8px;">✓ hash匹配</span>'
+            elif m_hash_status == "mismatch":
+                hash_badge = ' <span style="font-size: 10px; background: #fee2e2; color: #991b1b; padding: 1px 5px; border-radius: 8px;">✗ hash不符</span>'
+            elif m_hash_status == "computed_unverified":
+                hash_badge = ' <span style="font-size: 10px; background: #fef3c7; color: #92400e; padding: 1px 5px; border-radius: 8px;">⚠ 未验证</span>'
+
+            primary_badge = ' <span style="font-size: 10px; background: #dbeafe; color: #1e40af; padding: 1px 5px; border-radius: 8px; margin-left: 4px;">★ 优先加载</span>' if is_primary else ''
+            priority_label = f'<span style="font-size: 10px; color: #6b7280;">#{dir_priority}</span>'
+
+            paths_html_parts.append(f'''
+                <div style="padding: 6px 8px; margin: 2px 0; border-radius: 6px; background: {'#f0fdf4' if is_primary else '#f9fafb'}; border-left: 3px solid {'#22c55e' if is_primary else '#d1d5db'};">
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;">
+                        <div style="flex: 1; min-width: 0;">
+                            <code style="font-family: monospace; font-size: 11px; color: #374151; word-break: break-all;">{path_display}</code>
+                        </div>
+                        <div style="flex-shrink: 0; text-align: right;">
+                            <span style="font-size: 10px; color: #6b7280; white-space: nowrap;">{size_human}</span>
+                        </div>
+                    </div>
+                    <div style="margin-top: 2px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center;">
+                        {priority_label}
+                        {hash_badge}
+                        {primary_badge}
+                    </div>
+                </div>
+            ''')
+
+        for match in possible_matches:
+            dir_priority = match.get("dir_priority", -1)
+            full_path = match.get("full_path", "")
+            path_display = full_path
+            if len(path_display) > 50:
+                path_display = "..." + path_display[-47:]
+            paths_html_parts.append(f'''
+                <div style="padding: 4px 8px; margin: 2px 0; border-radius: 6px; background: #fafafa; border-left: 3px solid #e5e7eb; opacity: 0.6;">
+                    <code style="font-family: monospace; font-size: 11px; color: #9ca3af; text-decoration: line-through; word-break: break-all;">{path_display}</code>
+                    <span style="font-size: 10px; color: #9ca3af; margin-left: 4px;">(不存在)</span>
+                </div>
+            ''')
+
+        if not paths_html_parts:
+            paths_html_parts.append('<div style="font-size: 12px; color: #9ca3af;">— 无可用路径</div>')
+
+        paths_html = ''.join(paths_html_parts)
+
+        all_dirs = rd.get("all_possible_dirs", [])
+        existing_dirs = [m.get("directory", "") for m in existing_matches]
+        possible_target_dirs = list(set(all_dirs + existing_dirs))
+        possible_target_paths = []
+        for d in possible_target_dirs:
+            if d:
+                possible_target_paths.append(os.path.join(d, rd["filename"]))
+
+        target_options_html = ""
+        if possible_target_paths and rd["source_url"]:
+            options = []
+            for tp in possible_target_paths:
+                tp_display = tp
+                if len(tp_display) > 50:
+                    tp_display = "..." + tp_display[-47:]
+                options.append(f'<option value="{tp}">{tp_display}</option>')
+            target_options_html = f'''
+                <select id="dl_target_{rkey.replace(':', '_')}" style="
+                    width: 100%; padding: 3px 6px; font-size: 10px; border-radius: 4px; border: 1px solid #d1d5db; margin: 2px 0;">
+                    <option value="">默认目录（按优先级）</option>
+                    {''.join(options)}
+                </select>
+            '''
+
+        rehash_target_options_html = ""
+        if existing_matches:
+            options = []
+            for m in existing_matches:
+                fp = m.get("full_path", "")
+                fp_display = fp
+                if len(fp_display) > 50:
+                    fp_display = "..." + fp_display[-47:]
+                is_primary = m.get("is_primary", False)
+                primary_marker = " ★优先" if is_primary else ""
+                options.append(f'<option value="{fp}">{fp_display}{primary_marker}</option>')
+            rehash_target_options_html = f'''
+                <select id="rh_target_{rkey.replace(':', '_')}" style="
+                    width: 100%; padding: 3px 6px; font-size: 10px; border-radius: 4px; border: 1px solid #d1d5db; margin: 2px 0;">
+                    <option value="">所有存在的文件</option>
+                    {''.join(options)}
+                </select>
+            '''
+
         download_btn = ""
         if rd["source_url"]:
             btn_label = "重新下载" if rd["status"] in ("exists", "hash_verified", "hash_mismatch") else "下载"
             btn_color = "#d97706" if rd["status"] in ("missing", "download_failed") else "#6b7280"
             download_btn = f'''
-                <button onclick="downloadResource('{rkey}')" style="
-                    padding: 4px 10px; font-size: 11px; border-radius: 6px; border: none; cursor: pointer;
-                    background: {btn_color}11; color: {btn_color}; font-weight: 500; margin: 2px 2px;"
-                    onmouseover="this.style.background='{btn_color}22'" onmouseout="this.style.background='{btn_color}11'">
-                    ⬇️ {btn_label}
-                </button>
+                <div style="position: relative;">
+                    <button onclick="downloadResource('{rkey}')" style="
+                        padding: 4px 10px; font-size: 11px; border-radius: 6px; border: none; cursor: pointer;
+                        background: {btn_color}11; color: {btn_color}; font-weight: 500; margin: 2px 2px;"
+                        onmouseover="this.style.background='{btn_color}22'" onmouseout="this.style.background='{btn_color}11'">
+                        ⬇️ {btn_label}
+                    </button>
+                    {target_options_html}
+                </div>
             '''
 
         rehash_btn = ""
-        if rd["status"] in ("exists", "hash_verified", "hash_mismatch"):
+        if rd["status"] in ("exists", "hash_verified", "hash_mismatch") and existing_matches:
             rehash_btn = f'''
-                <button onclick="rehashResource('{rkey}')" style="
-                    padding: 4px 10px; font-size: 11px; border-radius: 6px; border: none; cursor: pointer;
-                    background: #2563eb11; color: #2563eb; font-weight: 500; margin: 2px 2px;"
-                    onmouseover="this.style.background='#2563eb22'" onmouseout="this.style.background='#2563eb11'">
-                    🔍 校验
-                </button>
+                <div style="position: relative;">
+                    <button onclick="rehashResource('{rkey}')" style="
+                        padding: 4px 10px; font-size: 11px; border-radius: 6px; border: none; cursor: pointer;
+                        background: #2563eb11; color: #2563eb; font-weight: 500; margin: 2px 2px;"
+                        onmouseover="this.style.background='#2563eb22'" onmouseout="this.style.background='#2563eb11'">
+                        🔍 校验
+                    </button>
+                    {rehash_target_options_html}
+                </div>
             '''
-
-        dir_display = rd["directory"]
-        if len(dir_display) > 45:
-            dir_display = "..." + dir_display[-42:]
-        dir_full = rd["directory"]
 
         html_parts.append(f'''
             <tr style="border-bottom: 1px solid #f0f0f0; background: {row_bg};">
                 <td style="padding: 10px 12px; vertical-align: top; white-space: nowrap;">{_get_type_badge(rd["resource_type"])}</td>
                 <td style="padding: 10px 12px; vertical-align: top;">
-                    <div style="font-weight: 500; color: #111827; word-break: break-word;">{rd["name"]}{builtin_badge}</div>
+                    <div style="font-weight: 500; color: #111827; word-break: break-word;">{rd["name"]}{builtin_badge}{duplicate_badge}</div>
                     <div style="font-size: 11px; color: #6b7280; margin-top: 2px;">{rd["filename"]}</div>
                     {source_url_html}
                     {error_html}
@@ -333,12 +456,14 @@ def format_resource_center_html(selected_filter: str = "all") -> str:
                     {_get_status_badge(rd["status"])}
                     {progress_html}
                 </td>
-                <td style="padding: 10px 12px; vertical-align: top; white-space: nowrap; color: #374151;">{rd["file_size_human"]}</td>
+                <td style="padding: 10px 12px; vertical-align: top; white-space: nowrap; color: #374151;">{primary.get("file_size_human", "0 B") if primary else "0 B"}</td>
                 <td style="padding: 10px 12px; vertical-align: top;">{hash_display}</td>
-                <td style="padding: 10px 12px; vertical-align: top;" title="{dir_full}">
-                    <span style="font-family: monospace; font-size: 11px; color: #4b5563; background: #f3f4f6; padding: 2px 6px; border-radius: 4px; word-break: break-all;">{dir_display}</span>
+                <td style="padding: 10px 12px; vertical-align: top;">
+                    <div style="max-height: 200px; overflow-y: auto;">
+                        {paths_html}
+                    </div>
                 </td>
-                <td style="padding: 10px 12px; vertical-align: top; white-space: nowrap;">
+                <td style="padding: 10px 12px; vertical-align: top; white-space: nowrap; min-width: 140px;">
                     {download_btn}
                     {rehash_btn}
                 </td>
@@ -1144,15 +1269,31 @@ with shared.gradio_root:
                 def _trigger_download(resource_key, filter_val):
                     if not resource_key:
                         return format_resource_center_html(filter_val), "❌ 无效的资源标识"
-                    ok = mrc.download_resource(resource_key, force=False)
-                    msg = "✅ 已开始下载" if ok else "⚠️ 无法启动下载（可能没有下载链接或已存在）"
+                    target_path = None
+                    if "|" in resource_key:
+                        parts = resource_key.split("|", 1)
+                        resource_key = parts[0]
+                        target_path = parts[1] if parts[1] else None
+                    ok = mrc.download_resource(resource_key, target_path=target_path, force=False)
+                    if target_path:
+                        msg = f"✅ 已开始下载到 {os.path.basename(target_path)}" if ok else "⚠️ 无法启动下载（可能没有下载链接或已存在）"
+                    else:
+                        msg = "✅ 已开始下载" if ok else "⚠️ 无法启动下载（可能没有下载链接或已存在）"
                     return format_resource_center_html(filter_val), msg
 
                 def _trigger_rehash(resource_key, filter_val):
                     if not resource_key:
                         return format_resource_center_html(filter_val), "❌ 无效的资源标识"
-                    ok = mrc.rehash_resource(resource_key)
-                    msg = "✅ 已开始重新校验 Hash" if ok else "⚠️ 无法启动校验（文件可能不存在）"
+                    target_path = None
+                    if "|" in resource_key:
+                        parts = resource_key.split("|", 1)
+                        resource_key = parts[0]
+                        target_path = parts[1] if parts[1] else None
+                    ok = mrc.rehash_resource(resource_key, target_path=target_path)
+                    if target_path:
+                        msg = f"✅ 已开始校验 {os.path.basename(target_path)} 的 Hash" if ok else "⚠️ 无法启动校验（文件可能不存在）"
+                    else:
+                        msg = "✅ 已开始重新校验 Hash" if ok else "⚠️ 无法启动校验（文件可能不存在）"
                     return format_resource_center_html(filter_val), msg
 
                 resource_center_download_input.change(
@@ -1193,16 +1334,30 @@ with shared.gradio_root:
                 function downloadResource(key) {
                     const el = document.getElementById('resource_center_download_input');
                     if (el) {
-                        el.querySelector('textarea') ? el.querySelector('textarea').value = key : null;
+                        const safeKey = key.replace(/:/g, '_');
+                        const targetSel = document.getElementById('dl_target_' + safeKey);
+                        let targetPath = '';
+                        if (targetSel) {
+                            targetPath = targetSel.value || '';
+                        }
+                        const payload = targetPath ? key + '|' + targetPath : key;
+                        el.querySelector('textarea') ? el.querySelector('textarea').value = payload : null;
                         const ev = new Event('input', { bubbles: true });
-                        (el.querySelector('textarea') || el.querySelector('input')).value = key;
+                        (el.querySelector('textarea') || el.querySelector('input')).value = payload;
                         (el.querySelector('textarea') || el.querySelector('input')).dispatchEvent(ev);
                     }
                 }
                 function rehashResource(key) {
                     const el = document.getElementById('resource_center_rehash_input');
                     if (el) {
-                        (el.querySelector('textarea') || el.querySelector('input')).value = key;
+                        const safeKey = key.replace(/:/g, '_');
+                        const targetSel = document.getElementById('rh_target_' + safeKey);
+                        let targetPath = '';
+                        if (targetSel) {
+                            targetPath = targetSel.value || '';
+                        }
+                        const payload = targetPath ? key + '|' + targetPath : key;
+                        (el.querySelector('textarea') || el.querySelector('input')).value = payload;
                         const ev = new Event('input', { bubbles: true });
                         (el.querySelector('textarea') || el.querySelector('input')).dispatchEvent(ev);
                     }

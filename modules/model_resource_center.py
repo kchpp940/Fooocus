@@ -8,7 +8,7 @@ from typing import Optional, Dict, List, Callable, Tuple
 from modules.model_resource_registry import (
     ResourceType, ResourceDef,
     get_registry, get_resource_def, get_resources_by_type, get_autodownload_list,
-    resolve_dir, resolve_all_dirs,
+    resolve_dir, resolve_all_dirs, resolve_all_dirs_for_def, resolve_all_possible_paths,
 )
 
 
@@ -37,16 +37,44 @@ class ResourceStatus(Enum):
 
 
 @dataclass
-class ResourceRuntime:
+class PathMatch:
     full_path: str = ""
+    directory: str = ""
+    dir_priority: int = 0
+    exists: bool = False
     file_size: int = 0
     current_hash: Optional[str] = None
     hash_status: HashStatus = HashStatus.NOT_COMPUTED
+    last_checked: float = 0.0
+    is_primary: bool = False
+
+
+@dataclass
+class ResourceRuntime:
+    all_matches: List[PathMatch] = field(default_factory=list)
+    primary_index: int = -1
     download_status: DownloadStatus = DownloadStatus.IDLE
     download_progress: float = 0.0
     download_speed: float = 0.0
     error_message: str = ""
-    last_checked: float = 0.0
+    download_target_path: str = ""
+
+    @property
+    def primary(self) -> Optional[PathMatch]:
+        if 0 <= self.primary_index < len(self.all_matches):
+            return self.all_matches[self.primary_index]
+        for m in self.all_matches:
+            if m.exists:
+                return m
+        return None
+
+    @property
+    def existing_matches(self) -> List[PathMatch]:
+        return [m for m in self.all_matches if m.exists]
+
+    @property
+    def has_duplicates(self) -> bool:
+        return len(self.existing_matches) > 1
 
 
 @dataclass
@@ -64,22 +92,42 @@ class ResourceInfo:
             return ResourceStatus.DOWNLOADING
         if self.rt.download_status == DownloadStatus.FAILED:
             return ResourceStatus.DOWNLOAD_FAILED
-        if not self.rt.full_path or not os.path.isfile(self.rt.full_path):
+        primary = self.rt.primary
+        if not primary or not primary.exists:
             return ResourceStatus.MISSING
-        if self.rt.hash_status == HashStatus.VERIFIED:
+        if primary.hash_status == HashStatus.VERIFIED:
             return ResourceStatus.HASH_VERIFIED
-        if self.rt.hash_status == HashStatus.MISMATCH:
+        if primary.hash_status == HashStatus.MISMATCH:
             return ResourceStatus.HASH_MISMATCH
         return ResourceStatus.EXISTS
 
     @property
-    def directory(self) -> str:
-        if self.rt.full_path:
-            return os.path.dirname(self.rt.full_path)
-        import modules.config as cfg
-        return resolve_dir(self.def_, cfg)
+    def primary_path(self) -> str:
+        p = self.rt.primary
+        return p.full_path if p else ""
+
+    @property
+    def primary_directory(self) -> str:
+        p = self.rt.primary
+        return p.directory if p else ""
+
+    @property
+    def primary_file_size(self) -> int:
+        p = self.rt.primary
+        return p.file_size if p else 0
+
+    @property
+    def primary_hash(self) -> Optional[str]:
+        p = self.rt.primary
+        return p.current_hash if p else None
+
+    @property
+    def primary_hash_status(self) -> HashStatus:
+        p = self.rt.primary
+        return p.hash_status if p else HashStatus.NOT_COMPUTED
 
     def to_dict(self) -> dict:
+        primary = self.rt.primary
         return {
             "key": self.key,
             "name": self.def_.name,
@@ -89,18 +137,41 @@ class ResourceInfo:
             "expected_hash": self.def_.expected_hash,
             "is_builtin": self.def_.is_builtin,
             "description": self.def_.description,
-            "directory": self.directory,
-            "full_path": self.rt.full_path,
             "status": self.status.value,
-            "file_size": self.rt.file_size,
-            "file_size_human": format_size(self.rt.file_size),
-            "current_hash": self.rt.current_hash,
-            "hash_status": self.rt.hash_status.value,
+            "has_duplicates": self.rt.has_duplicates,
+            "num_matches": len(self.rt.existing_matches),
+            "num_possible_paths": len(self.rt.all_matches),
+            "primary": {
+                "full_path": primary.full_path if primary else "",
+                "directory": primary.directory if primary else "",
+                "dir_priority": primary.dir_priority if primary else -1,
+                "file_size": primary.file_size if primary else 0,
+                "file_size_human": format_size(primary.file_size) if primary else "0 B",
+                "current_hash": primary.current_hash if primary else None,
+                "hash_status": primary.hash_status.value if primary else HashStatus.NOT_COMPUTED.value,
+                "last_checked": primary.last_checked if primary else 0,
+            },
+            "all_matches": [
+                {
+                    "full_path": m.full_path,
+                    "directory": m.directory,
+                    "dir_priority": m.dir_priority,
+                    "exists": m.exists,
+                    "is_primary": m.is_primary,
+                    "file_size": m.file_size,
+                    "file_size_human": format_size(m.file_size),
+                    "current_hash": m.current_hash,
+                    "hash_status": m.hash_status.value,
+                    "last_checked": m.last_checked,
+                }
+                for m in self.rt.all_matches
+            ],
+            "all_possible_dirs": [m.directory for m in self.rt.all_matches],
             "download_status": self.rt.download_status.value,
             "download_progress": self.rt.download_progress,
             "download_speed": self.rt.download_speed,
+            "download_target_path": self.rt.download_target_path,
             "error_message": self.rt.error_message,
-            "last_checked": self.rt.last_checked,
         }
 
 
@@ -134,7 +205,7 @@ class DownloadProgressTracker:
         self._lock = threading.Lock()
         self._listeners: List[Callable] = []
 
-    def start(self, key: str):
+    def start(self, key: str, target_path: str = ""):
         with self._lock:
             if key not in self._downloads:
                 self._downloads[key] = ResourceRuntime()
@@ -143,6 +214,7 @@ class DownloadProgressTracker:
             rt.download_progress = 0.0
             rt.download_speed = 0.0
             rt.error_message = ""
+            rt.download_target_path = target_path
         self._notify()
 
     def update(self, key: str, progress: float, speed: float = 0.0):
@@ -159,8 +231,6 @@ class DownloadProgressTracker:
                 rt.download_status = DownloadStatus.SUCCESS if success else DownloadStatus.FAILED
                 rt.error_message = error
                 rt.download_progress = 1.0 if success else rt.download_progress
-                if not success:
-                    rt.last_checked = time.time()
         self._notify()
 
     def get(self, key: str) -> Optional[ResourceRuntime]:
@@ -196,40 +266,60 @@ def _compute_hash_status(rdef: ResourceDef, current_hash: Optional[str]) -> Hash
     return HashStatus.COMPUTED_UNVERIFIED
 
 
+def _scan_path_match(rdef: ResourceDef, full_path: str, dir_priority: int, hash_cache_module) -> PathMatch:
+    match = PathMatch(
+        full_path=os.path.abspath(os.path.realpath(full_path)) if os.path.exists(full_path) else full_path,
+        directory=os.path.dirname(full_path),
+        dir_priority=dir_priority,
+    )
+
+    if os.path.isfile(full_path):
+        match.exists = True
+        try:
+            stat = os.stat(full_path)
+            match.file_size = stat.st_size
+            match.last_checked = stat.st_mtime
+        except Exception:
+            pass
+
+        if hash_cache_module:
+            try:
+                match.current_hash = hash_cache_module.get_cached_hash(match.full_path)
+            except Exception:
+                match.current_hash = None
+            match.hash_status = _compute_hash_status(rdef, match.current_hash)
+
+    return match
+
+
 def _update_runtime(info: ResourceInfo):
     rdef = info.def_
     rt = info.rt
 
     import modules.config as cfg
-    from modules.util import get_file_from_folder_list
+    from modules.hash_cache import get_cached_hash, load_cache_from_file
+    load_cache_from_file()
 
-    dirs = resolve_all_dirs(rdef.resource_type, cfg)
-    filepath = get_file_from_folder_list(rdef.filename, dirs)
+    possible_paths = resolve_all_possible_paths(rdef, cfg)
 
-    if not filepath and rdef.dir_key:
-        base_dir = resolve_dir(rdef, cfg)
-        candidate = os.path.join(base_dir, rdef.filename)
-        if os.path.isfile(candidate):
-            filepath = os.path.abspath(candidate)
+    rt.all_matches = []
+    rt.primary_index = -1
 
-    if filepath:
-        rt.full_path = filepath
-        try:
-            stat = os.stat(filepath)
-            rt.file_size = stat.st_size
-            rt.last_checked = stat.st_mtime
-        except Exception:
-            pass
+    for idx, path in enumerate(possible_paths):
+        match = _scan_path_match(rdef, path, idx, hash_cache_module=None)
+        if match.exists:
+            try:
+                match.current_hash = get_cached_hash(match.full_path)
+            except Exception:
+                match.current_hash = None
+            match.hash_status = _compute_hash_status(rdef, match.current_hash)
+        rt.all_matches.append(match)
 
-        from modules.hash_cache import get_cached_hash, load_cache_from_file
-        load_cache_from_file()
-        rt.current_hash = get_cached_hash(filepath)
-        rt.hash_status = _compute_hash_status(rdef, rt.current_hash)
-    else:
-        rt.full_path = ""
-        rt.file_size = 0
-        rt.current_hash = None
-        rt.hash_status = HashStatus.NOT_COMPUTED
+    for idx, match in enumerate(rt.all_matches):
+        if match.exists and rt.primary_index == -1:
+            rt.primary_index = idx
+            match.is_primary = True
+            break
 
     dl_rt = download_tracker.get(info.key)
     if dl_rt:
@@ -237,9 +327,14 @@ def _update_runtime(info: ResourceInfo):
             rt.download_status = DownloadStatus.DOWNLOADING
             rt.download_progress = dl_rt.download_progress
             rt.download_speed = dl_rt.download_speed
+            rt.download_target_path = dl_rt.download_target_path
         elif dl_rt.download_status == DownloadStatus.FAILED:
             rt.download_status = DownloadStatus.FAILED
             rt.error_message = dl_rt.error_message
+            rt.download_target_path = dl_rt.download_target_path
+        elif dl_rt.download_status == DownloadStatus.SUCCESS:
+            rt.download_status = DownloadStatus.IDLE
+            rt.download_target_path = ""
 
 
 def _scan_directory_extra(rtype: ResourceType) -> List[ResourceInfo]:
@@ -262,7 +357,9 @@ def _scan_directory_extra(rtype: ResourceType) -> List[ResourceInfo]:
     elif rtype == ResourceType.EMBEDDING:
         user_downloads_map = cfg.embeddings_downloads
 
-    for directory in dirs:
+    seen_files = set()
+
+    for dir_idx, directory in enumerate(dirs):
         if not directory or not os.path.exists(directory):
             continue
         try:
@@ -271,6 +368,11 @@ def _scan_directory_extra(rtype: ResourceType) -> List[ResourceInfo]:
                 base_fn = os.path.basename(fn)
                 if base_fn in builtin_filenames:
                     continue
+                abs_fn = os.path.abspath(os.path.realpath(fn))
+                if abs_fn in seen_files:
+                    continue
+                seen_files.add(abs_fn)
+
                 is_user_configured = base_fn in user_downloads_map
                 source_url = user_downloads_map.get(base_fn) if is_user_configured else None
 
@@ -323,18 +425,22 @@ def get_resources_summary() -> dict:
         "by_type": {},
         "by_status": {},
         "by_hash_status": {},
+        "with_duplicates": 0,
     }
     for r in all_res.values():
         t = r.def_.resource_type.value
         s = r.status.value
-        h = r.rt.hash_status.value
+        primary = r.rt.primary
+        h = primary.hash_status.value if primary else HashStatus.NOT_COMPUTED.value
         summary["by_type"][t] = summary["by_type"].get(t, 0) + 1
         summary["by_status"][s] = summary["by_status"].get(s, 0) + 1
         summary["by_hash_status"][h] = summary["by_hash_status"].get(h, 0) + 1
+        if r.rt.has_duplicates:
+            summary["with_duplicates"] += 1
     return summary
 
 
-def download_resource(resource_key: str, force: bool = False) -> bool:
+def download_resource(resource_key: str, target_path: Optional[str] = None, force: bool = False) -> bool:
     rdef = get_resource_def(resource_key)
     if not rdef:
         all_res = get_all_resources()
@@ -354,21 +460,35 @@ def download_resource(resource_key: str, force: bool = False) -> bool:
         info = ResourceInfo(def_=rdef, rt=rt)
         _update_runtime(info)
         if info.status in (ResourceStatus.EXISTS, ResourceStatus.HASH_VERIFIED):
-            return True
+            if not target_path or target_path == info.primary_path:
+                return True
 
-    key = resource_key
-    model_dir = resolve_dir(rdef, cfg)
-    if not model_dir:
-        dirs = resolve_all_dirs(rdef.resource_type, cfg)
-        model_dir = dirs[0] if dirs else ""
+    dirs = resolve_all_dirs_for_def(rdef, cfg)
+    if not dirs:
+        return False
+
+    model_dir = dirs[0]
+    if target_path:
+        abs_target = os.path.abspath(target_path)
+        if os.path.isdir(abs_target):
+            model_dir = abs_target
+        else:
+            model_dir = os.path.dirname(abs_target)
+    else:
+        for d in dirs:
+            if d and os.path.isdir(d):
+                model_dir = d
+                break
+
     if not model_dir:
         return False
 
-    download_tracker.start(key)
+    target_full_path = os.path.join(model_dir, rdef.filename)
+    download_tracker.start(resource_key, target_full_path)
 
     def progress_cb(downloaded: int, total: int, speed: float):
         progress = downloaded / total if total > 0 else 0
-        download_tracker.update(key, progress, speed)
+        download_tracker.update(resource_key, progress, speed)
 
     def run_download():
         from modules.model_loader import load_file_from_url
@@ -389,32 +509,51 @@ def download_resource(resource_key: str, force: bool = False) -> bool:
                     save_cache_to_file()
                 except Exception:
                     pass
-                download_tracker.finish(key, True)
+                download_tracker.finish(resource_key, True)
             else:
-                download_tracker.finish(key, False, "Download returned empty path")
+                download_tracker.finish(resource_key, False, "Download returned empty path")
         except Exception as e:
-            download_tracker.finish(key, False, str(e))
+            download_tracker.finish(resource_key, False, str(e))
 
     thread = threading.Thread(target=run_download, daemon=True)
     thread.start()
     return True
 
 
-def rehash_resource(resource_key: str) -> bool:
+def rehash_resource(resource_key: str, target_path: Optional[str] = None) -> bool:
     all_res = get_all_resources()
     if resource_key not in all_res:
         return False
 
     info = all_res[resource_key]
-    if not info.rt.full_path or not os.path.isfile(info.rt.full_path):
+
+    paths_to_rehash = []
+    if target_path:
+        abs_target = os.path.abspath(target_path)
+        for m in info.rt.all_matches:
+            if os.path.abspath(m.full_path) == abs_target and m.exists:
+                paths_to_rehash.append(m.full_path)
+                break
+        if not paths_to_rehash:
+            if os.path.isfile(abs_target):
+                paths_to_rehash.append(abs_target)
+    else:
+        for m in info.rt.existing_matches:
+            paths_to_rehash.append(m.full_path)
+
+    if not paths_to_rehash:
         return False
 
     def run_hash():
         from modules.hash_cache import invalidate_cache, sha256_from_cache, save_cache_to_file
+        for p in paths_to_rehash:
+            try:
+                abs_p = os.path.abspath(p)
+                invalidate_cache(abs_p)
+                sha256_from_cache(abs_p)
+            except Exception:
+                pass
         try:
-            abs_p = os.path.abspath(info.rt.full_path)
-            invalidate_cache(abs_p)
-            sha256_from_cache(abs_p)
             save_cache_to_file()
         except Exception:
             pass
@@ -435,8 +574,13 @@ def get_startup_download_list() -> List[Tuple[str, str, str]]:
 
     result = []
     for rdef in get_autodownload_list():
-        model_dir = resolve_dir(rdef, cfg)
-        if model_dir:
+        dirs = resolve_all_dirs_for_def(rdef, cfg)
+        if dirs:
+            model_dir = dirs[0]
+            for d in dirs:
+                if d and os.path.isdir(d):
+                    model_dir = d
+                    break
             result.append((rdef.filename, rdef.source_url, model_dir))
 
     return result

@@ -1,3 +1,4 @@
+import os
 from enum import Enum
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Tuple
@@ -380,3 +381,71 @@ def resolve_all_dirs(rtype: ResourceType, config_module) -> List[str]:
             else:
                 dirs.append(val)
     return dirs
+
+
+def resolve_all_dirs_for_def(rdef: ResourceDef, config_module) -> List[str]:
+    dirs = []
+    seen = set()
+
+    def add_dir(d):
+        if d and d not in seen:
+            dirs.append(d)
+            seen.add(d)
+
+    if rdef.dir_key:
+        val = getattr(config_module, rdef.dir_key, None)
+        if val:
+            if isinstance(val, list):
+                for d in val:
+                    add_dir(d)
+            else:
+                add_dir(val)
+
+    type_to_keys = {
+        ResourceType.CHECKPOINT: ["paths_checkpoints"],
+        ResourceType.LORA: ["paths_loras"],
+        ResourceType.VAE: ["path_vae"],
+        ResourceType.CONTROLNET: ["path_controlnet"],
+        ResourceType.INPAINT: ["path_inpaint"],
+        ResourceType.VAE_APPROX: ["path_vae_approx"],
+        ResourceType.CLIP_VISION: ["path_clip_vision"],
+        ResourceType.UPSCALE: ["path_upscale_models"],
+        ResourceType.SAFETY_CHECKER: ["path_safety_checker"],
+        ResourceType.SAM: ["path_sam"],
+        ResourceType.EXPANSION: ["path_fooocus_expansion"],
+        ResourceType.EMBEDDING: ["path_embeddings"],
+    }
+
+    for k in type_to_keys.get(rdef.resource_type, []):
+        val = getattr(config_module, k, None)
+        if val:
+            if isinstance(val, list):
+                for d in val:
+                    add_dir(d)
+            else:
+                add_dir(val)
+
+    return dirs
+
+
+def resolve_all_possible_paths(rdef: ResourceDef, config_module) -> List[str]:
+    dirs = resolve_all_dirs_for_def(rdef, config_module)
+    return [os.path.join(d, rdef.filename) for d in dirs if d]
+
+
+def get_type_keys(rtype: ResourceType) -> List[str]:
+    type_to_keys = {
+        ResourceType.CHECKPOINT: ["paths_checkpoints"],
+        ResourceType.LORA: ["paths_loras"],
+        ResourceType.VAE: ["path_vae"],
+        ResourceType.CONTROLNET: ["path_controlnet"],
+        ResourceType.INPAINT: ["path_inpaint"],
+        ResourceType.VAE_APPROX: ["path_vae_approx"],
+        ResourceType.CLIP_VISION: ["path_clip_vision"],
+        ResourceType.UPSCALE: ["path_upscale_models"],
+        ResourceType.SAFETY_CHECKER: ["path_safety_checker"],
+        ResourceType.SAM: ["path_sam"],
+        ResourceType.EXPANSION: ["path_fooocus_expansion"],
+        ResourceType.EMBEDDING: ["path_embeddings"],
+    }
+    return type_to_keys.get(rtype, [])
