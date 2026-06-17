@@ -3,10 +3,15 @@ from urllib.parse import urlparse
 from typing import Optional
 
 _download_callbacks = []
+_progress_callbacks = []
 
 
 def register_download_callback(callback):
     _download_callbacks.append(callback)
+
+
+def register_progress_callback(callback):
+    _progress_callbacks.append(callback)
 
 
 def load_file_from_url(
@@ -25,11 +30,21 @@ def load_file_from_url(
     cached_file = os.path.abspath(os.path.join(model_dir, file_name))
     if not os.path.exists(cached_file):
         print(f'Downloading: "{url}" to {cached_file}\n')
+        for cb in _progress_callbacks:
+            try:
+                cb(cached_file, 0.0)
+            except Exception:
+                pass
         from torch.hub import download_url_to_file
         download_url_to_file(url, cached_file, progress=progress)
         for cb in _download_callbacks:
             try:
                 cb(cached_file, url)
+            except Exception:
+                pass
+        for cb in _progress_callbacks:
+            try:
+                cb(cached_file, -1.0)
             except Exception:
                 pass
     return cached_file

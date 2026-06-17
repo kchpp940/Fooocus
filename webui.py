@@ -25,6 +25,134 @@ from modules.auth import auth_enabled, check_auth
 from modules.util import is_json
 
 
+def _format_file_size(size_bytes):
+    if size_bytes <= 0:
+        return ""
+    for unit in ["B", "KB", "MB", "GB"]:
+        if size_bytes < 1024:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.1f} TB"
+
+
+def _render_resource_status_html():
+    from modules import resource_service
+    from modules.resource_service import ResourceState
+    from modules.resource_registry import CATEGORY_LABELS, ResourceCategory
+
+    statuses = resource_service.get_builtin_statuses()
+    summary = resource_service.get_resource_status_summary()
+
+    state_icons = {
+        ResourceState.MISSING: "❌",
+        ResourceState.EXISTS: "✅",
+        ResourceState.DOWNLOADING: "⏳",
+        ResourceState.HASH_MISMATCH: "⚠️",
+        ResourceState.HASH_UNVERIFIED: "🔍",
+        ResourceState.HASH_VERIFIED: "🔒",
+    }
+
+    state_labels = {
+        ResourceState.MISSING: "Missing",
+        ResourceState.EXISTS: "Exists",
+        ResourceState.DOWNLOADING: "Downloading",
+        ResourceState.HASH_MISMATCH: "Hash Mismatch",
+        ResourceState.HASH_UNVERIFIED: "Hash Unverified",
+        ResourceState.HASH_VERIFIED: "Hash Verified",
+    }
+
+    cat_order = [
+        ResourceCategory.VAE_APPROX, ResourceCategory.FOOOCUS_EXPANSION,
+        ResourceCategory.INPAINT, ResourceCategory.CONTROLNET,
+        ResourceCategory.CLIP_VISION, ResourceCategory.UPSCALE_MODEL,
+        ResourceCategory.SAFETY_CHECKER, ResourceCategory.SAM,
+        ResourceCategory.LORA,
+    ]
+
+    html_parts = []
+    html_parts.append('<div style="font-family: system-ui, sans-serif;">')
+
+    req_missing = summary.get("required_missing", 0)
+    if req_missing > 0:
+        html_parts.append(
+            f'<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:12px;margin-bottom:16px;">'
+            f'⚠️ <b>{req_missing}</b> required resource(s) missing. Click "Download Missing Required" to fetch them.'
+            f'</div>'
+        )
+
+    html_parts.append(
+        f'<div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;">'
+        f'<span style="background:#e8f5e9;padding:4px 12px;border-radius:12px;">✅ {summary.get("exists", 0)} Available</span>'
+        f'<span style="background:#ffebee;padding:4px 12px;border-radius:12px;">❌ {summary.get("missing", 0)} Missing</span>'
+        f'<span style="background:#fff3e0;padding:4px 12px;border-radius:12px;">⏳ {summary.get("downloading", 0)} Downloading</span>'
+        f'<span style="background:#fce4ec;padding:4px 12px;border-radius:12px;">⚠️ {summary.get("hash_mismatch", 0)} Hash Mismatch</span>'
+        f'</div>'
+    )
+
+    grouped = {}
+    for s in statuses:
+        cat = s.category
+        if cat not in grouped:
+            grouped[cat] = []
+        grouped[cat].append(s)
+
+    for cat in cat_order:
+        if cat not in grouped:
+            continue
+        items = grouped[cat]
+        label = CATEGORY_LABELS.get(cat, cat.value)
+        html_parts.append(f'<div style="margin-bottom:16px;">')
+        html_parts.append(f'<h4 style="margin:0 0 8px 0;color:#333;">{label}</h4>')
+        html_parts.append(f'<table style="width:100%;border-collapse:collapse;font-size:13px;">')
+        html_parts.append(
+            '<tr style="background:#f5f5f5;text-align:left;">'
+            '<th style="padding:6px 8px;border-bottom:1px solid #ddd;">Status</th>'
+            '<th style="padding:6px 8px;border-bottom:1px solid #ddd;">Name</th>'
+            '<th style="padding:6px 8px;border-bottom:1px solid #ddd;">Size</th>'
+            '<th style="padding:6px 8px;border-bottom:1px solid #ddd;">Hash</th>'
+            '<th style="padding:6px 8px;border-bottom:1px solid #ddd;">Required</th>'
+            '</tr>'
+        )
+        for s in items:
+            icon = state_icons.get(s.state, "❓")
+            state_text = state_labels.get(s.state, str(s.state))
+            name = s.description or s.filename
+            size_str = _format_file_size(s.file_size)
+            hash_str = ""
+            if s.hash_cached:
+                hash_str = s.hash_cached[:12] + "..."
+            elif s.state == ResourceState.HASH_UNVERIFIED:
+                hash_str = '<span style="color:#ff9800;">pending</span>'
+            req_str = "✔" if s.required else ""
+            row_bg = ""
+            if s.state == ResourceState.MISSING:
+                row_bg = "background:#fff8f8;"
+            elif s.state == ResourceState.HASH_MISMATCH:
+                row_bg = "background:#fff0f0;"
+            html_parts.append(
+                f'<tr style="{row_bg}">'
+                f'<td style="padding:4px 8px;border-bottom:1px solid #eee;">{icon} {state_text}</td>'
+                f'<td style="padding:4px 8px;border-bottom:1px solid #eee;" title="{s.filename}">{name}</td>'
+                f'<td style="padding:4px 8px;border-bottom:1px solid #eee;">{size_str}</td>'
+                f'<td style="padding:4px 8px;border-bottom:1px solid #eee;font-family:monospace;font-size:11px;">{hash_str}</td>'
+                f'<td style="padding:4px 8px;border-bottom:1px solid #eee;text-align:center;">{req_str}</td>'
+                f'</tr>'
+            )
+            if s.duplicate_paths:
+                for dp in s.duplicate_paths:
+                    html_parts.append(
+                        f'<tr style="background:#fffff0;">'
+                        f'<td style="padding:2px 8px;border-bottom:1px solid #eee;"></td>'
+                        f'<td style="padding:2px 8px;border-bottom:1px solid #eee;color:#999;font-size:11px;" colspan="4">'
+                        f'↪ duplicate: {dp}</td>'
+                        f'</tr>'
+                    )
+        html_parts.append('</table></div>')
+
+    html_parts.append('</div>')
+    return "".join(html_parts)
+
+
 def build_preset_data_from_ui(*args):
     preset_data = {}
 
@@ -823,6 +951,32 @@ with shared.gradio_root:
 
                 with gr.Row():
                     refresh_files = gr.Button(label='Refresh', value='\U0001f504 Refresh All Files', variant='secondary', elem_classes='refresh_button')
+            with gr.Tab(label='Resources'):
+                resource_status_html = gr.HTML(value=_render_resource_status_html())
+                with gr.Row():
+                    refresh_resource_btn = gr.Button(value='\U0001f504 Refresh Status', variant='secondary')
+                    download_missing_btn = gr.Button(value='⬇️ Download Missing Required', variant='primary')
+
+                def _on_refresh_resources():
+                    from modules import resource_service
+                    resource_service.refresh_all_files()
+                    resource_service._refresh_status_registry()
+                    return gr.update(value=_render_resource_status_html())
+
+                def _on_download_missing():
+                    from modules import resource_service
+                    missing = resource_service.get_missing_required()
+                    for s in missing:
+                        try:
+                            resource_service.download_resource_by_id(s.resource_id)
+                        except Exception as e:
+                            print(f"Failed to download {s.resource_id}: {e}")
+                    resource_service.refresh_all_files()
+                    resource_service._refresh_status_registry()
+                    return gr.update(value=_render_resource_status_html())
+
+                refresh_resource_btn.click(_on_refresh_resources, [], [resource_status_html], queue=False, show_progress=False)
+                download_missing_btn.click(_on_download_missing, [], [resource_status_html], queue=True, show_progress=True)
             with gr.Tab(label='Advanced'):
                 guidance_scale = gr.Slider(label='Guidance Scale', minimum=1.0, maximum=30.0, step=0.01,
                                            value=modules.config.default_cfg_scale,

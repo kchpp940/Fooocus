@@ -1064,6 +1064,7 @@ def update_files():
     from modules import resource_service
     from modules.resource_registry import ResourceCategory
     resource_service.refresh_all_files()
+    resource_service._refresh_status_registry()
     model_filenames = resource_service.get_filenames(ResourceCategory.CHECKPOINT)
     lora_filenames = resource_service.get_filenames(ResourceCategory.LORA)
     vae_filenames = resource_service.get_filenames(ResourceCategory.VAE)
