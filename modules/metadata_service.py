@@ -85,6 +85,23 @@ class MetadataResult:
     def to_simple_dict(self) -> dict:
         return {k: v.value for k, v in self.fields.items() if v.valid}
 
+    def merge(self, other: 'MetadataResult', only_missing: bool = True) -> 'MetadataResult':
+        for key, field in other.fields.items():
+            if only_missing:
+                if key not in self.fields or not self.fields[key].valid:
+                    self.fields[key] = field
+            else:
+                self.fields[key] = field
+        return self
+
+    def to_labeled_list(self) -> list:
+        labeled = []
+        for key, field in self.fields.items():
+            if field.valid:
+                label = key.replace('_', ' ').title()
+                labeled.append((label, key, field.value))
+        return labeled
+
 
 @dataclass
 class MetadataDiff:
@@ -588,6 +605,106 @@ class MetadataService:
                     diff.unchanged[key] = a_field
 
         return diff
+
+    def parse_private_log_file(self, log_html_path: str) -> dict:
+        import urllib.parse
+        import os
+
+        result = {}
+        if not log_html_path or not os.path.exists(log_html_path):
+            return result
+
+        try:
+            with open(log_html_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            pattern = r'<div id="([^"]+)" class="image-container">.*?onclick="to_clipboard\(\'([^\']*)\'"'
+            matches = re.findall(pattern, content, re.DOTALL)
+
+            for div_id, js_txt in matches:
+                try:
+                    json_str = urllib.parse.unquote(js_txt)
+                    metadata_dict = json.loads(json_str)
+                    image_filename = div_id.replace('_', '.')
+                    result[image_filename] = metadata_dict
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        return result
+
+    def find_private_log_for_image(self, image_path: str) -> Optional[str]:
+        import os
+
+        if not image_path:
+            return None
+
+        image_dir = os.path.dirname(image_path)
+        log_path = os.path.join(image_dir, 'log.html')
+
+        if os.path.exists(log_path):
+            return log_path
+
+        return None
+
+    def parse_from_private_log(self, image_path: str, log_html_path: str = None) -> MetadataResult:
+        import os
+
+        result = MetadataResult(source=MetadataSource.PRIVATE_LOG)
+
+        if log_html_path is None:
+            log_html_path = self.find_private_log_for_image(image_path)
+
+        if not log_html_path:
+            return result
+
+        image_filename = os.path.basename(image_path)
+        log_data = self.parse_private_log_file(log_html_path)
+
+        if image_filename in log_data:
+            metadata_dict = log_data[image_filename]
+            result.raw_metadata = metadata_dict
+
+            if 'metadata_scheme' in metadata_dict:
+                try:
+                    scheme = MetadataScheme(metadata_dict['metadata_scheme'])
+                    result.scheme = scheme
+                except (ValueError, TypeError):
+                    result.scheme = MetadataScheme.FOOOCUS
+            else:
+                result.scheme = MetadataScheme.FOOOCUS
+
+            parser = self.get_parser(result.scheme)
+            parsed = parser.parse(metadata_dict)
+            result.fields = parsed.fields
+            for field in result.fields.values():
+                if field.source == MetadataSource.UNKNOWN:
+                    field.source = MetadataSource.PRIVATE_LOG
+
+        return result
+
+    def parse_from_image_with_private_log(self, image_path: str, image_obj: Image.Image = None, log_html_path: str = None) -> MetadataResult:
+        import os
+
+        if image_obj is None:
+            if not os.path.exists(image_path):
+                return MetadataResult()
+            image_obj = Image.open(image_path)
+
+        embedded = self.parse_from_image(image_obj)
+        private_log = self.parse_from_private_log(image_path, log_html_path)
+
+        result = MetadataResult(
+            scheme=embedded.scheme or private_log.scheme,
+            source=MetadataSource.EMBEDDED if embedded.fields else MetadataSource.PRIVATE_LOG,
+            raw_metadata=embedded.raw_metadata or private_log.raw_metadata
+        )
+
+        result.merge(embedded, only_missing=False)
+        result.merge(private_log, only_missing=True)
+
+        return result
 
     def serialize_metadata(self, metadata: MetadataResult, scheme: MetadataScheme = None, extra_data: dict = None) -> str:
         if scheme is None:

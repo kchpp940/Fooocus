@@ -460,16 +460,30 @@ with shared.gradio_root:
                     with gr.Tab(label='Metadata', id='metadata_tab') as metadata_tab:
                         with gr.Column():
                             metadata_input_image = grh.Image(label='For images created by Fooocus', source='upload', type='pil')
+                            metadata_image_path = gr.Textbox(label='Image Path (for private log lookup)', value='', placeholder='Optional: path to the image file for private log fallback')
                             metadata_json = gr.JSON(label='Metadata')
                             metadata_import_button = gr.Button(value='Apply Metadata')
+                            state_metadata_result = gr.State(value=None)
 
-                        def trigger_metadata_preview(file):
+                        def parse_metadata(file, image_path):
                             service = get_metadata_service()
-                            metadata = service.parse_from_image(file)
-                            return metadata.to_dict()
+                            if file is not None:
+                                if image_path and image_path.strip():
+                                    metadata = service.parse_from_image_with_private_log(
+                                        image_path.strip(), image_obj=file
+                                    )
+                                else:
+                                    metadata = service.parse_from_image(file)
+                            else:
+                                metadata = modules.metadata_service.MetadataResult()
+                            return metadata.to_dict(), metadata.to_simple_dict()
 
-                        metadata_input_image.upload(trigger_metadata_preview, inputs=metadata_input_image,
-                                                    outputs=metadata_json, queue=False, show_progress=True)
+                        metadata_input_image.upload(parse_metadata, inputs=[metadata_input_image, metadata_image_path],
+                                                    outputs=[metadata_json, state_metadata_result],
+                                                    queue=False, show_progress=True)
+                        metadata_image_path.change(parse_metadata, inputs=[metadata_input_image, metadata_image_path],
+                                                   outputs=[metadata_json, state_metadata_result],
+                                                   queue=False, show_progress=True)
 
             with gr.Row(visible=modules.config.default_enhance_checkbox) as enhance_input_panel:
                 with gr.Tabs():
@@ -1172,15 +1186,17 @@ with shared.gradio_root:
 
         load_parameter_button.click(modules.meta_parser.load_parameter_button_click, inputs=[prompt, state_is_generating, inpaint_mode], outputs=load_data_outputs, queue=False, show_progress=False)
 
-        def trigger_metadata_import(file, state_is_generating):
+        def trigger_metadata_import(metadata_dict, state_is_generating):
             service = get_metadata_service()
-            metadata = service.parse_from_image(file)
-            if not metadata.fields:
+            if metadata_dict and isinstance(metadata_dict, dict):
+                metadata = service.parse(metadata_dict, MetadataScheme.FOOOCUS)
+            else:
+                metadata = modules.metadata_service.MetadataResult()
                 print('Could not find metadata in the image!')
 
             return service.build_load_parameters(metadata, state_is_generating, inpaint_mode)
 
-        metadata_import_button.click(trigger_metadata_import, inputs=[metadata_input_image, state_is_generating], outputs=load_data_outputs, queue=False, show_progress=True) \
+        metadata_import_button.click(trigger_metadata_import, inputs=[state_metadata_result, state_is_generating], outputs=load_data_outputs, queue=False, show_progress=True) \
             .then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)
 
         generate_button.click(lambda: (gr.update(visible=True, interactive=True), gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=False), [], True),
