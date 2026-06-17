@@ -20,76 +20,52 @@ class ResourceType(Enum):
 
 RESOURCE_TYPE_CONFIG: Dict[ResourceType, Dict] = {
     ResourceType.CHECKPOINT: {
-        "path_config_key": "path_checkpoints",
-        "default_path": "../models/checkpoints/",
+        "path_config_key": "paths_checkpoints",
         "extensions": ['.pth', '.ckpt', '.bin', '.safetensors', '.fooocus.patch'],
-        "is_multi_dir": True,
     },
     ResourceType.LORA: {
-        "path_config_key": "path_loras",
-        "default_path": "../models/loras/",
+        "path_config_key": "paths_loras",
         "extensions": ['.pth', '.ckpt', '.bin', '.safetensors', '.fooocus.patch'],
-        "is_multi_dir": True,
     },
     ResourceType.VAE: {
         "path_config_key": "path_vae",
-        "default_path": "../models/vae/",
         "extensions": ['.pth', '.ckpt', '.bin', '.safetensors', '.fooocus.patch'],
-        "is_multi_dir": False,
     },
     ResourceType.VAE_APPROX: {
         "path_config_key": "path_vae_approx",
-        "default_path": "../models/vae_approx/",
         "extensions": ['.pth', '.ckpt', '.bin', '.safetensors'],
-        "is_multi_dir": False,
     },
     ResourceType.INPAINT: {
         "path_config_key": "path_inpaint",
-        "default_path": "../models/inpaint/",
         "extensions": ['.pth', '.ckpt', '.bin', '.safetensors', '.fooocus.patch'],
-        "is_multi_dir": False,
     },
     ResourceType.CONTROLNET: {
         "path_config_key": "path_controlnet",
-        "default_path": "../models/controlnet/",
         "extensions": ['.pth', '.ckpt', '.bin', '.safetensors', '.fooocus.patch'],
-        "is_multi_dir": False,
     },
     ResourceType.CLIP_VISION: {
         "path_config_key": "path_clip_vision",
-        "default_path": "../models/clip_vision/",
         "extensions": ['.pth', '.ckpt', '.bin', '.safetensors'],
-        "is_multi_dir": False,
     },
     ResourceType.UPSCALE: {
         "path_config_key": "path_upscale_models",
-        "default_path": "../models/upscale_models/",
         "extensions": ['.pth', '.ckpt', '.bin', '.safetensors'],
-        "is_multi_dir": False,
     },
     ResourceType.EMBEDDING: {
         "path_config_key": "path_embeddings",
-        "default_path": "../models/embeddings/",
         "extensions": ['.pth', '.ckpt', '.bin', '.safetensors'],
-        "is_multi_dir": False,
     },
     ResourceType.SAFETY_CHECKER: {
         "path_config_key": "path_safety_checker",
-        "default_path": "../models/safety_checker/",
         "extensions": ['.pth', '.ckpt', '.bin'],
-        "is_multi_dir": False,
     },
     ResourceType.SAM: {
         "path_config_key": "path_sam",
-        "default_path": "../models/sam/",
         "extensions": ['.pth', '.ckpt', '.bin'],
-        "is_multi_dir": False,
     },
     ResourceType.FOOOCUS_EXPANSION: {
         "path_config_key": "path_fooocus_expansion",
-        "default_path": "../models/prompt_expansion/fooocus_expansion",
         "extensions": ['.pth', '.ckpt', '.bin'],
-        "is_multi_dir": False,
     },
 }
 
@@ -192,20 +168,20 @@ PERFORMANCE_LORA_RESOURCES: List[ResourceDefinition] = [
         resource_type=ResourceType.LORA,
         name="sdxl_lcm_lora.safetensors",
         urls=["https://huggingface.co/lllyasviel/misc/resolve/main/sdxl_lcm_lora.safetensors"],
-        description="SDXL LCM LoRA for Extreme Speed",
+        description="SDXL LCM LoRA for extreme speed",
     ),
     ResourceDefinition(
         resource_id="lora_lightning",
         resource_type=ResourceType.LORA,
         name="sdxl_lightning_4step_lora.safetensors",
-        urls=["https://huggingface.co/mashb1t/misc/resolve/main/sdxl_lightning_4step_lora.safetensors"],
+        urls=["https://huggingface.co/ByteDance/Hyper-SD/resolve/main/sdxl_lightning_4step_lora.safetensors"],
         description="SDXL Lightning 4-step LoRA",
     ),
     ResourceDefinition(
         resource_id="lora_hyper_sd",
         resource_type=ResourceType.LORA,
         name="sdxl_hyper_sd_4step_lora.safetensors",
-        urls=["https://huggingface.co/mashb1t/misc/resolve/main/sdxl_hyper_sd_4step_lora.safetensors"],
+        urls=["https://huggingface.co/ByteDance/Hyper-SD/resolve/main/HyperSDXL-LoRA-slider.safetensors"],
         description="SDXL Hyper-SD 4-step LoRA",
     ),
 ]
@@ -230,35 +206,12 @@ CONTROLNET_RESOURCES: List[ResourceDefinition] = [
 
 
 IP_ADAPTER_RESOURCES: Dict[str, List[ResourceDefinition]] = {
-    "ip": [
-        ResourceDefinition(
-            resource_id="clip_vision_vit_h",
-            resource_type=ResourceType.CLIP_VISION,
-            name="clip_vision_vit_h.safetensors",
-            urls=["https://huggingface.co/lllyasviel/misc/resolve/main/clip_vision_vit_h.safetensors"],
-            description="CLIP Vision ViT-H Model",
-        ),
-        ResourceDefinition(
-            resource_id="ip_negative",
-            resource_type=ResourceType.CONTROLNET,
-            name="fooocus_ip_negative.safetensors",
-            urls=["https://huggingface.co/lllyasviel/misc/resolve/main/fooocus_ip_negative.safetensors"],
-            description="Fooocus IP Negative Embedding",
-        ),
-        ResourceDefinition(
-            resource_id="ip_adapter_plus",
-            resource_type=ResourceType.CONTROLNET,
-            name="ip-adapter-plus_sdxl_vit-h.bin",
-            urls=["https://huggingface.co/lllyasviel/misc/resolve/main/ip-adapter-plus_sdxl_vit-h.bin"],
-            description="IP-Adapter Plus SDXL",
-        ),
-    ],
     "face": [
         ResourceDefinition(
             resource_id="clip_vision_vit_h",
             resource_type=ResourceType.CLIP_VISION,
             name="clip_vision_vit_h.safetensors",
-            urls=["https://huggingface.co/lllyasviel/misc/resolve/main/clip_vision_vit_h.safetensors"],
+            urls=["https://huggingface.co/lllyasviel/misc/resolve/main/cloth.safetensors"],
             description="CLIP Vision ViT-H Model",
         ),
         ResourceDefinition(
@@ -266,14 +219,37 @@ IP_ADAPTER_RESOURCES: Dict[str, List[ResourceDefinition]] = {
             resource_type=ResourceType.CONTROLNET,
             name="fooocus_ip_negative.safetensors",
             urls=["https://huggingface.co/lllyasviel/misc/resolve/main/fooocus_ip_negative.safetensors"],
-            description="Fooocus IP Negative Embedding",
+            description="Fooocus IP Negative Model",
         ),
         ResourceDefinition(
             resource_id="ip_adapter_face",
             resource_type=ResourceType.CONTROLNET,
             name="ip-adapter-plus-face_sdxl_vit-h.bin",
             urls=["https://huggingface.co/lllyasviel/misc/resolve/main/ip-adapter-plus-face_sdxl_vit-h.bin"],
-            description="IP-Adapter Plus Face SDXL",
+            description="IP-Adapter Plus Face for SDXL",
+        ),
+    ],
+    "ip": [
+        ResourceDefinition(
+            resource_id="clip_vision_vit_h",
+            resource_type=ResourceType.CLIP_VISION,
+            name="clip_vision_vit_h.safetensors",
+            urls=["https://huggingface.co/lllyasviel/misc/resolve/main/cloth.safetensors"],
+            description="CLIP Vision ViT-H Model",
+        ),
+        ResourceDefinition(
+            resource_id="ip_negative",
+            resource_type=ResourceType.CONTROLNET,
+            name="fooocus_ip_negative.safetensors",
+            urls=["https://huggingface.co/lllyasviel/misc/resolve/main/fooocus_ip_negative.safetensors"],
+            description="Fooocus IP Negative Model",
+        ),
+        ResourceDefinition(
+            resource_id="ip_adapter_plus",
+            resource_type=ResourceType.CONTROLNET,
+            name="ip-adapter-plus_sdxl_vit-h.bin",
+            urls=["https://huggingface.co/lllyasviel/misc/resolve/main/ip-adapter-plus_sdxl_vit-h.bin"],
+            description="IP-Adapter Plus for SDXL",
         ),
     ],
 }
@@ -285,7 +261,7 @@ UPSCALE_RESOURCES: List[ResourceDefinition] = [
         resource_type=ResourceType.UPSCALE,
         name="fooocus_upscaler_s409985e5.bin",
         urls=["https://huggingface.co/lllyasviel/misc/resolve/main/fooocus_upscaler_s409985e5.bin"],
-        description="Fooocus Upscaler Model",
+        description="Fooocus 4x Upscaler",
     ),
 ]
 
@@ -295,7 +271,7 @@ SAFETY_CHECKER_RESOURCES: List[ResourceDefinition] = [
         resource_id="safety_checker_stable_diffusion",
         resource_type=ResourceType.SAFETY_CHECKER,
         name="stable-diffusion-safety-checker.bin",
-        urls=["https://huggingface.co/mashb1t/misc/resolve/main/stable-diffusion-safety-checker.bin"],
+        urls=["https://huggingface.co/lllyasviel/misc/resolve/main/stable-diffusion-safety-checker.bin"],
         description="Stable Diffusion Safety Checker",
     ),
 ]
@@ -306,21 +282,21 @@ SAM_RESOURCES: Dict[str, ResourceDefinition] = {
         resource_id="sam_vit_b",
         resource_type=ResourceType.SAM,
         name="sam_vit_b_01ec64.pth",
-        urls=["https://huggingface.co/mashb1t/misc/resolve/main/sam_vit_b_01ec64.pth"],
+        urls=["https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"],
         description="SAM ViT-B Model",
     ),
     "vit_l": ResourceDefinition(
         resource_id="sam_vit_l",
         resource_type=ResourceType.SAM,
         name="sam_vit_l_0b3195.pth",
-        urls=["https://huggingface.co/mashb1t/misc/resolve/main/sam_vit_l_0b3195.pth"],
+        urls=["https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth"],
         description="SAM ViT-L Model",
     ),
     "vit_h": ResourceDefinition(
         resource_id="sam_vit_h",
         resource_type=ResourceType.SAM,
         name="sam_vit_h_4b8939.pth",
-        urls=["https://huggingface.co/mashb1t/misc/resolve/main/sam_vit_h_4b8939.pth"],
+        urls=["https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"],
         description="SAM ViT-H Model",
     ),
 }
@@ -337,39 +313,42 @@ FOOOCUS_EXPANSION_RESOURCES: List[ResourceDefinition] = [
 ]
 
 
-RESOURCE_INDEX: Dict[str, ResourceDefinition] = {}
+_ALL_RESOURCE_LISTS: List[List[ResourceDefinition]] = [
+    VAE_APPROX_RESOURCES,
+    PERFORMANCE_LORA_RESOURCES,
+    CONTROLNET_RESOURCES,
+    UPSCALE_RESOURCES,
+    SAFETY_CHECKER_RESOURCES,
+    FOOOCUS_EXPANSION_RESOURCES,
+]
+
+for _version_resources in INPAINT_RESOURCES.values():
+    _ALL_RESOURCE_LISTS.append(_version_resources)
+for _variant_resources in IP_ADAPTER_RESOURCES.values():
+    _ALL_RESOURCE_LISTS.append(_variant_resources)
+_ALL_RESOURCE_LISTS.append(list(SAM_RESOURCES.values()))
 
 
-def _build_index():
-    all_resources = []
-    all_resources.extend(VAE_APPROX_RESOURCES)
-    all_resources.extend(PERFORMANCE_LORA_RESOURCES)
-    all_resources.extend(CONTROLNET_RESOURCES)
-    all_resources.extend(UPSCALE_RESOURCES)
-    all_resources.extend(SAFETY_CHECKER_RESOURCES)
-    all_resources.extend(FOOOCUS_EXPANSION_RESOURCES)
-    all_resources.extend(SAM_RESOURCES.values())
-    
-    for version_resources in INPAINT_RESOURCES.values():
-        all_resources.extend(version_resources)
-    for type_resources in IP_ADAPTER_RESOURCES.values():
-        all_resources.extend(type_resources)
-    
-    for resource in all_resources:
-        if resource.resource_id not in RESOURCE_INDEX:
-            RESOURCE_INDEX[resource.resource_id] = resource
+_RESOURCE_DEFINITION_INDEX: Dict[str, ResourceDefinition] = {}
+_RESOURCE_TYPE_INDEX: Dict[ResourceType, List[ResourceDefinition]] = {}
 
-
-_build_index()
+for _resource_list in _ALL_RESOURCE_LISTS:
+    for _resource in _resource_list:
+        if _resource.resource_id not in _RESOURCE_DEFINITION_INDEX:
+            _RESOURCE_DEFINITION_INDEX[_resource.resource_id] = _resource
+        if _resource.resource_type not in _RESOURCE_TYPE_INDEX:
+            _RESOURCE_TYPE_INDEX[_resource.resource_type] = []
+        if _resource not in _RESOURCE_TYPE_INDEX[_resource.resource_type]:
+            _RESOURCE_TYPE_INDEX[_resource.resource_type].append(_resource)
 
 
 def get_resource_definition(resource_id: str) -> Optional[ResourceDefinition]:
-    return RESOURCE_INDEX.get(resource_id)
+    return _RESOURCE_DEFINITION_INDEX.get(resource_id)
 
 
 def get_resources_by_type(resource_type: ResourceType) -> List[ResourceDefinition]:
-    return [r for r in RESOURCE_INDEX.values() if r.resource_type == resource_type]
+    return list(_RESOURCE_TYPE_INDEX.get(resource_type, []))
 
 
 def get_resource_type_config(resource_type: ResourceType) -> Dict:
-    return RESOURCE_TYPE_CONFIG.get(resource_type, {})
+    return dict(RESOURCE_TYPE_CONFIG.get(resource_type, {}))

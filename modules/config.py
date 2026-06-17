@@ -434,6 +434,16 @@ resource_service = get_resource_service()
 resource_service.set_config_provider(__import__(__name__))
 
 
+def _sync_globals_from_resource_service() -> None:
+    global model_filenames, lora_filenames, vae_filenames
+    model_filenames = resource_service.get_filenames_by_type(ResourceType.CHECKPOINT)
+    lora_filenames = resource_service.get_filenames_by_type(ResourceType.LORA)
+    vae_filenames = resource_service.get_filenames_by_type(ResourceType.VAE)
+
+
+resource_service.add_observer(_sync_globals_from_resource_service)
+
+
 def get_config_item_or_set_default(key, default_value, validator, disable_empty_as_none=False, expected_type=None):
     global config_dict, visited_keys
 
@@ -1041,11 +1051,9 @@ def get_model_filenames(folder_paths, extensions=None, name_filter=None):
 
 
 def update_files():
-    global model_filenames, lora_filenames, vae_filenames, wildcard_filenames, available_presets
+    global wildcard_filenames, available_presets
     resource_service.scan_all(force=True)
-    model_filenames = resource_service.get_filenames_by_type(ResourceType.CHECKPOINT)
-    lora_filenames = resource_service.get_filenames_by_type(ResourceType.LORA)
-    vae_filenames = resource_service.get_filenames_by_type(ResourceType.VAE)
+    _sync_globals_from_resource_service()
     wildcard_filenames = get_files_from_folder(path_wildcards, ['.txt'])
     available_presets = get_presets()
     return

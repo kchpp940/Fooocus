@@ -24,11 +24,24 @@ DownloadStatus = Literal["idle", "downloading", "completed", "failed"]
 
 
 @dataclass
-class ResourceInstance:
+class DirectoryMatch:
     name: str
     path: str
-    directory_priority: int
+    directory_index: int
+    directory_path: str
+    size: Optional[int] = None
+    last_modified: Optional[float] = None
+
+
+@dataclass
+class ResourceInstance:
+    name: str
     resource_type: ResourceType
+    path: str
+    directory_index: int
+    directory_path: str
+    is_primary: bool
+    all_matches: List[DirectoryMatch]
     hash: Optional[str] = None
     hash_verified: bool = False
     size: Optional[int] = None
@@ -84,7 +97,6 @@ class ResourceService:
         self._hash_cache: Dict[str, HashCacheEntry] = {}
         self._download_states: Dict[str, DownloadState] = {}
 
-        self._custom_directories: Dict[ResourceType, List[Tuple[str, int]]] = {}
         self._hash_cache_filename = "hash_cache.txt"
 
         self._observers: List[Callable[[], None]] = []
@@ -106,57 +118,38 @@ class ResourceService:
             except Exception as e:
                 print(f"[ResourceService] Observer notification failed: {e}")
 
-    def _get_directories_for_type(self, resource_type: ResourceType) -> List[Tuple[str, int]]:
+    def _get_directories_for_type(self, resource_type: ResourceType) -> List[str]:
         type_config = RESOURCE_TYPE_CONFIG.get(resource_type, {})
         path_config_key = type_config.get("path_config_key")
-        is_multi_dir = type_config.get("is_multi_dir", False)
+        if not path_config_key or self._config_provider is None:
+            return []
 
-        directories: List[Tuple[str, int]] = []
+        raw_value = getattr(self._config_provider, path_config_key, None)
+        if raw_value is None:
+            return []
 
-        custom_directories = self._custom_directories.get(resource_type, [])
-        for path, priority in custom_directories:
-            if os.path.isdir(path):
-                directories.append((os.path.abspath(path), priority))
+        directories: List[str] = []
+        if isinstance(raw_value, list):
+            for path in raw_value:
+                abs_path = os.path.abspath(path)
+                if abs_path not in directories:
+                    directories.append(abs_path)
+        elif isinstance(raw_value, str):
+            abs_path = os.path.abspath(raw_value)
+            directories.append(abs_path)
 
-        if self._config_provider is not None and path_config_key:
-            config_value = getattr(self._config_provider, path_config_key, None)
-            if config_value is not None:
-                if is_multi_dir and isinstance(config_value, list):
-                    for idx, path in enumerate(config_value):
-                        if os.path.isdir(path):
-                            directories.append((os.path.abspath(path), 100 + idx))
-                elif isinstance(config_value, str) and os.path.isdir(config_value):
-                    directories.append((os.path.abspath(config_value), 100))
-
-        default_path = type_config.get("default_path")
-        if default_path:
-            modules_dir = os.path.dirname(os.path.abspath(__file__))
-            abs_default_path = os.path.abspath(os.path.join(modules_dir, default_path))
-            if os.path.isdir(abs_default_path):
-                directories.append((abs_default_path, 0))
-
-        docker_paths = self._get_docker_volume_paths(resource_type)
-        for idx, path in enumerate(docker_paths):
-            if os.path.isdir(path):
-                directories.append((os.path.abspath(path), 200 + idx))
-
-        directories.sort(key=lambda x: x[1], reverse=True)
         return directories
 
-    def _get_docker_volume_paths(self, resource_type: ResourceType) -> List[str]:
-        paths = []
-        env_key = f"DOCKER_{resource_type.name.upper()}_PATH"
-        env_value = os.getenv(env_key)
-        if env_value:
-            for path in env_value.split(":"):
-                if path.strip():
-                    paths.append(path.strip())
-        return paths
+    def get_directories_for_type(self, resource_type: ResourceType) -> List[str]:
+        return self._get_directories_for_type(resource_type)
 
-    def add_custom_directory(self, resource_type: ResourceType, path: str, priority: int = 0) -> None:
-        if resource_type not in self._custom_directories:
-            self._custom_directories[resource_type] = []
-        self._custom_directories[resource_type].append((path, priority))
+    def _get_target_download_directory(self, resource_type: ResourceType) -> Optional[str]:
+        directories = self._get_directories_for_type(resource_type)
+        if not directories:
+            return None
+        target_dir = directories[0]
+        os.makedirs(target_dir, exist_ok=True)
+        return target_dir
 
     def scan_all(self, force: bool = False) -> None:
         with self._scan_lock:
@@ -177,10 +170,11 @@ class ResourceService:
         extensions = type_config.get("extensions", [])
         directories = self._get_directories_for_type(resource_type)
 
-        instances: List[ResourceInstance] = []
-        seen_names: Dict[str, ResourceInstance] = {}
+        matches_by_name: Dict[str, List[DirectoryMatch]] = {}
 
-        for directory, priority in directories:
+        for dir_index, directory in enumerate(directories):
+            if not os.path.isdir(directory):
+                continue
             try:
                 files = get_files_from_folder(directory, extensions)
                 for filename in files:
@@ -188,41 +182,49 @@ class ResourceService:
                     if not os.path.isfile(full_path):
                         continue
 
-                    if filename in seen_names:
-                        existing = seen_names[filename]
-                        if priority > existing.directory_priority:
-                            try:
-                                stat = os.stat(full_path)
-                                new_instance = ResourceInstance(
-                                    name=filename,
-                                    path=full_path,
-                                    directory_priority=priority,
-                                    resource_type=resource_type,
-                                    size=stat.st_size,
-                                    last_modified=stat.st_mtime,
-                                )
-                                seen_names[filename] = new_instance
-                            except OSError:
-                                pass
-                    else:
-                        try:
-                            stat = os.stat(full_path)
-                            new_instance = ResourceInstance(
-                                name=filename,
-                                path=full_path,
-                                directory_priority=priority,
-                                resource_type=resource_type,
-                                size=stat.st_size,
-                                last_modified=stat.st_mtime,
-                            )
-                            seen_names[filename] = new_instance
-                        except OSError:
-                            pass
+                    try:
+                        stat = os.stat(full_path)
+                        match = DirectoryMatch(
+                            name=filename,
+                            path=full_path,
+                            directory_index=dir_index,
+                            directory_path=directory,
+                            size=stat.st_size,
+                            last_modified=stat.st_mtime,
+                        )
+                    except OSError:
+                        match = DirectoryMatch(
+                            name=filename,
+                            path=full_path,
+                            directory_index=dir_index,
+                            directory_path=directory,
+                        )
+
+                    if filename not in matches_by_name:
+                        matches_by_name[filename] = []
+                    matches_by_name[filename].append(match)
 
             except Exception as e:
                 print(f"[ResourceService] Scan error for {resource_type.value} in {directory}: {e}")
 
-        instances = list(seen_names.values())
+        instances: List[ResourceInstance] = []
+        for filename, matches in matches_by_name.items():
+            matches.sort(key=lambda m: m.directory_index)
+
+            primary_match = matches[0]
+            instance = ResourceInstance(
+                name=filename,
+                resource_type=resource_type,
+                path=primary_match.path,
+                directory_index=primary_match.directory_index,
+                directory_path=primary_match.directory_path,
+                is_primary=True,
+                all_matches=matches,
+                size=primary_match.size,
+                last_modified=primary_match.last_modified,
+            )
+            instances.append(instance)
+
         instances.sort(key=lambda x: x.name.casefold())
 
         self._scanned_instances[resource_type] = instances
@@ -247,6 +249,14 @@ class ResourceService:
             self.scan_type(resource_type)
         return self._instance_name_index.get(key)
 
+    def get_all_matches_for_name(
+        self, resource_type: ResourceType, filename: str
+    ) -> List[DirectoryMatch]:
+        instance = self.get_resource_instance(resource_type, filename)
+        if instance is None:
+            return []
+        return list(instance.all_matches)
+
     def get_filepath(
         self, resource_type: ResourceType, filename: str
     ) -> Optional[str]:
@@ -257,13 +267,36 @@ class ResourceService:
         self, resource_type: ResourceType, filename: str
     ) -> Optional[str]:
         directories = self._get_directories_for_type(resource_type)
-        for directory, _ in directories:
-            full_path = os.path.join(directory, filename)
+        if not directories:
+            return None
+
+        for directory in directories:
+            full_path = os.path.abspath(os.path.realpath(os.path.join(directory, filename)))
             if os.path.isfile(full_path):
-                return os.path.abspath(full_path)
-        if directories:
-            return os.path.abspath(os.path.join(directories[0][0], filename))
-        return None
+                return full_path
+
+        first_dir = directories[0]
+        return os.path.abspath(os.path.realpath(os.path.join(first_dir, filename)))
+
+    def find_filepath_by_name_all(
+        self, resource_type: ResourceType, filename: str
+    ) -> List[Tuple[str, bool]]:
+        directories = self._get_directories_for_type(resource_type)
+        if not directories:
+            return []
+
+        results: List[Tuple[str, bool]] = []
+        found_first = False
+        for directory in directories:
+            full_path = os.path.abspath(os.path.realpath(os.path.join(directory, filename)))
+            exists = os.path.isfile(full_path)
+            is_primary = exists and not found_first
+            if exists:
+                found_first = True
+                results.append((full_path, is_primary))
+            else:
+                results.append((full_path, False))
+        return results
 
     def load_hash_cache(self) -> None:
         with self._hash_lock:
@@ -448,10 +481,13 @@ class ResourceService:
             if on_progress:
                 on_progress(state)
 
-            type_config = get_resource_type_config(definition.resource_type)
-            default_path = type_config.get("default_path", "")
-            modules_dir = os.path.dirname(os.path.abspath(__file__))
-            model_dir = os.path.abspath(os.path.join(modules_dir, default_path))
+            model_dir = self._get_target_download_directory(definition.resource_type)
+            if model_dir is None:
+                state.status = "failed"
+                state.error = f"No target directory for resource type {definition.resource_type.value}"
+                if on_progress:
+                    on_progress(state)
+                return False
 
             for url in definition.urls:
                 try:
@@ -524,10 +560,24 @@ class ResourceService:
             if on_progress:
                 on_progress(state)
 
-            type_config = get_resource_type_config(definition.resource_type)
-            default_path = type_config.get("default_path", "")
-            modules_dir = os.path.dirname(os.path.abspath(__file__))
-            model_dir = os.path.abspath(os.path.join(modules_dir, default_path))
+            existing_path = self.find_filepath_by_name(definition.resource_type, definition.name)
+            if existing_path and os.path.isfile(existing_path):
+                self.scan_type(definition.resource_type, force=True)
+                state.status = "completed"
+                state.progress = 100.0
+                state.completed_at = time.time()
+                if on_progress:
+                    on_progress(state)
+                self._notify_observers()
+                return True
+
+            model_dir = self._get_target_download_directory(definition.resource_type)
+            if model_dir is None:
+                state.status = "failed"
+                state.error = f"No target directory for resource type {definition.resource_type.value}"
+                if on_progress:
+                    on_progress(state)
+                return False
 
             for url in definition.urls:
                 try:
@@ -642,10 +692,26 @@ class ResourceService:
                 "is_scanned": instance is not None,
                 "is_downloaded": instance is not None,
                 "path": instance.path if instance else None,
+                "directory_index": instance.directory_index if instance else None,
+                "directory_path": instance.directory_path if instance else None,
+                "is_primary_path": instance.is_primary if instance else None,
                 "hash": instance.hash if instance else None,
                 "description": definition.description if definition else None,
                 "urls": definition.urls if definition else [],
             }
+
+            if instance:
+                all_hits_info = []
+                for match in instance.all_matches:
+                    all_hits_info.append({
+                        "path": match.path,
+                        "directory_index": match.directory_index,
+                        "directory_path": match.directory_path,
+                        "size": match.size,
+                        "last_modified": match.last_modified,
+                        "is_primary": match.directory_index == instance.directory_index,
+                    })
+                status["all_matches"] = all_hits_info
 
             if definition:
                 download_state = self.get_download_state(definition.resource_id)
@@ -659,7 +725,6 @@ class ResourceService:
 
     def get_resource_summary(self) -> Dict[str, Any]:
         summary = {
-            "total_registered": len([r for r in get_resources_by_type(ResourceType.CHECKPOINT)]),
             "by_type": {},
         }
 
@@ -668,10 +733,14 @@ class ResourceService:
             definitions = get_resources_by_type(resource_type)
             downloaded = [r for r in definitions if self.is_downloaded(r.resource_id)]
 
+            directories = self._get_directories_for_type(resource_type)
+
             summary["by_type"][resource_type.value] = {
                 "registered": len(definitions),
                 "scanned": len(instances),
                 "downloaded": len(downloaded),
+                "directories": directories,
+                "primary_directory": directories[0] if directories else None,
             }
 
         return summary

@@ -27,17 +27,20 @@ def test_resource_registry():
         SAFETY_CHECKER_RESOURCES,
         SAM_RESOURCES,
         FOOOCUS_EXPANSION_RESOURCES,
-        RESOURCE_INDEX,
         get_resource_definition,
         get_resources_by_type,
         get_resource_type_config,
     )
     
     print(f"\nResource Types: {[rt.value for rt in ResourceType]}")
-    print(f"\nRegistered resources in index: {len(RESOURCE_INDEX)}")
     
-    for resource_id, resource in RESOURCE_INDEX.items():
-        print(f"  - {resource_id}: {resource.name} ({resource.resource_type.value})")
+    all_indexed = []
+    for rt in ResourceType:
+        all_indexed.extend(get_resources_by_type(rt))
+    print(f"\nRegistered resources in index: {len(all_indexed)}")
+    
+    for resource in all_indexed:
+        print(f"  - {resource.resource_id}: {resource.name} ({resource.resource_type.value})")
     
     print(f"\nVAE Approx resources: {len(VAE_APPROX_RESOURCES)}")
     print(f"Inpaint versions: {list(INPAINT_RESOURCES.keys())}")
@@ -61,7 +64,7 @@ def test_resource_registry():
     
     type_config = get_resource_type_config(ResourceType.CHECKPOINT)
     assert "path_config_key" in type_config
-    assert type_config["path_config_key"] == "path_checkpoints"
+    assert type_config["path_config_key"] == "paths_checkpoints"
     print(f"✓ get_resource_type_config(ResourceType.CHECKPOINT) works")
     
     print("\n✅ Resource Registry tests passed!")
@@ -76,7 +79,7 @@ def test_resource_type_config():
     
     from modules.resource_registry import ResourceType, RESOURCE_TYPE_CONFIG
     
-    required_keys = ["path_config_key", "default_path", "extensions", "is_multi_dir"]
+    required_keys = ["path_config_key", "extensions"]
     
     for resource_type in ResourceType:
         config = RESOURCE_TYPE_CONFIG.get(resource_type)
@@ -85,11 +88,12 @@ def test_resource_type_config():
         for key in required_keys:
             assert key in config, f"Missing key '{key}' in config for {resource_type}"
         
+        assert "default_path" not in config, f"default_path should not be in config for {resource_type} (use config.py's paths directly)"
+        assert "is_multi_dir" not in config, f"is_multi_dir should not be in config for {resource_type} (use config.py's paths directly)"
+        
         print(f"  ✓ {resource_type.value}:")
         print(f"    - config_key: {config['path_config_key']}")
-        print(f"    - default_path: {config['default_path']}")
         print(f"    - extensions: {config['extensions']}")
-        print(f"    - multi_dir: {config['is_multi_dir']}")
     
     print("\n✅ Resource Type Configuration tests passed!")
     return True
@@ -131,7 +135,9 @@ def test_resource_registry_index():
     print("=" * 60)
     
     from modules.resource_registry import (
-        RESOURCE_INDEX,
+        get_resource_definition,
+        get_resources_by_type,
+        ResourceType,
         VAE_APPROX_RESOURCES,
         INPAINT_RESOURCES,
         PERFORMANCE_LORA_RESOURCES,
@@ -159,11 +165,15 @@ def test_resource_registry_index():
     
     unique_ids = {r.resource_id for r in all_resources}
     print(f"  Total unique resource IDs: {len(unique_ids)}")
-    print(f"  Resources in index: {len(RESOURCE_INDEX)}")
+    
+    total_indexed = 0
+    for rt in ResourceType:
+        total_indexed += len(get_resources_by_type(rt))
+    print(f"  Resources in type index: {total_indexed}")
     
     for resource in all_resources:
-        if resource.resource_id in RESOURCE_INDEX:
-            indexed = RESOURCE_INDEX[resource.resource_id]
+        indexed = get_resource_definition(resource.resource_id)
+        if indexed:
             assert indexed.name == resource.name, f"Mismatch for {resource.resource_id}"
         else:
             print(f"  ⚠️  {resource.resource_id} not in index (may be duplicate)")
@@ -265,30 +275,54 @@ def test_architecture_integrity():
         else:
             print(f"  ❌ Missing backward compatibility: {var_name}")
     
-    print("\n3. Checking config delegates to resource_service:")
-    config_uses_service = 'resource_service' in config_source
-    if config_uses_service:
-        print("  ✓ config.py uses resource_service")
+    print("\n3. Checking config.py syncs globals via observer callback:")
+    has_sync_callback = '_sync_globals_from_resource_service' in config_source
+    has_add_observer = 'add_observer' in config_source
+    if has_sync_callback and has_add_observer:
+        print("  ✓ config.py registers observer callback to auto-sync model_filenames/lora_filenames/vae_filenames")
     else:
-        print("  ⚠️  config.py may not be using resource_service")
-    
-    print("\n4. Checking launch.py delegates to resource_service:")
+        print(f"  ❌ Missing observer callback: sync_func={has_sync_callback}, add_observer={has_add_observer}")
+
+    print("\n4. Checking config.py no longer independently maintains resource lists:")
+    import re
+    update_files_match = re.search(r'def update_files\(\):(.*?)(?=\ndef |\Z)', config_source, re.DOTALL)
+    if update_files_match:
+        update_body = update_files_match.group(1)
+        old_pattern_in_update = 'model_filenames = resource_service.get_filenames_by_type' in update_body
+        if not old_pattern_in_update:
+            print("  ✓ update_files() no longer copies resource lists independently (uses observer callback sync)")
+        else:
+            print("  ⚠️  update_files() may still be copying lists independently")
+    else:
+        print("  ⚠️  Could not locate update_files() function body")
+
+    print("\n5. Checking no custom directory priority in resource_service:")
+    service_source = read_file('modules/resource_service.py')
+    has_custom_priority = any(kw in service_source for kw in ['_get_docker_volume_paths', 'directory_priority', 'add_custom_directory', '200 +', '100 +'])
+    if not has_custom_priority:
+        print("  ✓ No custom directory priority logic found (reuses config.py paths directly)")
+    else:
+        print(f"  ❌ Found custom priority logic: directory_priority={has_custom_priority}")
+
+    print("\n6. Checking launch.py delegates to resource_service:")
     launch_source = read_file('launch.py')
     launch_uses_service = 'resource_service' in launch_source
     if launch_uses_service:
         print("  ✓ launch.py uses resource_service")
     else:
         print("  ⚠️  launch.py may not be using resource_service")
-    
-    print("\n5. Checking webui.py delegates to resource_service:")
+
+    print("\n7. Checking webui.py consumes config's synced globals:")
     webui_source = read_file('webui.py')
-    webui_uses_service = 'resource_service' in webui_source
-    if webui_uses_service:
-        print("  ✓ webui.py uses resource_service")
+    webui_uses_config_globals = all(kw in webui_source for kw in [
+        'modules.config.model_filenames', 'modules.config.lora_filenames', 'modules.config.vae_filenames'
+    ])
+    if webui_uses_config_globals:
+        print("  ✓ webui.py refresh_files_clicked() consumes modules.config.* globals (synced via observer)")
     else:
-        print("  ⚠️  webui.py may not be using resource_service")
-    
-    print("\n6. Checking all modified files for syntax:")
+        print("  ⚠️  webui.py may not be consuming synced config globals")
+
+    print("\n8. Checking all modified files for syntax:")
     files_to_check = [
         'modules/resource_registry.py',
         'modules/resource_service.py',

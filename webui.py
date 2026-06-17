@@ -1010,19 +1010,15 @@ with shared.gradio_root:
                                 queue=False, show_progress=False)
 
                 def refresh_files_clicked():
-                    resource_service.scan_all(force=True)
                     modules.config.update_files()
-                    model_filenames = resource_service.get_filenames_by_type(ResourceType.CHECKPOINT)
-                    lora_filenames = resource_service.get_filenames_by_type(ResourceType.LORA)
-                    vae_filenames = resource_service.get_filenames_by_type(ResourceType.VAE)
-                    results = [gr.update(choices=model_filenames)]
-                    results += [gr.update(choices=['None'] + model_filenames)]
-                    results += [gr.update(choices=[flags.default_vae] + vae_filenames)]
+                    results = [gr.update(choices=modules.config.model_filenames)]
+                    results += [gr.update(choices=['None'] + modules.config.model_filenames)]
+                    results += [gr.update(choices=[flags.default_vae] + modules.config.vae_filenames)]
                     if not args_manager.args.disable_preset_selection:
                         results += [gr.update(choices=modules.config.available_presets)]
                     for i in range(modules.config.default_max_lora_number):
                         results += [gr.update(interactive=True),
-                                    gr.update(choices=['None'] + lora_filenames), gr.update()]
+                                    gr.update(choices=['None'] + modules.config.lora_filenames), gr.update()]
                     return results
 
                 refresh_files_output = [base_model, refiner_model, vae_name]
