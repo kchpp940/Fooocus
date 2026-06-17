@@ -23,6 +23,24 @@ from modules.metadata_service import (
     get_metadata_service
 )
 
+# ==========================================================================
+# COMPATIBILITY LAYER BOUNDARY
+#
+# This module provides the legacy public interface used by private_logger.py,
+# webui.py (old callers), and any external integrations.
+#
+# RULES:
+#   1. All functions here return ONLY raw parameter data — never
+#      ParsedMetadata.diagnostics (LogMatchDiagnostics).
+#   2. read_info_from_image() / get_exif() never consult private log.html;
+#      they only read embedded image metadata / EXIF as before.
+#   3. load_parameter_button_click() takes raw dict/str metadata and returns
+#      only the 55-item Gradio update list, no auxiliary information.
+#   4. If a caller needs LogMatchDiagnostics, it must import
+#      MetadataService directly from modules.metadata_service and use
+#      parse_from_image_with_log() / parse_from_pil_with_log().
+# ==========================================================================
+
 re_param_code = r'\s*(\w[\w \-/]+):\s*("(?:\\.|[^\\"])+"|[^,]*)(?:,|$)'
 re_param = re.compile(re_param_code)
 re_imagesize = re.compile(r"^(\d+)x(\d+)$")

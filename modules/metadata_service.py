@@ -87,9 +87,13 @@ class ParsedMetadata:
         return self.fields.get(key)
 
     def to_dict(self) -> dict:
+        # NOTE: Intentionally only iterates .fields — NEVER include .diagnostics here.
+        # Diagnostics (LogMatchDiagnostics) are for preview/compare UI display only
+        # and must never leak into generated image metadata, EXIF, or private log.
         return {k: f.value for k, f in self.fields.items() if f.valid}
 
     def to_display_dict(self) -> dict:
+        # NOTE: Same boundary rule as to_dict() — diagnostics excluded intentionally.
         result = {}
         for k, f in self.fields.items():
             if f.valid:
@@ -984,6 +988,11 @@ class MetadataService:
         diag.note = diag.note or f"Matched via {matched_by}."
         return parsed_log, diag
 
+    def parse_from_log_html_compat(self, log_html_path: str, image_filename: str | None = None,
+                                    image_absolute_dir: str | None = None) -> Optional[ParsedMetadata]:
+        parsed, _ = self.parse_from_log_html(log_html_path, image_filename, image_absolute_dir)
+        return parsed
+
     def _extract_all_log_entries(self, html_content: str) -> dict:
         result = {}
 
@@ -1162,10 +1171,24 @@ class MetadataService:
         return ParsedMetadata(source=MetadataSource.UNKNOWN, scheme=None, raw=None)
 
     def build_output_metadata(self, task_data: dict, scheme: MetadataScheme) -> str:
+        if isinstance(task_data, ParsedMetadata):
+            task_data = task_data.to_dict()
+
+        if not isinstance(task_data, dict):
+            task_data = {}
+
+        sanitized = {}
+        for k, v in task_data.items():
+            if k in ('diagnostics', 'log_match_diagnostics', '__diagnostics__'):
+                continue
+            if isinstance(k, str) and (k.startswith('__') and k.endswith('__')):
+                continue
+            sanitized[k] = v
+
         if scheme == MetadataScheme.FOOOCUS:
-            return self._build_fooocus_metadata(task_data)
+            return self._build_fooocus_metadata(sanitized)
         else:
-            return self._build_a1111_metadata(task_data)
+            return self._build_a1111_metadata(sanitized)
 
     def _build_fooocus_metadata(self, task_data: dict) -> str:
         result = {}
