@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Callable, List, Optional
+import sys
 
 import args_manager
 from modules.ui.types import (
@@ -18,12 +19,128 @@ class ProtocolSlot:
     condition: Optional[Callable[[], bool]] = None
 
 
-def _resolve(context: dict, path: str):
+@dataclass
+class SlotResolution:
+    name: str
+    source: str
+    description: str
+    spread: bool
+    count: int
+    value: object
+
+
+@dataclass
+class ProtocolValidationResult:
+    declaration_name: str
+    slots: List[SlotResolution]
+    total_length: int
+    errors: List[str]
+
+
+def _resolve_path(context: dict, path: str, slot_name: str) -> object:
     parts = path.split('.')
-    obj = context[parts[0]]
-    for part in parts[1:]:
-        obj = getattr(obj, part)
+    try:
+        obj = context[parts[0]]
+    except KeyError:
+        raise KeyError(
+            f"Protocol slot '{slot_name}': context key '{parts[0]}' not found. "
+            f"Available keys: {list(context.keys())}"
+        )
+    for i, part in enumerate(parts[1:], 1):
+        try:
+            obj = getattr(obj, part)
+        except AttributeError:
+            raise AttributeError(
+                f"Protocol slot '{slot_name}': path '{path}' failed at position {i} "
+                f"('{part}'). Object type '{type(obj).__name__}' at '{'.'.join(parts[:i])}' "
+                f"has no attribute '{part}'. Available: {[a for a in dir(obj) if not a.startswith('_')]}"
+            )
     return obj
+
+
+def _resolve_and_report(declaration: List[ProtocolSlot], context: dict,
+                         declaration_name: str) -> ProtocolValidationResult:
+    slots = []
+    errors = []
+
+    for slot in declaration:
+        if slot.condition is not None:
+            try:
+                cond_result = slot.condition()
+            except Exception as e:
+                errors.append(
+                    f"Slot '{slot.name}': condition raised {type(e).__name__}: {e}"
+                )
+                continue
+            if not cond_result:
+                slots.append(SlotResolution(
+                    name=slot.name,
+                    source=slot.source,
+                    description=slot.description + " (EXCLUDED by condition)",
+                    spread=slot.spread,
+                    count=0,
+                    value=None
+                ))
+                continue
+
+        try:
+            value = _resolve_path(context, slot.source, slot.name)
+        except (KeyError, AttributeError) as e:
+            errors.append(str(e))
+            continue
+
+        count = 1
+        if slot.spread:
+            try:
+                items = list(value)
+                count = len(items)
+                value = items
+            except TypeError:
+                errors.append(
+                    f"Slot '{slot.name}': marked spread=True but value "
+                    f"of type '{type(value).__name__}' is not iterable."
+                )
+                continue
+
+        slots.append(SlotResolution(
+            name=slot.name,
+            source=slot.source,
+            description=slot.description,
+            spread=slot.spread,
+            count=count,
+            value=value
+        ))
+
+    total_length = sum(s.count for s in slots)
+    return ProtocolValidationResult(
+        declaration_name=declaration_name,
+        slots=slots,
+        total_length=total_length,
+        errors=errors
+    )
+
+
+def _format_validation_report(result: ProtocolValidationResult,
+                               expected_length: Optional[int]) -> str:
+    lines = []
+    lines.append(f"\n=== Protocol Validation: {result.declaration_name} ===")
+    lines.append(f"{'Slot':<38} {'Count':>6}  Description")
+    lines.append("-" * 90)
+    for s in result.slots:
+        count_str = f"{s.count}{'*' if s.spread else ''}"
+        name_str = s.name + (" (skip)" if s.count == 0 else "")
+        lines.append(f"  {name_str:<36} {count_str:>6}  {s.description}")
+    lines.append("-" * 90)
+    lines.append(f"Total slots: {len(result.slots)}  |  Total components: {result.total_length}")
+    if expected_length is not None:
+        status = "OK" if result.total_length == expected_length else "MISMATCH"
+        lines.append(f"Expected length: {expected_length}  |  {status}")
+    if result.errors:
+        lines.append("\nERRORS:")
+        for err in result.errors:
+            lines.append(f"  * {err}")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def resolve_slots(declaration: List[ProtocolSlot], context: dict) -> list:
@@ -31,12 +148,46 @@ def resolve_slots(declaration: List[ProtocolSlot], context: dict) -> list:
     for slot in declaration:
         if slot.condition is not None and not slot.condition():
             continue
-        value = _resolve(context, slot.source)
+        value = _resolve_path(context, slot.source, slot.name)
         if slot.spread:
             result.extend(value)
         else:
             result.append(value)
     return result
+
+
+def validate_and_build(
+    declaration: List[ProtocolSlot],
+    context: dict,
+    declaration_name: str,
+    expected_length: Optional[int] = None,
+) -> tuple:
+    report = _resolve_and_report(declaration, context, declaration_name)
+    sys.stdout.write(_format_validation_report(report, expected_length))
+    sys.stdout.flush()
+
+    if report.errors:
+        raise ValueError(
+            f"Protocol validation failed for '{declaration_name}' "
+            f"with {len(report.errors)} error(s). See output above."
+        )
+
+    if expected_length is not None and report.total_length != expected_length:
+        raise ValueError(
+            f"Protocol '{declaration_name}' length mismatch: "
+            f"expected {expected_length}, got {report.total_length}. "
+            f"Did a dataclass field change or a spread list length change?"
+        )
+
+    result = []
+    for s in report.slots:
+        if s.count == 0:
+            continue
+        if s.spread:
+            result.extend(s.value)
+        else:
+            result.append(s.value)
+    return result, report
 
 
 def slot_index(declaration: List[ProtocolSlot], name: str) -> int:
@@ -96,6 +247,8 @@ LOAD_DATA_OUTPUTS_DECLARATION = [
     ProtocolSlot("freeu_ctrls", "advanced.advanced.freeu.freeu_ctrls", "FreeU enable/b1/b2/s1/s2", spread=True),
     ProtocolSlot("lora_ctrls", "advanced.models.lora_ctrls", "LoRA enabled/model/weight per slot", spread=True),
 ]
+
+LOAD_DATA_OUTPUTS_EXPECTED_LENGTH = 57
 
 
 CTRLS_DECLARATION = [
@@ -193,6 +346,8 @@ CTRLS_DECLARATION = [
     ProtocolSlot("enhance_ctrls", "enhance_panel.enhance_ctrls", "Per-tab enhance enabled/prompt/mask/inpaint params", spread=True),
 ]
 
+CTRLS_EXPECTED_LENGTH = 170
+
 
 def build_load_data_outputs(
     top_checkboxes: TopCheckboxes,
@@ -210,7 +365,12 @@ def build_load_data_outputs(
         'advanced': advanced,
         'inpaint_engine_state': inpaint_engine_state,
     }
-    return resolve_slots(LOAD_DATA_OUTPUTS_DECLARATION, context)
+    result, _ = validate_and_build(
+        LOAD_DATA_OUTPUTS_DECLARATION, context,
+        "load_data_outputs",
+        expected_length=LOAD_DATA_OUTPUTS_EXPECTED_LENGTH
+    )
+    return result
 
 
 def build_ctrls(
@@ -231,4 +391,9 @@ def build_ctrls(
         'advanced': advanced,
         'current_tab': current_tab,
     }
-    return resolve_slots(CTRLS_DECLARATION, context)
+    result, _ = validate_and_build(
+        CTRLS_DECLARATION, context,
+        "ctrls",
+        expected_length=CTRLS_EXPECTED_LENGTH
+    )
+    return result
