@@ -234,12 +234,6 @@ with shared.gradio_root:
             freeu_s2 = freeu.freeu_s2
             freeu_ctrls = freeu.freeu_ctrls
 
-            inpaint_ctrls = [
-                debugging_inpaint_preprocessor, inpaint_disable_initial_latent,
-                inpaint_engine, inpaint_strength, inpaint_respective_field,
-                inpaint_advanced_masking_checkbox, invert_mask_checkbox,
-                inpaint_erode_or_dilate
-            ]
 
     state_is_generating = gr.State(False)
 

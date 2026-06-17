@@ -1,9 +1,197 @@
+from dataclasses import dataclass
+from typing import Callable, List, Optional
+
 import args_manager
 from modules.ui.types import (
     TopCheckboxes, PromptAndButtons,
     ImageInputTabs, EnhancePanelComponents,
     AdvancedColumnComponents
 )
+
+
+@dataclass
+class ProtocolSlot:
+    name: str
+    source: str
+    description: str
+    spread: bool = False
+    condition: Optional[Callable[[], bool]] = None
+
+
+def _resolve(context: dict, path: str):
+    parts = path.split('.')
+    obj = context[parts[0]]
+    for part in parts[1:]:
+        obj = getattr(obj, part)
+    return obj
+
+
+def resolve_slots(declaration: List[ProtocolSlot], context: dict) -> list:
+    result = []
+    for slot in declaration:
+        if slot.condition is not None and not slot.condition():
+            continue
+        value = _resolve(context, slot.source)
+        if slot.spread:
+            result.extend(value)
+        else:
+            result.append(value)
+    return result
+
+
+def slot_index(declaration: List[ProtocolSlot], name: str) -> int:
+    idx = 0
+    for slot in declaration:
+        if slot.condition is not None and not slot.condition():
+            continue
+        if slot.spread:
+            raise ValueError(
+                f"Cannot compute stable index for spread slot '{slot.name}'; "
+                f"use a non-spread slot or resolve the list first."
+            )
+        if slot.name == name:
+            return idx
+        idx += 1
+    raise KeyError(f"Slot '{name}' not found in declaration (or was conditionally excluded)")
+
+
+_enable_image_log = lambda: not args_manager.args.disable_image_log
+_enable_metadata = lambda: not args_manager.args.disable_metadata
+
+
+LOAD_DATA_OUTPUTS_DECLARATION = [
+    ProtocolSlot("advanced_checkbox", "top_checkboxes.advanced_checkbox", "Toggle advanced settings column"),
+    ProtocolSlot("image_number", "advanced.settings.image_number", "Number of images to generate"),
+    ProtocolSlot("prompt", "prompt_buttons.prompt", "Positive prompt text"),
+    ProtocolSlot("negative_prompt", "advanced.settings.negative_prompt", "Negative prompt text"),
+    ProtocolSlot("style_selections", "advanced.styles.style_selections", "Selected style names"),
+    ProtocolSlot("performance_selection", "advanced.settings.performance_selection", "Speed/Quality/Extreme Speed"),
+    ProtocolSlot("overwrite_step", "advanced.advanced.debug_tools.overwrite_step", "Override sampling steps"),
+    ProtocolSlot("overwrite_switch", "advanced.advanced.debug_tools.overwrite_switch", "Override refiner switch step"),
+    ProtocolSlot("aspect_ratios_selection", "advanced.settings.aspect_ratios_selection", "Image aspect ratio"),
+    ProtocolSlot("overwrite_width", "advanced.advanced.debug_tools.overwrite_width", "Override image width"),
+    ProtocolSlot("overwrite_height", "advanced.advanced.debug_tools.overwrite_height", "Override image height"),
+    ProtocolSlot("guidance_scale", "advanced.advanced.guidance_scale", "CFG / guidance scale"),
+    ProtocolSlot("sharpness", "advanced.advanced.sharpness", "Image sharpness"),
+    ProtocolSlot("adm_scaler_positive", "advanced.advanced.debug_tools.adm_scaler_positive", "ADM positive scaler"),
+    ProtocolSlot("adm_scaler_negative", "advanced.advanced.debug_tools.adm_scaler_negative", "ADM negative scaler"),
+    ProtocolSlot("adm_scaler_end", "advanced.advanced.debug_tools.adm_scaler_end", "ADM scaler end value"),
+    ProtocolSlot("refiner_swap_method", "advanced.advanced.debug_tools.refiner_swap_method", "Refiner swap method"),
+    ProtocolSlot("adaptive_cfg", "advanced.advanced.debug_tools.adaptive_cfg", "Adaptive CFG"),
+    ProtocolSlot("clip_skip", "advanced.advanced.debug_tools.clip_skip", "CLIP skip count"),
+    ProtocolSlot("base_model", "advanced.models.base_model", "Base SDXL model name"),
+    ProtocolSlot("refiner_model", "advanced.models.refiner_model", "Refiner model name"),
+    ProtocolSlot("refiner_switch", "advanced.models.refiner_switch", "Refiner switch slider"),
+    ProtocolSlot("sampler_name", "advanced.advanced.debug_tools.sampler_name", "Sampler name"),
+    ProtocolSlot("scheduler_name", "advanced.advanced.debug_tools.scheduler_name", "Scheduler name"),
+    ProtocolSlot("vae_name", "advanced.advanced.debug_tools.vae_name", "VAE name"),
+    ProtocolSlot("seed_random", "advanced.settings.seed_random", "Random seed checkbox"),
+    ProtocolSlot("image_seed", "advanced.settings.image_seed", "Seed value"),
+    ProtocolSlot("inpaint_engine", "advanced.advanced.inpaint_advanced.inpaint_engine", "Inpaint engine version"),
+    ProtocolSlot("inpaint_engine_state", "inpaint_engine_state", "Inpaint engine state tracker"),
+    ProtocolSlot("inpaint_mode", "image_input.inpaint.inpaint_mode", "Inpaint/outpaint method"),
+    ProtocolSlot("enhance_inpaint_modes", "enhance_panel.enhance_inpaint_mode_ctrls", "Per-tab enhance inpaint modes", spread=True),
+    ProtocolSlot("generate_button", "prompt_buttons.generate_button", "Generate button (visibility toggle)"),
+    ProtocolSlot("load_parameter_button", "prompt_buttons.load_parameter_button", "Load Parameters button (visibility toggle)"),
+    ProtocolSlot("freeu_ctrls", "advanced.advanced.freeu.freeu_ctrls", "FreeU enable/b1/b2/s1/s2", spread=True),
+    ProtocolSlot("lora_ctrls", "advanced.models.lora_ctrls", "LoRA enabled/model/weight per slot", spread=True),
+]
+
+
+CTRLS_DECLARATION = [
+    ProtocolSlot("currentTask", "currentTask", "Async task state object"),
+    ProtocolSlot("generate_image_grid", "advanced.advanced.debug_tools.generate_image_grid", "Image grid generation toggle"),
+
+    ProtocolSlot("prompt", "prompt_buttons.prompt", "Positive prompt text"),
+    ProtocolSlot("negative_prompt", "advanced.settings.negative_prompt", "Negative prompt text"),
+    ProtocolSlot("style_selections", "advanced.styles.style_selections", "Selected style names"),
+    ProtocolSlot("performance_selection", "advanced.settings.performance_selection", "Speed/Quality/Extreme Speed"),
+    ProtocolSlot("aspect_ratios_selection", "advanced.settings.aspect_ratios_selection", "Image aspect ratio"),
+    ProtocolSlot("image_number", "advanced.settings.image_number", "Number of images to generate"),
+    ProtocolSlot("output_format", "advanced.settings.output_format", "Output image format"),
+    ProtocolSlot("image_seed", "advanced.settings.image_seed", "Seed value"),
+    ProtocolSlot("read_wildcards_in_order", "advanced.advanced.debug_tools.read_wildcards_in_order", "Read wildcards in order"),
+    ProtocolSlot("sharpness", "advanced.advanced.sharpness", "Image sharpness"),
+    ProtocolSlot("guidance_scale", "advanced.advanced.guidance_scale", "CFG / guidance scale"),
+
+    ProtocolSlot("base_model", "advanced.models.base_model", "Base SDXL model name"),
+    ProtocolSlot("refiner_model", "advanced.models.refiner_model", "Refiner model name"),
+    ProtocolSlot("refiner_switch", "advanced.models.refiner_switch", "Refiner switch slider"),
+    ProtocolSlot("lora_ctrls", "advanced.models.lora_ctrls", "LoRA enabled/model/weight per slot", spread=True),
+
+    ProtocolSlot("input_image_checkbox", "top_checkboxes.input_image_checkbox", "Image input panel toggle"),
+    ProtocolSlot("current_tab", "current_tab", "Active image input tab identifier"),
+
+    ProtocolSlot("uov_method", "image_input.uov_method", "Upscale or variation method"),
+    ProtocolSlot("uov_input_image", "image_input.uov_input_image", "Upscale/variation source image"),
+
+    ProtocolSlot("outpaint_selections", "image_input.inpaint.outpaint_selections", "Outpaint direction checkboxes"),
+    ProtocolSlot("inpaint_input_image", "image_input.inpaint.inpaint_input_image", "Inpaint source image"),
+    ProtocolSlot("inpaint_additional_prompt", "image_input.inpaint.inpaint_additional_prompt", "Inpaint extra prompt"),
+    ProtocolSlot("inpaint_mask_image", "image_input.inpaint.inpaint_mask_image", "Inpaint mask upload"),
+
+    ProtocolSlot("disable_preview", "advanced.advanced.debug_tools.disable_preview", "Disable live preview"),
+    ProtocolSlot("disable_intermediate_results", "advanced.advanced.debug_tools.disable_intermediate_results", "Disable intermediate results"),
+    ProtocolSlot("disable_seed_increment", "advanced.advanced.debug_tools.disable_seed_increment", "Disable seed auto-increment"),
+    ProtocolSlot("black_out_nsfw", "advanced.advanced.debug_tools.black_out_nsfw", "Black out NSFW content"),
+
+    ProtocolSlot("adm_scaler_positive", "advanced.advanced.debug_tools.adm_scaler_positive", "ADM positive scaler"),
+    ProtocolSlot("adm_scaler_negative", "advanced.advanced.debug_tools.adm_scaler_negative", "ADM negative scaler"),
+    ProtocolSlot("adm_scaler_end", "advanced.advanced.debug_tools.adm_scaler_end", "ADM scaler end value"),
+    ProtocolSlot("adaptive_cfg", "advanced.advanced.debug_tools.adaptive_cfg", "Adaptive CFG"),
+    ProtocolSlot("clip_skip", "advanced.advanced.debug_tools.clip_skip", "CLIP skip count"),
+
+    ProtocolSlot("sampler_name", "advanced.advanced.debug_tools.sampler_name", "Sampler name"),
+    ProtocolSlot("scheduler_name", "advanced.advanced.debug_tools.scheduler_name", "Scheduler name"),
+    ProtocolSlot("vae_name", "advanced.advanced.debug_tools.vae_name", "VAE name"),
+
+    ProtocolSlot("overwrite_step", "advanced.advanced.debug_tools.overwrite_step", "Override sampling steps"),
+    ProtocolSlot("overwrite_switch", "advanced.advanced.debug_tools.overwrite_switch", "Override refiner switch step"),
+    ProtocolSlot("overwrite_width", "advanced.advanced.debug_tools.overwrite_width", "Override image width"),
+    ProtocolSlot("overwrite_height", "advanced.advanced.debug_tools.overwrite_height", "Override image height"),
+    ProtocolSlot("overwrite_vary_strength", "advanced.advanced.debug_tools.overwrite_vary_strength", "Vary upscale strength override"),
+
+    ProtocolSlot("overwrite_upscale_strength", "advanced.advanced.debug_tools.overwrite_upscale_strength", "Upscale strength override"),
+    ProtocolSlot("mixing_image_prompt_and_vary_upscale", "advanced.advanced.control.mixing_image_prompt_and_vary_upscale", "Mix IP + vary upscale"),
+    ProtocolSlot("mixing_image_prompt_and_inpaint", "advanced.advanced.control.mixing_image_prompt_and_inpaint", "Mix IP + inpaint"),
+
+    ProtocolSlot("debugging_cn_preprocessor", "advanced.advanced.control.debugging_cn_preprocessor", "Debug ControlNet preprocessor"),
+    ProtocolSlot("skipping_cn_preprocessor", "advanced.advanced.control.skipping_cn_preprocessor", "Skip ControlNet preprocessor"),
+    ProtocolSlot("canny_low_threshold", "advanced.advanced.control.canny_low_threshold", "Canny edge low threshold"),
+    ProtocolSlot("canny_high_threshold", "advanced.advanced.control.canny_high_threshold", "Canny edge high threshold"),
+
+    ProtocolSlot("refiner_swap_method", "advanced.advanced.debug_tools.refiner_swap_method", "Refiner swap method"),
+    ProtocolSlot("controlnet_softness", "advanced.advanced.control.controlnet_softness", "ControlNet softness"),
+
+    ProtocolSlot("freeu_ctrls", "advanced.advanced.freeu.freeu_ctrls", "FreeU enable/b1/b2/s1/s2", spread=True),
+
+    ProtocolSlot("debugging_inpaint_preprocessor", "advanced.advanced.inpaint_advanced.debugging_inpaint_preprocessor", "Debug inpaint preprocessor"),
+    ProtocolSlot("inpaint_disable_initial_latent", "advanced.advanced.inpaint_advanced.inpaint_disable_initial_latent", "Disable initial latent in inpaint"),
+    ProtocolSlot("inpaint_engine", "advanced.advanced.inpaint_advanced.inpaint_engine", "Inpaint engine version"),
+    ProtocolSlot("inpaint_strength", "advanced.advanced.inpaint_advanced.inpaint_strength", "Inpaint denoising strength"),
+    ProtocolSlot("inpaint_respective_field", "advanced.advanced.inpaint_advanced.inpaint_respective_field", "Inpaint respective field"),
+    ProtocolSlot("inpaint_advanced_masking_checkbox", "image_input.inpaint.inpaint_advanced_masking_checkbox", "Enable advanced masking"),
+    ProtocolSlot("invert_mask_checkbox", "image_input.inpaint.invert_mask_checkbox", "Invert inpaint mask"),
+    ProtocolSlot("inpaint_erode_or_dilate", "advanced.advanced.inpaint_advanced.inpaint_erode_or_dilate", "Inpaint mask erode/dilate"),
+
+    ProtocolSlot("save_final_enhanced_image_only", "advanced.advanced.debug_tools.save_final_enhanced_image_only", "Save only final enhanced image", condition=_enable_image_log),
+
+    ProtocolSlot("save_metadata_to_images", "advanced.advanced.debug_tools.save_metadata_to_images", "Embed metadata in output images", condition=_enable_metadata),
+    ProtocolSlot("metadata_scheme", "advanced.advanced.debug_tools.metadata_scheme", "Metadata format scheme", condition=_enable_metadata),
+
+    ProtocolSlot("ip_ctrls", "image_input.ip.ip_ctrls", "Image Prompt image/type/stop/weight per slot", spread=True),
+
+    ProtocolSlot("debugging_dino", "advanced.advanced.inpaint_advanced.debugging_dino", "Debug DINO detection"),
+    ProtocolSlot("dino_erode_or_dilate", "advanced.advanced.inpaint_advanced.dino_erode_or_dilate", "DINO mask erode/dilate"),
+    ProtocolSlot("debugging_enhance_masks_checkbox", "advanced.advanced.inpaint_advanced.debugging_enhance_masks_checkbox", "Debug enhance masks"),
+    ProtocolSlot("enhance_input_image", "image_input.enhance_input_image", "Enhance source image"),
+    ProtocolSlot("enhance_checkbox", "top_checkboxes.enhance_checkbox", "Enhance panel toggle"),
+    ProtocolSlot("enhance_uov_method", "enhance_panel.enhance_uov_method", "Enhance upscale/variation method"),
+    ProtocolSlot("enhance_uov_processing_order", "enhance_panel.enhance_uov_processing_order", "Enhance processing order"),
+    ProtocolSlot("enhance_uov_prompt_type", "enhance_panel.enhance_uov_prompt_type", "Enhance prompt type selection"),
+
+    ProtocolSlot("enhance_ctrls", "enhance_panel.enhance_ctrls", "Per-tab enhance enabled/prompt/mask/inpaint params", spread=True),
+]
 
 
 def build_load_data_outputs(
@@ -14,50 +202,15 @@ def build_load_data_outputs(
     advanced: AdvancedColumnComponents,
     inpaint_engine_state,
 ):
-    s = advanced.settings
-    a = advanced.advanced
-
-    outputs = [
-        top_checkboxes.advanced_checkbox,
-        s.image_number,
-        prompt_buttons.prompt,
-        s.negative_prompt,
-        advanced.styles.style_selections,
-        s.performance_selection,
-        a.debug_tools.overwrite_step,
-        a.debug_tools.overwrite_switch,
-        s.aspect_ratios_selection,
-        a.debug_tools.overwrite_width,
-        a.debug_tools.overwrite_height,
-        a.guidance_scale,
-        a.sharpness,
-        a.debug_tools.adm_scaler_positive,
-        a.debug_tools.adm_scaler_negative,
-        a.debug_tools.adm_scaler_end,
-        a.debug_tools.refiner_swap_method,
-        a.debug_tools.adaptive_cfg,
-        a.debug_tools.clip_skip,
-        advanced.models.base_model,
-        advanced.models.refiner_model,
-        advanced.models.refiner_switch,
-        a.debug_tools.sampler_name,
-        a.debug_tools.scheduler_name,
-        a.debug_tools.vae_name,
-        s.seed_random,
-        s.image_seed,
-        a.inpaint_advanced.inpaint_engine,
-        inpaint_engine_state,
-        image_input.inpaint.inpaint_mode,
-    ]
-    outputs += enhance_panel.enhance_inpaint_mode_ctrls
-    outputs += [
-        prompt_buttons.generate_button,
-        prompt_buttons.load_parameter_button,
-    ]
-    outputs += a.freeu.freeu_ctrls
-    outputs += advanced.models.lora_ctrls
-
-    return outputs
+    context = {
+        'top_checkboxes': top_checkboxes,
+        'prompt_buttons': prompt_buttons,
+        'image_input': image_input,
+        'enhance_panel': enhance_panel,
+        'advanced': advanced,
+        'inpaint_engine_state': inpaint_engine_state,
+    }
+    return resolve_slots(LOAD_DATA_OUTPUTS_DECLARATION, context)
 
 
 def build_ctrls(
@@ -69,119 +222,13 @@ def build_ctrls(
     advanced: AdvancedColumnComponents,
     current_tab,
 ):
-    s = advanced.settings
-    a = advanced.advanced
-
-    ctrls = [currentTask, a.debug_tools.generate_image_grid]
-    ctrls += [
-        prompt_buttons.prompt,
-        s.negative_prompt,
-        advanced.styles.style_selections,
-        s.performance_selection,
-        s.aspect_ratios_selection,
-        s.image_number,
-        s.output_format,
-        s.image_seed,
-        a.debug_tools.read_wildcards_in_order,
-        a.sharpness,
-        a.guidance_scale,
-    ]
-
-    ctrls += [
-        advanced.models.base_model,
-        advanced.models.refiner_model,
-        advanced.models.refiner_switch,
-    ]
-    ctrls += advanced.models.lora_ctrls
-
-    ctrls += [
-        top_checkboxes.input_image_checkbox,
-        current_tab,
-    ]
-    ctrls += [
-        image_input.uov_method,
-        image_input.uov_input_image,
-    ]
-    ctrls += [
-        image_input.inpaint.outpaint_selections,
-        image_input.inpaint.inpaint_input_image,
-        image_input.inpaint.inpaint_additional_prompt,
-        image_input.inpaint.inpaint_mask_image,
-    ]
-    ctrls += [
-        a.debug_tools.disable_preview,
-        a.debug_tools.disable_intermediate_results,
-        a.debug_tools.disable_seed_increment,
-        a.debug_tools.black_out_nsfw,
-    ]
-    ctrls += [
-        a.debug_tools.adm_scaler_positive,
-        a.debug_tools.adm_scaler_negative,
-        a.debug_tools.adm_scaler_end,
-        a.debug_tools.adaptive_cfg,
-        a.debug_tools.clip_skip,
-    ]
-    ctrls += [
-        a.debug_tools.sampler_name,
-        a.debug_tools.scheduler_name,
-        a.debug_tools.vae_name,
-    ]
-    ctrls += [
-        a.debug_tools.overwrite_step,
-        a.debug_tools.overwrite_switch,
-        a.debug_tools.overwrite_width,
-        a.debug_tools.overwrite_height,
-        a.debug_tools.overwrite_vary_strength,
-    ]
-    ctrls += [
-        a.debug_tools.overwrite_upscale_strength,
-        a.control.mixing_image_prompt_and_vary_upscale,
-        a.control.mixing_image_prompt_and_inpaint,
-    ]
-    ctrls += [
-        a.control.debugging_cn_preprocessor,
-        a.control.skipping_cn_preprocessor,
-        a.control.canny_low_threshold,
-        a.control.canny_high_threshold,
-    ]
-    ctrls += [
-        a.debug_tools.refiner_swap_method,
-        a.control.controlnet_softness,
-    ]
-    ctrls += a.freeu.freeu_ctrls
-
-    inpaint_ctrls = [
-        a.inpaint_advanced.debugging_inpaint_preprocessor,
-        a.inpaint_advanced.inpaint_disable_initial_latent,
-        a.inpaint_advanced.inpaint_engine,
-        a.inpaint_advanced.inpaint_strength,
-        a.inpaint_advanced.inpaint_respective_field,
-        image_input.inpaint.inpaint_advanced_masking_checkbox,
-        image_input.inpaint.invert_mask_checkbox,
-        a.inpaint_advanced.inpaint_erode_or_dilate,
-    ]
-    ctrls += inpaint_ctrls
-
-    if not args_manager.args.disable_image_log:
-        ctrls += [a.debug_tools.save_final_enhanced_image_only]
-
-    if not args_manager.args.disable_metadata:
-        ctrls += [
-            a.debug_tools.save_metadata_to_images,
-            a.debug_tools.metadata_scheme,
-        ]
-
-    ctrls += image_input.ip.ip_ctrls
-    ctrls += [
-        a.inpaint_advanced.debugging_dino,
-        a.inpaint_advanced.dino_erode_or_dilate,
-        a.inpaint_advanced.debugging_enhance_masks_checkbox,
-        image_input.enhance_input_image,
-        top_checkboxes.enhance_checkbox,
-        enhance_panel.enhance_uov_method,
-        enhance_panel.enhance_uov_processing_order,
-        enhance_panel.enhance_uov_prompt_type,
-    ]
-    ctrls += enhance_panel.enhance_ctrls
-
-    return ctrls
+    context = {
+        'currentTask': currentTask,
+        'prompt_buttons': prompt_buttons,
+        'top_checkboxes': top_checkboxes,
+        'image_input': image_input,
+        'enhance_panel': enhance_panel,
+        'advanced': advanced,
+        'current_tab': current_tab,
+    }
+    return resolve_slots(CTRLS_DECLARATION, context)
