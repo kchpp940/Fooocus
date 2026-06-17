@@ -19,7 +19,7 @@ import launch
 from extras.inpaint_mask import SAMOptions
 
 from modules.sdxl_styles import legal_style_names
-from modules.private_logger import get_current_html_path, get_history_gallery_items
+from modules.private_logger import get_current_html_path
 from modules.ui_gradio_extensions import reload_javascript
 from modules.auth import auth_enabled, check_auth
 from modules.util import is_json
@@ -273,6 +273,55 @@ with shared.gradio_root:
                     if isinstance(default_prompt, str) and default_prompt != '':
                         shared.gradio_root.load(lambda: default_prompt, outputs=prompt)
 
+                    with gr.Accordion("Prompt Variable Matrix (Experimental)", open=False, visible=True) as prompt_matrix_accordion:
+                        prompt_matrix = gr.Checkbox(
+                            label='Enable Prompt Variable Matrix',
+                            value=modules.config.default_prompt_matrix,
+                            info='Use {variable_name} in prompt and negative prompt to define placeholders.',
+                            container=False,
+                            elem_classes='min_check'
+                        )
+                        with gr.Column(visible=modules.config.default_prompt_matrix) as prompt_matrix_panel:
+                            prompt_matrix_config = gr.Textbox(
+                                label='Variable Definitions',
+                                placeholder='Example format (one variable per line):\nstyle: cinematic, anime, watercolor, oil painting\nseed: 12345, 67890, 11111\nlora_weight: 0.5, 0.8, 1.0\n\nOr JSON format:\n[{"name": "style", "values": ["cinematic", "anime"]}, {"name": "seed", "values": ["12345", "67890"]}]',
+                                lines=6,
+                                value=''
+                            )
+                            prompt_matrix_info = gr.HTML(
+                                value='<div style="color: #888; font-size: 12px;">Enter variables above. Total combinations will be calculated when you click Generate.</div>'
+                            )
+
+                            def update_matrix_info(enabled, config_text):
+                                if not enabled:
+                                    return '<div style="color: #888; font-size: 12px;">Matrix disabled.</div>'
+                                from modules.util import parse_prompt_matrix_config, get_matrix_combination_count
+                                config = parse_prompt_matrix_config(config_text)
+                                count = get_matrix_combination_count(config)
+                                variables = ', '.join([f"{v['name']}({len(v['values'])})" for v in config])
+                                return f'<div style="color: #2563eb; font-size: 12px;"><strong>Variables:</strong> {variables if variables else "None defined"} | <strong>Total Combinations:</strong> {count}</div>'
+
+                            prompt_matrix.change(
+                                lambda x: gr.update(visible=x),
+                                inputs=[prompt_matrix],
+                                outputs=[prompt_matrix_panel],
+                                queue=False,
+                                show_progress=False
+                            ).then(
+                                update_matrix_info,
+                                inputs=[prompt_matrix, prompt_matrix_config],
+                                outputs=[prompt_matrix_info],
+                                queue=False,
+                                show_progress=False
+                            )
+                            prompt_matrix_config.change(
+                                update_matrix_info,
+                                inputs=[prompt_matrix, prompt_matrix_config],
+                                outputs=[prompt_matrix_info],
+                                queue=False,
+                                show_progress=False
+                            )
+
                 with gr.Column(scale=3, min_width=0):
                     generate_button = gr.Button(label="Generate", value="Generate", elem_classes='type_row', elem_id='generate_button', visible=True)
                     reset_button = gr.Button(label="Reconnect", value="Reconnect", elem_classes='type_row', elem_id='reset_button', visible=False)
@@ -477,147 +526,6 @@ with shared.gradio_root:
                         metadata_input_image.upload(trigger_metadata_preview, inputs=metadata_input_image,
                                                     outputs=metadata_json, queue=False, show_progress=True)
 
-                    with gr.Tab(label='Compare', id='compare_tab') as compare_tab:
-                        compare_state_a = gr.State(None)
-                        compare_state_b = gr.State(None)
-
-                        with gr.Row():
-                            with gr.Column(scale=1):
-                                gr.HTML('<div style="font-weight:600;color:#90ee90;margin-bottom:6px;">Image A</div>')
-                                compare_input_a = grh.Image(label='Upload Image A', source='upload', type='pil')
-                                compare_gallery_a = gr.Gallery(label='History - Click to select A', object_fit='contain',
-                                                               height=300, elem_classes='image_gallery', show_label=True)
-                                compare_load_a_btn = gr.Button(value='⬅️  Set as Image A from above', variant='secondary', size='sm')
-
-                                def select_from_gallery_a(gallery, evt: gr.SelectData):
-                                    if evt.index is not None and gallery and isinstance(gallery, list) and len(gallery) > evt.index:
-                                        item = gallery[evt.index]
-                                        path = item['name'] if isinstance(item, dict) else (item[0] if isinstance(item, (list, tuple)) else str(item))
-                                        from PIL import Image as PILImage
-                                        try:
-                                            img = PILImage.open(path)
-                                            return img, path
-                                        except Exception:
-                                            return gr.update(), None
-                                    return gr.update(), None
-
-                                def get_path_from_upload_a(img):
-                                    try:
-                                        if hasattr(img, 'filename'):
-                                            return img.filename
-                                        if isinstance(img, dict) and 'name' in img:
-                                            return img['name']
-                                    except Exception:
-                                        pass
-                                    return None
-
-                                compare_upload_path_a = gr.State(None)
-                                compare_gallery_a.select(select_from_gallery_a, inputs=[compare_gallery_a],
-                                                         outputs=[compare_input_a, compare_upload_path_a], queue=False)
-                                compare_input_a.upload(get_path_from_upload_a, inputs=[compare_input_a],
-                                                       outputs=[compare_upload_path_a], queue=False)
-                                compare_load_a_btn.click(lambda x, y: (x, y), inputs=[compare_input_a, compare_upload_path_a],
-                                                         outputs=[compare_input_a, compare_upload_path_a], queue=False)
-
-                            with gr.Column(scale=1):
-                                gr.HTML('<div style="font-weight:600;color:#87ceeb;margin-bottom:6px;">Image B</div>')
-                                compare_input_b = grh.Image(label='Upload Image B', source='upload', type='pil')
-                                compare_gallery_b = gr.Gallery(label='History - Click to select B', object_fit='contain',
-                                                               height=300, elem_classes='image_gallery', show_label=True)
-                                compare_load_b_btn = gr.Button(value='⬅️  Set as Image B from above', variant='secondary', size='sm')
-
-                                def select_from_gallery_b(gallery, evt: gr.SelectData):
-                                    if evt.index is not None and gallery and isinstance(gallery, list) and len(gallery) > evt.index:
-                                        item = gallery[evt.index]
-                                        path = item['name'] if isinstance(item, dict) else (item[0] if isinstance(item, (list, tuple)) else str(item))
-                                        from PIL import Image as PILImage
-                                        try:
-                                            img = PILImage.open(path)
-                                            return img, path
-                                        except Exception:
-                                            return gr.update(), None
-                                    return gr.update(), None
-
-                                def get_path_from_upload_b(img):
-                                    try:
-                                        if hasattr(img, 'filename'):
-                                            return img.filename
-                                        if isinstance(img, dict) and 'name' in img:
-                                            return img['name']
-                                    except Exception:
-                                        pass
-                                    return None
-
-                                compare_upload_path_b = gr.State(None)
-                                compare_gallery_b.select(select_from_gallery_b, inputs=[compare_gallery_b],
-                                                         outputs=[compare_input_b, compare_upload_path_b], queue=False)
-                                compare_input_b.upload(get_path_from_upload_b, inputs=[compare_input_b],
-                                                       outputs=[compare_upload_path_b], queue=False)
-                                compare_load_b_btn.click(lambda x, y: (x, y), inputs=[compare_input_b, compare_upload_path_b],
-                                                         outputs=[compare_input_b, compare_upload_path_b], queue=False)
-
-                        def refresh_history_galleries():
-                            items = get_history_gallery_items(50)
-                            return items, items
-
-                        compare_refresh_btn = gr.Button(value='🔄  Refresh History List', variant='secondary', size='sm')
-                        compare_refresh_btn.click(refresh_history_galleries, outputs=[compare_gallery_a, compare_gallery_b],
-                                                  queue=False, show_progress=False)
-                        shared.gradio_root.load(refresh_history_galleries, outputs=[compare_gallery_a, compare_gallery_b],
-                                                queue=False, show_progress=False)
-
-                        with gr.Row():
-                            compare_do_btn = gr.Button(value='🔍  Compare Parameters', variant='primary', scale=3)
-                            apply_a_btn = gr.Button(value='📋  Apply Image A Parameters to UI', variant='secondary', scale=2)
-                            apply_b_btn = gr.Button(value='📋  Apply Image B Parameters to UI', variant='secondary', scale=2)
-
-                        compare_result_html = gr.HTML(value='<div style="color:#888;padding:20px;text-align:center;">Upload or select two images from history above, then click "Compare Parameters".</div>')
-
-                        def do_compare(img_a, path_a, img_b, path_b):
-                            source_a = path_a if path_a else img_a
-                            source_b = path_b if path_b else img_b
-                            if source_a is None and source_b is None:
-                                return ('<div style="color:#ff9999;padding:12px;background:#3a1f1f;border-radius:6px;">Please select at least one image to compare.</div>',
-                                        None, None)
-                            data_a = modules.meta_parser.extract_comparison_data(source_a) if source_a is not None else {
-                                'fields': {}, 'loras': [], 'raw_metadata': None, 'log_metadata': None,
-                                'merged_metadata': None, 'apply_metadata': None, 'metadata_scheme': None, 'metadata_source': 'none',
-                                'image_path': path_a, 'error': 'No image A'
-                            }
-                            data_b = modules.meta_parser.extract_comparison_data(source_b) if source_b is not None else {
-                                'fields': {}, 'loras': [], 'raw_metadata': None, 'log_metadata': None,
-                                'merged_metadata': None, 'apply_metadata': None, 'metadata_scheme': None, 'metadata_source': 'none',
-                                'image_path': path_b, 'error': 'No image B'
-                            }
-                            comparison = modules.meta_parser.compare_metadata(data_a, data_b)
-                            html = modules.meta_parser.render_comparison_html(comparison, data_a, data_b)
-                            apply_a = data_a.get('apply_metadata') or data_a.get('merged_metadata') or data_a.get('raw_metadata') or {}
-                            apply_b = data_b.get('apply_metadata') or data_b.get('merged_metadata') or data_b.get('raw_metadata') or {}
-                            return html, apply_a, apply_b
-
-                        compare_do_btn.click(do_compare,
-                                             inputs=[compare_input_a, compare_upload_path_a, compare_input_b, compare_upload_path_b],
-                                             outputs=[compare_result_html, compare_state_a, compare_state_b],
-                                             queue=True, show_progress=True)
-
-                        def apply_from_state(raw_metadata, is_generating, inpaint_mode):
-                            if raw_metadata is None:
-                                return modules.meta_parser.load_parameter_button_click({}, is_generating, inpaint_mode)
-                            try:
-                                return modules.meta_parser.load_parameter_button_click(raw_metadata, is_generating, inpaint_mode)
-                            except Exception:
-                                return modules.meta_parser.load_parameter_button_click({}, is_generating, inpaint_mode)
-
-                        apply_a_btn.click(apply_from_state,
-                                          inputs=[compare_state_a, state_is_generating, inpaint_mode],
-                                          outputs=load_data_outputs, queue=False, show_progress=False) \
-                            .then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)
-
-                        apply_b_btn.click(apply_from_state,
-                                          inputs=[compare_state_b, state_is_generating, inpaint_mode],
-                                          outputs=load_data_outputs, queue=False, show_progress=False) \
-                            .then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)
-
             with gr.Row(visible=modules.config.default_enhance_checkbox) as enhance_input_panel:
                 with gr.Tabs():
                     with gr.Tab(label='Upscale or Variation'):
@@ -790,7 +698,6 @@ with shared.gradio_root:
             describe_tab.select(lambda: 'desc', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
             enhance_tab.select(lambda: 'enhance', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
             metadata_tab.select(lambda: 'metadata', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
-            compare_tab.select(lambda: 'compare', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
             enhance_checkbox.change(lambda x: gr.update(visible=x), inputs=enhance_checkbox,
                                         outputs=enhance_input_panel, queue=False, show_progress=False, _js=switch_js)
 
@@ -1297,6 +1204,8 @@ with shared.gradio_root:
                   enhance_input_image, enhance_checkbox, enhance_uov_method, enhance_uov_processing_order,
                   enhance_uov_prompt_type]
         ctrls += enhance_ctrls
+
+        ctrls += [prompt_matrix, prompt_matrix_config]
 
         def parse_meta(raw_prompt_txt, is_generating):
             loaded_json = None

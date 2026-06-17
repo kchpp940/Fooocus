@@ -117,6 +117,11 @@ def log(img, metadata, metadata_parser: MetadataParser | None = None, output_for
         <details><summary>Negative</summary>{', '.join(task['negative'])}</details>"""
         item += f"<tr><td class='label'>Full raw prompt</td><td class='value'>{full_prompt_details}</td></tr>\n"
 
+    if task is not None and 'variable_combination' in task and task['variable_combination']:
+        combo_parts = [f"<span style='color:#2563eb;'><b>{k}</b>: {v}</span>" for k, v in task['variable_combination'].items()]
+        combo_html = ' | '.join(combo_parts)
+        item += f"<tr><td class='label' style='background:#1a3a5c;'>Matrix Combo</td><td class='value' style='background:#1a3a5c;'>{combo_html}</td></tr>\n"
+
     item += "</table>"
 
     js_txt = urllib.parse.quote(json.dumps({k: v for _, k, v, in metadata}, indent=0), safe='')
@@ -134,136 +139,4 @@ def log(img, metadata, metadata_parser: MetadataParser | None = None, output_for
 
     log_cache[html_name] = middle_part
 
-    invalidate_log_cache(html_name)
-
     return local_temp_filename
-
-
-def list_history_images(limit: int = 100) -> list:
-    import datetime
-    from pathlib import Path
-    result = []
-    try:
-        outputs_dir = Path(modules.config.path_outputs)
-        if not outputs_dir.exists():
-            return result
-        date_dirs = sorted([d for d in outputs_dir.iterdir() if d.is_dir()], reverse=True)
-        exts = {'.png', '.jpg', '.jpeg', '.webp'}
-        for date_dir in date_dirs:
-            try:
-                files = sorted([f for f in date_dir.iterdir() if f.is_file() and f.suffix.lower() in exts],
-                               key=lambda x: x.stat().st_mtime, reverse=True)
-                for f in files:
-                    try:
-                        stat = f.stat()
-                        mtime = datetime.datetime.fromtimestamp(stat.st_mtime)
-                        result.append({
-                            'path': str(f.absolute()),
-                            'name': f.name,
-                            'date_dir': date_dir.name,
-                            'size': stat.st_size,
-                            'mtime': mtime.strftime('%Y-%m-%d %H:%M:%S')
-                        })
-                        if len(result) >= limit:
-                            return result
-                    except Exception:
-                        continue
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return result
-
-
-def get_history_gallery_items(limit: int = 100) -> list:
-    items = list_history_images(limit)
-    return [item['path'] for item in items]
-
-
-_log_entry_cache = {}
-
-
-def _parse_log_html(html_path: str) -> dict:
-    try:
-        with open(html_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        parts = content.split('<!--fooocus-log-split-->')
-        if len(parts) < 2:
-            return {}
-        middle = parts[1] if len(parts) >= 3 else parts[0]
-        import re
-        button_pattern = re.compile(r"to_clipboard\('([^']+)'\)")
-        div_id_pattern = re.compile(r'<div\s+id="([^"]+)"\s+class="image-container"')
-        img_src_pattern = re.compile(r"<img\s+src='([^']+)'")
-        result = {}
-        div_positions = [(m.start(), m.group(1)) for m in div_id_pattern.finditer(middle)]
-        btn_positions = [(m.start(), m.group(1)) for m in button_pattern.finditer(middle)]
-        if not btn_positions or not div_positions:
-            return {}
-        img_positions = [(m.start(), m.group(1)) for m in img_src_pattern.finditer(middle)]
-        all_events = []
-        for pos, div_id in div_positions:
-            all_events.append((pos, 'div', div_id))
-        for pos, js_data in btn_positions:
-            all_events.append((pos, 'btn', js_data))
-        for pos, img_src in img_positions:
-            all_events.append((pos, 'img', img_src))
-        all_events.sort(key=lambda x: x[0])
-        current_div_id = None
-        current_img_src = None
-        for pos, etype, data in all_events:
-            if etype == 'div':
-                current_div_id = data
-                current_img_src = None
-            elif etype == 'img':
-                current_img_src = data
-            elif etype == 'btn' and current_div_id is not None:
-                try:
-                    import urllib.parse
-                    decoded = urllib.parse.unquote(data)
-                    metadata_dict = json.loads(decoded)
-                    if current_img_src is not None:
-                        result[current_img_src] = metadata_dict
-                    result[current_div_id] = metadata_dict
-                except Exception:
-                    pass
-        return result
-    except Exception:
-        return {}
-
-
-def lookup_metadata_from_log(image_path: str) -> dict | None:
-    from pathlib import Path as P
-    try:
-        p = P(image_path)
-        filename = p.name
-        parent = p.parent
-        html_path = str(parent / 'log.html')
-        if not os.path.exists(html_path):
-            return None
-        if html_path not in _log_entry_cache:
-            _log_entry_cache[html_path] = _parse_log_html(html_path)
-        entries = _log_entry_cache[html_path]
-        if filename in entries:
-            return entries[filename]
-        div_id = filename.replace('.', '_')
-        if div_id in entries:
-            return entries[div_id]
-        for key, val in entries.items():
-            key_div = key.replace('.', '_')
-            if key_div == div_id:
-                return val
-        stem = p.stem
-        for key, val in entries.items():
-            if stem in key:
-                return val
-        return None
-    except Exception:
-        return None
-
-
-def invalidate_log_cache(html_path: str | None = None):
-    if html_path is not None:
-        _log_entry_cache.pop(html_path, None)
-    else:
-        _log_entry_cache.clear()

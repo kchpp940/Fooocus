@@ -513,3 +513,77 @@ def get_image_size_info(image: np.ndarray, aspect_ratios: list) -> str:
         return size_info
     except Exception as e:
         return f'Error reading image: {e}'
+
+
+def parse_prompt_matrix_config(matrix_config_text: str) -> list:
+    if not matrix_config_text or not matrix_config_text.strip():
+        return []
+
+    try:
+        parsed = json.loads(matrix_config_text)
+        if isinstance(parsed, list):
+            result = []
+            for item in parsed:
+                if isinstance(item, dict) and 'name' in item and 'values' in item:
+                    name = str(item['name']).strip()
+                    values = item['values']
+                    if isinstance(values, str):
+                        values = [v.strip() for v in values.split(',') if v.strip()]
+                    elif isinstance(values, list):
+                        values = [str(v).strip() for v in values if str(v).strip() != '']
+                    if name and len(values) > 0:
+                        result.append({'name': name, 'values': values})
+            return result
+    except json.JSONDecodeError:
+        pass
+
+    result = []
+    for line in matrix_config_text.strip().split('\n'):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if ':' in line:
+            name_part, values_part = line.split(':', 1)
+            name = name_part.strip()
+            values = [v.strip() for v in values_part.split(',') if v.strip()]
+            if name and len(values) > 0:
+                result.append({'name': name, 'values': values})
+    return result
+
+
+def get_matrix_combinations(matrix_config: list) -> list:
+    if not matrix_config:
+        return [{}]
+
+    def _expand(index, current):
+        if index >= len(matrix_config):
+            return [current.copy()]
+        results = []
+        var = matrix_config[index]
+        for value in var['values']:
+            current[var['name']] = value
+            results.extend(_expand(index + 1, current))
+            del current[var['name']]
+        return results
+
+    return _expand(0, {})
+
+
+def apply_prompt_variables(text: str, variables: dict) -> str:
+    if not text or not variables:
+        return text
+    result = text
+    for name, value in variables.items():
+        placeholder = '{' + name + '}'
+        result = result.replace(placeholder, str(value))
+    return result
+
+
+def get_matrix_combination_count(matrix_config: list) -> int:
+    if not matrix_config:
+        return 1
+    count = 1
+    for var in matrix_config:
+        count *= len(var.get('values', []))
+    return count
+

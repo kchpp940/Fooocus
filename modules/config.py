@@ -940,6 +940,20 @@ default_describe_content_type = get_config_item_or_set_default(
     expected_type=list
 )
 
+default_prompt_matrix = get_config_item_or_set_default(
+    key='default_prompt_matrix',
+    default_value=False,
+    validator=lambda x: isinstance(x, bool),
+    expected_type=bool
+)
+
+default_prompt_matrix_config = get_config_item_or_set_default(
+    key='default_prompt_matrix_config',
+    default_value=[],
+    validator=lambda x: isinstance(x, list),
+    expected_type=list
+)
+
 config_dict["default_loras"] = default_loras = default_loras[:default_max_lora_number] + [[True, 'None', 1.0] for _ in range(default_max_lora_number - len(default_loras))]
 
 # mapping config to meta parameter

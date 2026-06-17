@@ -158,6 +158,11 @@ class AsyncTask:
         self.images_to_enhance_count = 0
         self.enhance_stats = {}
 
+        from modules.util import parse_prompt_matrix_config
+        self.prompt_matrix = bool(args.pop())
+        self.prompt_matrix_config_raw = str(args.pop() or '')
+        self.prompt_matrix_config = parse_prompt_matrix_config(self.prompt_matrix_config_raw) if self.prompt_matrix else []
+
 async_tasks = []
 
 
@@ -378,6 +383,12 @@ def worker():
             for li, (n, w) in enumerate(loras):
                 if n != 'None':
                     d.append((f'LoRA {li + 1}', f'lora_combined_{li + 1}', f'{n} : {w}'))
+
+            variable_combination = task.get('variable_combination', {})
+            if variable_combination:
+                for var_name, var_value in variable_combination.items():
+                    d.append((f'Matrix: {var_name}', f'matrix_{var_name}', var_value))
+                d.append(('Matrix Variables', 'matrix_variables', str(variable_combination)))
 
             metadata_parser = None
             if async_task.save_metadata_to_images:
@@ -640,6 +651,8 @@ def worker():
 
     def process_prompt(async_task, prompt, negative_prompt, base_model_additional_loras, image_number, disable_seed_increment, use_expansion, use_style,
                        use_synthetic_refiner, current_progress, advance_progress=False):
+        from modules.util import get_matrix_combinations, apply_prompt_variables
+
         prompts = remove_empty_str([safe_str(p) for p in prompt.splitlines()], default='')
         negative_prompts = remove_empty_str([safe_str(p) for p in negative_prompt.splitlines()], default='')
         prompt = prompts[0]
@@ -666,69 +679,81 @@ def worker():
         if advance_progress:
             current_progress += 1
         progressbar(async_task, current_progress, 'Processing prompts ...')
+
+        matrix_combinations = get_matrix_combinations(async_task.prompt_matrix_config) if async_task.prompt_matrix else [{}]
+        print(f'[Prompt Matrix] {len(matrix_combinations)} combinations generated')
+
         tasks = []
-        for i in range(image_number):
-            if disable_seed_increment:
-                task_seed = async_task.seed % (constants.MAX_SEED + 1)
-            else:
-                task_seed = (async_task.seed + i) % (constants.MAX_SEED + 1)  # randint is inclusive, % is not
+        for combo_idx, variables in enumerate(matrix_combinations):
+            combo_prompt = apply_prompt_variables(prompt, variables)
+            combo_negative_prompt = apply_prompt_variables(negative_prompt, variables)
+            combo_extra_positive = [apply_prompt_variables(p, variables) for p in extra_positive_prompts]
+            combo_extra_negative = [apply_prompt_variables(p, variables) for p in extra_negative_prompts]
 
-            task_rng = random.Random(task_seed)  # may bind to inpaint noise in the future
-            task_prompt = apply_wildcards(prompt, task_rng, i, async_task.read_wildcards_in_order)
-            task_prompt = apply_arrays(task_prompt, i)
-            task_negative_prompt = apply_wildcards(negative_prompt, task_rng, i, async_task.read_wildcards_in_order)
-            task_extra_positive_prompts = [apply_wildcards(pmt, task_rng, i, async_task.read_wildcards_in_order) for pmt
-                                           in
-                                           extra_positive_prompts]
-            task_extra_negative_prompts = [apply_wildcards(pmt, task_rng, i, async_task.read_wildcards_in_order) for pmt
-                                           in
-                                           extra_negative_prompts]
+            for i in range(image_number):
+                global_task_idx = combo_idx * image_number + i
+                if disable_seed_increment:
+                    task_seed = async_task.seed % (constants.MAX_SEED + 1)
+                else:
+                    task_seed = (async_task.seed + global_task_idx) % (constants.MAX_SEED + 1)
 
-            positive_basic_workloads = []
-            negative_basic_workloads = []
+                task_rng = random.Random(task_seed)
+                task_prompt = apply_wildcards(combo_prompt, task_rng, global_task_idx, async_task.read_wildcards_in_order)
+                task_prompt = apply_arrays(task_prompt, global_task_idx)
+                task_negative_prompt = apply_wildcards(combo_negative_prompt, task_rng, global_task_idx, async_task.read_wildcards_in_order)
+                task_extra_positive_prompts = [apply_wildcards(pmt, task_rng, global_task_idx, async_task.read_wildcards_in_order) for pmt
+                                               in
+                                               combo_extra_positive]
+                task_extra_negative_prompts = [apply_wildcards(pmt, task_rng, global_task_idx, async_task.read_wildcards_in_order) for pmt
+                                               in
+                                               combo_extra_negative]
 
-            task_styles = async_task.style_selections.copy()
-            if use_style:
-                placeholder_replaced = False
+                positive_basic_workloads = []
+                negative_basic_workloads = []
 
-                for j, s in enumerate(task_styles):
-                    if s == random_style_name:
-                        s = get_random_style(task_rng)
-                        task_styles[j] = s
-                    p, n, style_has_placeholder = apply_style(s, positive=task_prompt)
-                    if style_has_placeholder:
-                        placeholder_replaced = True
-                    positive_basic_workloads = positive_basic_workloads + p
-                    negative_basic_workloads = negative_basic_workloads + n
+                task_styles = async_task.style_selections.copy()
+                if use_style:
+                    placeholder_replaced = False
 
-                if not placeholder_replaced:
-                    positive_basic_workloads = [task_prompt] + positive_basic_workloads
-            else:
-                positive_basic_workloads.append(task_prompt)
+                    for j, s in enumerate(task_styles):
+                        if s == random_style_name:
+                            s = get_random_style(task_rng)
+                            task_styles[j] = s
+                        p, n, style_has_placeholder = apply_style(s, positive=task_prompt)
+                        if style_has_placeholder:
+                            placeholder_replaced = True
+                        positive_basic_workloads = positive_basic_workloads + p
+                        negative_basic_workloads = negative_basic_workloads + n
 
-            negative_basic_workloads.append(task_negative_prompt)  # Always use independent workload for negative.
+                    if not placeholder_replaced:
+                        positive_basic_workloads = [task_prompt] + positive_basic_workloads
+                else:
+                    positive_basic_workloads.append(task_prompt)
 
-            positive_basic_workloads = positive_basic_workloads + task_extra_positive_prompts
-            negative_basic_workloads = negative_basic_workloads + task_extra_negative_prompts
+                negative_basic_workloads.append(task_negative_prompt)
 
-            positive_basic_workloads = remove_empty_str(positive_basic_workloads, default=task_prompt)
-            negative_basic_workloads = remove_empty_str(negative_basic_workloads, default=task_negative_prompt)
+                positive_basic_workloads = positive_basic_workloads + task_extra_positive_prompts
+                negative_basic_workloads = negative_basic_workloads + task_extra_negative_prompts
 
-            tasks.append(dict(
-                task_seed=task_seed,
-                task_prompt=task_prompt,
-                task_negative_prompt=task_negative_prompt,
-                positive=positive_basic_workloads,
-                negative=negative_basic_workloads,
-                expansion='',
-                c=None,
-                uc=None,
-                positive_top_k=len(positive_basic_workloads),
-                negative_top_k=len(negative_basic_workloads),
-                log_positive_prompt='\n'.join([task_prompt] + task_extra_positive_prompts),
-                log_negative_prompt='\n'.join([task_negative_prompt] + task_extra_negative_prompts),
-                styles=task_styles
-            ))
+                positive_basic_workloads = remove_empty_str(positive_basic_workloads, default=task_prompt)
+                negative_basic_workloads = remove_empty_str(negative_basic_workloads, default=task_negative_prompt)
+
+                tasks.append(dict(
+                    task_seed=task_seed,
+                    task_prompt=task_prompt,
+                    task_negative_prompt=task_negative_prompt,
+                    positive=positive_basic_workloads,
+                    negative=negative_basic_workloads,
+                    expansion='',
+                    c=None,
+                    uc=None,
+                    positive_top_k=len(positive_basic_workloads),
+                    negative_top_k=len(negative_basic_workloads),
+                    log_positive_prompt='\n'.join([task_prompt] + task_extra_positive_prompts),
+                    log_negative_prompt='\n'.join([task_negative_prompt] + task_extra_negative_prompts),
+                    styles=task_styles,
+                    variable_combination=variables.copy() if variables else {}
+                ))
         if use_expansion:
             if advance_progress:
                 current_progress += 1
@@ -738,7 +763,7 @@ def worker():
                 expansion = pipeline.final_expansion(t['task_prompt'], t['task_seed'])
                 print(f'[Prompt Expansion] {expansion}')
                 t['expansion'] = expansion
-                t['positive'] = copy.deepcopy(t['positive']) + [expansion]  # Deep copy.
+                t['positive'] = copy.deepcopy(t['positive']) + [expansion]
         if advance_progress:
             current_progress += 1
         for i, t in enumerate(tasks):
@@ -1228,6 +1253,16 @@ def worker():
 
         all_steps = steps * async_task.image_number
 
+        if async_task.prompt_matrix and len(async_task.prompt_matrix_config) > 0:
+            from modules.util import get_matrix_combination_count
+            matrix_count = get_matrix_combination_count(async_task.prompt_matrix_config)
+            all_steps = steps * async_task.image_number * matrix_count
+
+        effective_image_number = async_task.image_number
+        if async_task.prompt_matrix and len(async_task.prompt_matrix_config) > 0:
+            from modules.util import get_matrix_combination_count as _gmc
+            effective_image_number = async_task.image_number * _gmc(async_task.prompt_matrix_config)
+
         if async_task.enhance_checkbox and async_task.enhance_uov_method != flags.disabled.casefold():
             enhance_upscale_steps = async_task.performance_selection.steps()
             if 'upscale' in async_task.enhance_uov_method:
@@ -1236,12 +1271,12 @@ def worker():
                 else:
                     enhance_upscale_steps = async_task.performance_selection.steps_uov()
             enhance_upscale_steps, _, _, _ = apply_overrides(async_task, enhance_upscale_steps, height, width)
-            enhance_upscale_steps_total = async_task.image_number * enhance_upscale_steps
+            enhance_upscale_steps_total = effective_image_number * enhance_upscale_steps
             all_steps += enhance_upscale_steps_total
 
         if async_task.enhance_checkbox and len(async_task.enhance_ctrls) != 0:
             enhance_steps, _, _, _ = apply_overrides(async_task, async_task.original_steps, height, width)
-            all_steps += async_task.image_number * len(async_task.enhance_ctrls) * enhance_steps
+            all_steps += effective_image_number * len(async_task.enhance_ctrls) * enhance_steps
 
         all_steps = max(all_steps, 1)
 
@@ -1265,7 +1300,7 @@ def worker():
         processing_start_time = time.perf_counter()
 
         preparation_steps = current_progress
-        total_count = async_task.image_number
+        total_count = len(tasks) if len(tasks) > 0 else async_task.image_number
 
         def callback(step, x0, x, total_steps, y):
             if step == 0:
@@ -1279,7 +1314,7 @@ def worker():
         persist_image = not async_task.should_enhance or not async_task.save_final_enhanced_image_only
 
         for current_task_id, task in enumerate(tasks):
-            progressbar(async_task, current_progress, f'Preparing task {current_task_id + 1}/{async_task.image_number} ...')
+            progressbar(async_task, current_progress, f'Preparing task {current_task_id + 1}/{total_count} ...')
             execution_start_time = time.perf_counter()
 
             try:
@@ -1289,7 +1324,7 @@ def worker():
                                                                  initial_latent, async_task.steps, switch, task['c'],
                                                                  task['uc'], task, loras, tiled, use_expansion, width,
                                                                  height, current_progress, preparation_steps,
-                                                                 async_task.image_number, show_intermediate_results,
+                                                                 total_count, show_intermediate_results,
                                                                  persist_image)
 
                 current_progress = int(preparation_steps + (100 - preparation_steps) / float(all_steps) * async_task.steps * (current_task_id + 1))
