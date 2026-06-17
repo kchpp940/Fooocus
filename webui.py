@@ -459,13 +459,18 @@ with shared.gradio_root:
 
                     with gr.Tab(label='Metadata', id='metadata_tab') as metadata_tab:
                         with gr.Column():
-                            metadata_input_image = grh.Image(label='For images created by Fooocus', source='upload', type='pil')
+                            metadata_input_image = grh.Image(label='For images created by Fooocus', source='upload', type='filepath')
                             metadata_json = gr.JSON(label='Metadata')
                             metadata_import_button = gr.Button(value='Apply Metadata')
 
-                        def trigger_metadata_preview(file):
+                        def trigger_metadata_preview(filepath):
                             service = get_metadata_service()
-                            parsed = service.parse_from_image(file)
+                            if filepath is None:
+                                return {}
+                            try:
+                                parsed = service.parse_from_image_with_log(filepath)
+                            except Exception as e:
+                                return {'error': f'Failed to parse metadata: {str(e)}'}
 
                             results = {}
                             if parsed.raw is not None:
@@ -478,10 +483,132 @@ with shared.gradio_root:
 
                             results['source'] = parsed.source
 
+                            if MetadataSource.PRIVATE_LOG in str(parsed.source):
+                                results['note'] = 'Embedded metadata merged with private log fields (log.html).'
+
                             return results
 
                         metadata_input_image.upload(trigger_metadata_preview, inputs=metadata_input_image,
                                                     outputs=metadata_json, queue=False, show_progress=True)
+
+                    with gr.Tab(label='Parameter Compare', id='compare_tab') as compare_tab:
+                        with gr.Row():
+                            with gr.Column():
+                                compare_image_left = grh.Image(label='Base Image (left side)', source='upload', type='filepath')
+                            with gr.Column():
+                                compare_image_right = grh.Image(label='Target Image (right side, to import)', source='upload', type='filepath')
+
+                        with gr.Row():
+                            compare_run_button = gr.Button(value='Compare Parameters', variant='primary')
+                            compare_fill_diff_button = gr.Button(value='Apply only different parameters')
+                            compare_fill_all_button = gr.Button(value='Apply all target parameters')
+
+                        with gr.Row():
+                            compare_summary_html = gr.HTML(value='Upload two Fooocus images and click Compare.')
+                        with gr.Row():
+                            compare_diff_json = gr.JSON(label='Parameter Differences')
+
+                        def trigger_compare(left_path, right_path):
+                            service = get_metadata_service()
+                            if not left_path or not right_path:
+                                return 'Please upload both images.', {}
+                            try:
+                                base_parsed = service.parse_from_image_with_log(left_path)
+                                target_parsed = service.parse_from_image_with_log(right_path)
+                            except Exception as e:
+                                return f'Failed to parse metadata: {str(e)}', {}
+
+                            diff = service.diff(base_parsed, target_parsed)
+
+                            summary_lines = [
+                                f'<h3 style="color:#444;">Difference Summary</h3>',
+                                f'<p>Total compared fields: <b>{diff.same_count + diff.diff_count}</b> | '
+                                f'Same: <b style="color:green;">{diff.same_count}</b> | '
+                                f'Different: <b style="color:red;">{diff.diff_count}</b></p>',
+                                '<hr/>'
+                            ]
+
+                            table_rows = ''
+                            for item in diff.items:
+                                bg = '#e8ffe8' if item.same else '#ffe8e8'
+                                status = '<span style="color:green;">SAME</span>' if item.same else '<span style="color:red;">DIFF</span>'
+                                left_val = str(item.left_value).replace('<', '&lt;').replace('>', '&gt;')
+                                right_val = str(item.right_value).replace('<', '&lt;').replace('>', '&gt;')
+                                table_rows += (
+                                    f'<tr style="background:{bg};">'
+                                    f'<td><b>{item.label}</b><br/><small style="color:#888;">{item.key}</small></td>'
+                                    f'<td><small>{left_val[:120]}</small></td>'
+                                    f'<td><small>{right_val[:120]}</small></td>'
+                                    f'<td>{status}</td>'
+                                    f'</tr>'
+                                )
+
+                            if table_rows:
+                                summary_lines.append(
+                                    '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
+                                    '<thead><tr style="background:#ddd;">'
+                                    '<th style="width:25%;">Field</th>'
+                                    '<th style="width:30%;">Base</th>'
+                                    '<th style="width:30%;">Target</th>'
+                                    '<th style="width:15%;">Status</th>'
+                                    '</tr></thead>'
+                                    f'<tbody>{table_rows}</tbody></table>'
+                                )
+                            else:
+                                summary_lines.append('<p>No fields to compare.</p>')
+
+                            summary_html = '\n'.join(summary_lines)
+
+                            diff_display = {
+                                'summary': {
+                                    'total_fields': diff.same_count + diff.diff_count,
+                                    'same': diff.same_count,
+                                    'different': diff.diff_count
+                                },
+                                'differences': [
+                                    {
+                                        'field': item.label,
+                                        'key': item.key,
+                                        'base_value': item.left_value,
+                                        'target_value': item.right_value,
+                                        'same': item.same
+                                    }
+                                    for item in diff.items
+                                ]
+                            }
+
+                            return summary_html, diff_display
+
+                        compare_run_button.click(trigger_compare,
+                                                 inputs=[compare_image_left, compare_image_right],
+                                                 outputs=[compare_summary_html, compare_diff_json],
+                                                 queue=False, show_progress=True)
+
+                        def trigger_compare_fill(left_path, right_path, is_generating, fill_mode):
+                            service = get_metadata_service()
+                            if not left_path or not right_path:
+                                return service.load_parameters({}, is_generating, inpaint_mode)
+
+                            diff, fill_params = service.diff_and_get_fill_parameters(
+                                base=left_path,
+                                target=right_path,
+                                is_generating=is_generating,
+                                inpaint_mode=inpaint_mode,
+                                fill_mode=fill_mode
+                            )
+                            return fill_params
+
+                        compare_fill_diff_button.click(
+                            lambda l, r, g: trigger_compare_fill(l, r, g, 'diff_only'),
+                            inputs=[compare_image_left, compare_image_right, state_is_generating],
+                            outputs=load_data_outputs, queue=False, show_progress=True
+                        ).then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)
+
+                        compare_fill_all_button.click(
+                            lambda l, r, g: trigger_compare_fill(l, r, g, 'target_all'),
+                            inputs=[compare_image_left, compare_image_right, state_is_generating],
+                            outputs=load_data_outputs, queue=False, show_progress=True
+                        ).then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)
 
             with gr.Row(visible=modules.config.default_enhance_checkbox) as enhance_input_panel:
                 with gr.Tabs():
@@ -1184,14 +1311,22 @@ with shared.gradio_root:
 
         load_parameter_button.click(load_parameters_from_prompt, inputs=[prompt, state_is_generating, inpaint_mode], outputs=load_data_outputs, queue=False, show_progress=False)
 
-        def trigger_metadata_import(file, state_is_generating):
+        def trigger_metadata_import(filepath, state_is_generating):
             service = get_metadata_service()
-            parsed = service.parse_from_image(file)
-            if parsed.raw is None:
-                print('Could not find metadata in the image!')
+            if filepath is None:
+                print('No image provided for metadata import!')
+                return service.load_parameters({}, state_is_generating, inpaint_mode)
+            try:
+                parsed = service.parse_from_image_with_log(filepath)
+            except Exception as e:
+                print(f'Could not parse metadata from image: {e}')
                 parsed_parameters = {}
             else:
-                parsed_parameters = parsed.to_dict()
+                if parsed.raw is None:
+                    print('Could not find metadata in the image!')
+                    parsed_parameters = {}
+                else:
+                    parsed_parameters = parsed.to_dict()
 
             return service.load_parameters(parsed_parameters, state_is_generating, inpaint_mode)
 

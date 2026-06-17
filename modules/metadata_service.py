@@ -1,7 +1,10 @@
 import json
+import os
 import re
+import urllib.parse
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Optional
 
@@ -19,6 +22,8 @@ from modules.util import quote, unquote, extract_styles_from_prompt, is_json, ge
 re_param_code = r'\s*(\w[\w \-/]+):\s*("(?:\\.|[^\\"])+"|[^,]*)(?:,|$)'
 re_param = re.compile(re_param_code)
 re_imagesize = re.compile(r"^(\d+)x(\d+)$")
+re_log_div_id = re.compile(r'id="([^"]+)"')
+re_log_clipboard = re.compile(r"to_clipboard\('([^']+)'\)")
 
 
 class MetadataSource:
@@ -756,6 +761,227 @@ class MetadataService:
                 result.diff_count += 1
 
         return result
+
+    def parse_from_image_with_log(self, image_path: str) -> ParsedMetadata:
+        image_path_obj = Path(image_path)
+        try:
+            with Image.open(image_path_obj) as img:
+                parsed = self.parse_from_image(img)
+        except Exception:
+            parsed = ParsedMetadata(source=MetadataSource.UNKNOWN, scheme=None, raw=None)
+
+        log_path = image_path_obj.parent / "log.html"
+        image_basename = image_path_obj.name
+
+        if log_path.exists():
+            log_parsed = self.parse_from_log_html(str(log_path), image_basename)
+            if log_parsed is not None:
+                parsed = self.merge_metadata(parsed, log_parsed)
+
+        return parsed
+
+    def parse_from_pil_with_log(self, pil_image, optional_filepath: str | None = None) -> ParsedMetadata:
+        parsed = self.parse_from_image(pil_image)
+
+        if optional_filepath:
+            image_path_obj = Path(optional_filepath)
+            log_path = image_path_obj.parent / "log.html"
+            image_basename = image_path_obj.name
+            if log_path.exists():
+                log_parsed = self.parse_from_log_html(str(log_path), image_basename)
+                if log_parsed is not None:
+                    parsed = self.merge_metadata(parsed, log_parsed)
+
+        return parsed
+
+    def parse_from_log_html(self, log_html_path: str, image_filename: str | None = None) -> Optional[ParsedMetadata]:
+        path = Path(log_html_path)
+        if not path.exists():
+            return None
+
+        try:
+            html_content = path.read_text(encoding='utf-8')
+        except Exception:
+            return None
+
+        div_id = Path(image_filename).name.replace('.', '_') if image_filename else None
+
+        all_entries = self._extract_all_log_entries(html_content)
+
+        selected_raw = None
+
+        if div_id is not None and div_id in all_entries:
+            selected_raw = all_entries[div_id]
+        elif len(all_entries) > 0:
+            for entry_id, entry_data in all_entries.items():
+                if image_filename is None:
+                    selected_raw = entry_data
+                    break
+                src = entry_data.get("__image_src__", "")
+                if src and Path(src).name == image_filename:
+                    selected_raw = entry_data
+                    break
+
+        if selected_raw is None:
+            return None
+
+        clean_raw = {k: v for k, v in selected_raw.items() if not k.startswith("__")}
+
+        return self.parse_raw(clean_raw, source=MetadataSource.PRIVATE_LOG)
+
+    def _extract_all_log_entries(self, html_content: str) -> dict:
+        result = {}
+
+        split_parts = html_content.split('<!--fooocus-log-split-->')
+        if len(split_parts) >= 2:
+            middle = split_parts[1]
+        else:
+            middle = html_content
+
+        container_pattern = re.compile(
+            r'<div\s+id="([^"]+)"\s+class="image-container">',
+            re.DOTALL
+        )
+
+        ids_positions = [(m.group(1), m.start(), m.end()) for m in container_pattern.finditer(middle)]
+
+        for idx, (entry_id, start_tag_start, start_tag_end) in enumerate(ids_positions):
+            if idx + 1 < len(ids_positions):
+                next_start = ids_positions[idx + 1][1]
+                container_html = middle[start_tag_end:next_start]
+            else:
+                container_html = middle[start_tag_end:]
+
+            end_tag = container_html.rfind('</div>')
+            if end_tag != -1:
+                container_html = container_html[:end_tag]
+
+            entry = {}
+
+            img_match = re.search(r"<img\s+src='([^']+)'", container_html)
+            if img_match:
+                entry["__image_src__"] = img_match.group(1)
+
+            clipboard_match = re.search(r"to_clipboard\('([^']+)'\)", container_html)
+            if clipboard_match:
+                try:
+                    raw_json_str = urllib.parse.unquote(clipboard_match.group(1))
+                    clipboard_data = json.loads(raw_json_str)
+                    if isinstance(clipboard_data, dict):
+                        entry.update(clipboard_data)
+                except Exception:
+                    pass
+
+            label_value_pairs = re.findall(
+                r"<tr><td\s+class='label'>(.*?)</td><td\s+class='value'>(.*?)</td></tr>",
+                container_html,
+                re.DOTALL
+            )
+            for label_html, value_html in label_value_pairs:
+                label = re.sub(r"<[^>]+>", "", label_html).strip()
+                value = re.sub(r"<[^>]+>", "", value_html).strip()
+                value = value.replace(" </br> ", "\n")
+                value = value.replace("<br>", "\n").replace("</br>", "\n")
+                for key, defn in self._field_definitions.items():
+                    if defn.get("label") == label:
+                        if key not in entry:
+                            entry[key] = value
+                        break
+
+            if len(entry) > 0:
+                result[entry_id] = entry
+
+        return result
+
+    def merge_metadata(self, embedded: ParsedMetadata, private_log: ParsedMetadata) -> ParsedMetadata:
+        merged = ParsedMetadata(
+            source=f"{embedded.source}+{private_log.source}" if embedded.source != private_log.source else embedded.source,
+            scheme=embedded.scheme if embedded.scheme is not None else private_log.scheme,
+            raw={"embedded": embedded.raw, "private_log": private_log.raw}
+        )
+
+        all_keys = set()
+        all_keys.update(embedded.fields.keys())
+        all_keys.update(private_log.fields.keys())
+
+        for key in all_keys:
+            embedded_field = embedded.get_field(key)
+            private_field = private_log.get_field(key)
+            label = self._field_definitions.get(key, {}).get("label", key)
+
+            if embedded_field is not None and embedded_field.valid and embedded_field.value is not None:
+                if embedded_field.value != self._field_definitions.get(key, {}).get("default"):
+                    result_field = FieldResult(
+                        key=key,
+                        label=label,
+                        value=embedded_field.value,
+                        valid=True,
+                        source=embedded_field.source,
+                        raw_value=embedded_field.raw_value
+                    )
+                    merged.fields[key] = result_field
+                    continue
+
+            if private_field is not None and private_field.valid:
+                result_field = FieldResult(
+                    key=key,
+                    label=label,
+                    value=private_field.value,
+                    valid=True,
+                    source=private_field.source,
+                    raw_value=private_field.raw_value
+                )
+                merged.fields[key] = result_field
+                continue
+
+            if embedded_field is not None:
+                merged.fields[key] = embedded_field
+            elif private_field is not None:
+                merged.fields[key] = private_field
+
+        return merged
+
+    def diff_and_get_fill_parameters(self, base: Any, target: Any, is_generating: bool,
+                                     inpaint_mode: str,
+                                     base_scheme: Optional[MetadataScheme] = None,
+                                     target_scheme: Optional[MetadataScheme] = None,
+                                     fill_mode: str = "diff_only") -> tuple:
+        base_parsed = self._coerce_to_parsed(base, base_scheme)
+        target_parsed = self._coerce_to_parsed(target, target_scheme)
+
+        diff = self.diff(base_parsed, target_parsed)
+
+        if fill_mode == "target_all":
+            fill_dict = target_parsed.to_dict()
+        elif fill_mode == "diff_only":
+            fill_dict = {}
+            for item in diff.items:
+                if not item.same and item.right_value is not None:
+                    fill_dict[item.key] = item.right_value
+        else:
+            fill_dict = base_parsed.to_dict()
+
+        fill_params = self.load_parameters(fill_dict, is_generating, inpaint_mode)
+
+        return diff, fill_params
+
+    def _coerce_to_parsed(self, value: Any, scheme: Optional[MetadataScheme] = None) -> ParsedMetadata:
+        if isinstance(value, ParsedMetadata):
+            return value
+        if isinstance(value, (dict, str)):
+            return self.parse_raw(value, scheme=scheme)
+        if isinstance(value, Path) or (isinstance(value, str) and Path(value).exists() and Path(value).suffix.lower() in ['.png', '.jpg', '.jpeg', '.webp']):
+            try:
+                return self.parse_from_image_with_log(str(value))
+            except Exception:
+                pass
+        try:
+            from PIL import Image as PILImage
+            if isinstance(value, PILImage.Image):
+                return self.parse_from_image(value)
+        except Exception:
+            pass
+        return ParsedMetadata(source=MetadataSource.UNKNOWN, scheme=None, raw=None)
 
     def build_output_metadata(self, task_data: dict, scheme: MetadataScheme) -> str:
         if scheme == MetadataScheme.FOOOCUS:
