@@ -17,15 +17,13 @@ import args_manager
 import copy
 import launch
 from extras.inpaint_mask import SAMOptions
-from modules.resource_service import ResourceType, get_resource_service
 
 from modules.sdxl_styles import legal_style_names
 from modules.private_logger import get_current_html_path
 from modules.ui_gradio_extensions import reload_javascript
 from modules.auth import auth_enabled, check_auth
 from modules.util import is_json
-
-resource_service = get_resource_service()
+from modules.metadata_service import get_metadata_service, MetadataSource
 
 
 def build_preset_data_from_ui(*args):
@@ -466,16 +464,9 @@ with shared.gradio_root:
                             metadata_import_button = gr.Button(value='Apply Metadata')
 
                         def trigger_metadata_preview(file):
-                            parameters, metadata_scheme = modules.meta_parser.read_info_from_image(file)
-
-                            results = {}
-                            if parameters is not None:
-                                results['parameters'] = parameters
-
-                            if isinstance(metadata_scheme, flags.MetadataScheme):
-                                results['metadata_scheme'] = metadata_scheme.value
-
-                            return results
+                            service = get_metadata_service()
+                            metadata = service.parse_from_image(file)
+                            return metadata.to_dict()
 
                         metadata_input_image.upload(trigger_metadata_preview, inputs=metadata_input_image,
                                                     outputs=metadata_json, queue=False, show_progress=True)
@@ -1003,50 +994,6 @@ with shared.gradio_root:
                         freeu_s2 = gr.Slider(label='S2', minimum=0, maximum=4, step=0.01, value=0.95)
                         freeu_ctrls = [freeu_enabled, freeu_b1, freeu_b2, freeu_s1, freeu_s2]
 
-                    with gr.Tab(label='Resource Center'):
-                        gr.Markdown('### Resource Center')
-                        gr.Markdown('Unified path-level resource status, download targets, per-path hash verification and multi-directory match info powered by `ResourceService`. All paths and directories are from config.py paths list — no arbitrary path operations.')
-                        with gr.Row():
-                            resource_type_selector = gr.Dropdown(
-                                label='Resource Type',
-                                choices=[rt.value for rt in ResourceType],
-                                value=ResourceType.CHECKPOINT.value,
-                                scale=2
-                            )
-                            resource_center_refresh = gr.Button('🔄 Refresh', variant='secondary', scale=1)
-                        resource_center_html = gr.HTML(value='')
-                        gr.Markdown('#### Operations (path-level, from config paths only)')
-                        with gr.Row():
-                            with gr.Column(scale=1):
-                                resource_operation = gr.Radio(
-                                    label='Operation',
-                                    choices=[
-                                        'Download',
-                                        'Rehash',
-                                        'Scan type'
-                                    ],
-                                    value='Download'
-                                )
-                            with gr.Column(scale=2):
-                                resource_name_selector = gr.Dropdown(
-                                    label='Resource Name',
-                                    choices=[],
-                                    allow_custom_value=True,
-                                    info='Select from scanned files, or type a filename for new downloads'
-                                )
-                                resource_target_selector = gr.Dropdown(
-                                    label='Target Directory / Path',
-                                    choices=[],
-                                    value=None,
-                                    info='For Download: target directory (index 0 = highest priority). For Rehash: file path to verify.'
-                                )
-                                resource_url_input = gr.Textbox(
-                                    label='Download URL (optional, for custom downloads)',
-                                    placeholder='https://...'
-                                )
-                                resource_execute_btn = gr.Button('Execute', variant='primary')
-                        resource_operation_result = gr.Textbox(label='Result', interactive=False, visible=False)
-
                 def dev_mode_checked(r):
                     return gr.update(visible=r)
 
@@ -1071,276 +1018,6 @@ with shared.gradio_root:
                 refresh_files.click(refresh_files_clicked, [], refresh_files_output + lora_ctrls,
                                     queue=False, show_progress=False)
 
-                def render_resource_center(resource_type_value):
-                    from modules.resource_service import ResourceType
-                    try:
-                        resource_type = ResourceType(resource_type_value)
-                    except ValueError:
-                        return '<div style="color: red;">Invalid resource type</div>'
-                    status = resource_service.get_resource_status(resource_type)
-                    directories = resource_service.get_directories_for_type(resource_type)
-                    html_parts = []
-                    html_parts.append(f'<div style="margin-bottom: 12px;"><strong>Directories (priority order):</strong><ol style="margin: 4px 0; padding-left: 20px;">')
-                    for i, d in enumerate(directories):
-                        priority_label = ' (highest priority)' if i == 0 else ''
-                        html_parts.append(f'<li><code style="font-size: 11px;">{d}</code> <small>(index={i}{priority_label})</small></li>')
-                    html_parts.append('</ol></div>')
-                    total = len(status)
-                    available = sum(1 for s in status.values() if s.get('is_downloaded'))
-                    html_parts.append(f'<div style="margin-bottom: 12px;"><strong>Summary:</strong> {available}/{total} available</div>')
-                    html_parts.append('<table style="width: 100%; border-collapse: collapse; font-size: 12px;">')
-                    html_parts.append('<thead><tr style="background: #f0f0f0;">')
-                    html_parts.append('<th style="text-align: left; padding: 6px; border: 1px solid #ddd;">Name</th>')
-                    html_parts.append('<th style="text-align: left; padding: 6px; border: 1px solid #ddd;">Status</th>')
-                    html_parts.append('<th style="text-align: left; padding: 6px; border: 1px solid #ddd;">Size</th>')
-                    html_parts.append('<th style="text-align: left; padding: 6px; border: 1px solid #ddd;">Hash</th>')
-                    html_parts.append('<th style="text-align: left; padding: 6px; border: 1px solid #ddd;">All Matches (directory index order)</th>')
-                    html_parts.append('</tr></thead><tbody>')
-                    for name, info in status.items():
-                        is_downloaded = info.get('is_downloaded', False)
-                        download_status = info.get('download_status', 'idle')
-                        download_progress = info.get('download_progress', 0)
-                        download_error = info.get('download_error', None)
-                        size = info.get('size', None)
-                        if isinstance(size, int) and size > 0:
-                            size_str = f'{size / (1024*1024):.1f} MB'
-                        else:
-                            size_str = 'N/A'
-                        hash_val = info.get('hash', None)
-                        hash_truncated = hash_val[:10] + '...' if hash_val and len(hash_val) > 10 else (hash_val or 'N/A')
-                        all_matches = info.get('all_matches', [])
-                        if download_status == 'downloading':
-                            status_label = f'<span style="color: #f59e0b;">⬇ Downloading {download_progress:.1f}%</span>'
-                        elif download_status == 'failed':
-                            err = download_error or 'download failed'
-                            status_label = f'<span style="color: #ef4444;">❌ Failed: {err}</span>'
-                        elif is_downloaded:
-                            status_label = '<span style="color: #10b981;">✅ Available</span>'
-                        else:
-                            status_label = '<span style="color: #9ca3af;">⭕ Not downloaded</span>'
-                        matches_html = ''
-                        if all_matches:
-                            matches_html = '<ul style="margin: 0; padding-left: 16px; font-size: 11px; list-style: none;">'
-                            sorted_matches = sorted(all_matches, key=lambda m: m.get('directory_index', 999))
-                            for m in sorted_matches:
-                                primary = m.get('is_primary', False)
-                                dir_idx = m.get('directory_index', -1)
-                                m_path = m.get('path', '')
-                                m_size = m.get('size', None)
-                                m_hash = m.get('hash', None)
-                                m_hash_status = m.get('hash_status', 'unknown')
-                                size_info = ''
-                                if isinstance(m_size, int) and m_size > 0:
-                                    size_info = f' · {m_size / (1024*1024):.1f} MB'
-                                hash_info = ''
-                                if m_hash:
-                                    hash_short = m_hash[:10] + '...' if len(m_hash) > 10 else m_hash
-                                    hash_info = f' <span style="font-family: monospace;">{hash_short}</span> <small>({m_hash_status})</small>'
-                                else:
-                                    hash_info = f' <small>({m_hash_status})</small>'
-                                primary_badge = ' <span style="background: #d1fae5; color: #065f46; padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: bold;">★ Primary</span>' if primary else ''
-                                primary_note = ' <small style="color: #059669;">← will be loaded</small>' if primary else ''
-                                color = '#059669' if primary else '#6b7280'
-                                matches_html += f'<li style="color: {color}; padding: 2px 0;">{primary_badge}<code>{m_path}</code>{size_info}{primary_note}<br>&nbsp;&nbsp;{hash_info}</li>'
-                            matches_html += '</ul>'
-                        else:
-                            matches_html = '<span style="color: #9ca3af; font-size: 11px;">no matches</span>'
-                        html_parts.append('<tr>')
-                        html_parts.append(f'<td style="padding: 6px; border: 1px solid #ddd; font-family: monospace; font-size: 11px;">{name}</td>')
-                        html_parts.append(f'<td style="padding: 6px; border: 1px solid #ddd;">{status_label}</td>')
-                        html_parts.append(f'<td style="padding: 6px; border: 1px solid #ddd;">{size_str}</td>')
-                        html_parts.append(f'<td style="padding: 6px; border: 1px solid #ddd; font-family: monospace; font-size: 10px;">{hash_truncated}</td>')
-                        html_parts.append(f'<td style="padding: 6px; border: 1px solid #ddd;">{matches_html}</td>')
-                        html_parts.append('</tr>')
-                    html_parts.append('</tbody></table>')
-                    return ''.join(html_parts)
-
-                def resource_center_refresh_clicked(resource_type_value):
-                    from modules.resource_service import ResourceType
-                    try:
-                        resource_type = ResourceType(resource_type_value)
-                    except ValueError:
-                        return '<div style="color: red;">Invalid resource type</div>'
-                    resource_service.scan_type(resource_type, force=True)
-                    modules.config.update_files()
-                    return render_resource_center(resource_type_value)
-
-                def resource_type_changed(resource_type_value):
-                    from modules.resource_service import ResourceType
-                    try:
-                        resource_type = ResourceType(resource_type_value)
-                    except ValueError:
-                        return render_resource_center(resource_type_value), gr.update(choices=[]), gr.update(choices=[])
-                    directories = resource_service.get_directories_for_type(resource_type)
-                    status = resource_service.get_resource_status(resource_type)
-                    resource_names = sorted(status.keys())
-                    return render_resource_center(resource_type_value), gr.update(choices=resource_names), gr.update(choices=[])
-
-                def resource_name_changed(resource_type_value, operation, resource_name):
-                    from modules.resource_service import ResourceType
-                    if not resource_name:
-                        return gr.update(choices=[])
-                    try:
-                        resource_type = ResourceType(resource_type_value)
-                    except ValueError:
-                        return gr.update(choices=[])
-                    if operation == 'Download':
-                        directories = resource_service.get_directories_for_type(resource_type)
-                        dir_choices = []
-                        for i, d in enumerate(directories):
-                            tag = ' [index 0, highest priority]' if i == 0 else f' [index {i}]'
-                            dir_choices.append((f'{d}{tag}', d))
-                        return gr.update(choices=dir_choices, value=directories[0] if directories else None)
-                    elif operation == 'Rehash':
-                        all_matches, _ = _get_all_matches_for_name(resource_type, resource_name)
-                        path_choices = []
-                        for m in all_matches:
-                            idx = m.get('directory_index', -1)
-                            is_primary = m.get('is_primary', False)
-                            path = m.get('path', '')
-                            hash_s = m.get('hash_status', 'unknown')
-                            prefix = '★ Primary - ' if is_primary else '  '
-                            label = f'{prefix}[idx={idx}] {path} ({hash_s})'
-                            path_choices.append((label, path))
-                        if path_choices:
-                            first_path = all_matches[0].get('path', '')
-                            return gr.update(choices=path_choices, value=first_path)
-                        return gr.update(choices=[])
-                    else:
-                        return gr.update(choices=[])
-
-                def resource_operation_changed(operation, resource_type_value, resource_name):
-                    from modules.resource_service import ResourceType
-                    try:
-                        resource_type = ResourceType(resource_type_value)
-                    except ValueError:
-                        resource_type = None
-                    is_download = operation == 'Download'
-                    is_rehash = operation == 'Rehash'
-                    is_scan = operation == 'Scan type'
-                    show_name = not is_scan
-                    show_target = not is_scan
-                    show_url = is_download
-                    target_info = 'Target directory to save the downloaded file' if is_download else ('File path to rehash' if is_rehash else '')
-                    target_label = 'Target Directory' if is_download else ('File Path' if is_rehash else 'Target')
-                    target_choices = []
-                    target_value = None
-                    if resource_type and not is_scan:
-                        if is_download:
-                            directories = resource_service.get_directories_for_type(resource_type)
-                            for i, d in enumerate(directories):
-                                tag = ' [index 0, highest priority]' if i == 0 else f' [index {i}]'
-                                target_choices.append((f'{d}{tag}', d))
-                            target_value = directories[0] if directories else None
-                        elif is_rehash and resource_name:
-                            all_matches, _ = _get_all_matches_for_name(resource_type, resource_name)
-                            for m in all_matches:
-                                idx = m.get('directory_index', -1)
-                                is_primary = m.get('is_primary', False)
-                                path = m.get('path', '')
-                                hash_s = m.get('hash_status', 'unknown')
-                                prefix = '★ Primary - ' if is_primary else '  '
-                                label = f'{prefix}[idx={idx}] {path} ({hash_s})'
-                                target_choices.append((label, path))
-                            if all_matches:
-                                target_value = all_matches[0].get('path', '')
-                    return [
-                        gr.update(visible=show_name),
-                        gr.update(visible=show_target, choices=target_choices, value=target_value, label=target_label, info=target_info),
-                        gr.update(visible=show_url),
-                    ]
-
-                def _get_all_matches_for_name(resource_type, resource_name):
-                    status = resource_service.get_resource_status(resource_type)
-                    if resource_name not in status:
-                        return [], None
-                    info = status[resource_name]
-                    return info.get('all_matches', []), info
-
-                def execute_resource_operation(operation, resource_type_value, resource_name, target_value, resource_url):
-                    from modules.resource_service import ResourceType
-                    try:
-                        resource_type = ResourceType(resource_type_value)
-                    except ValueError:
-                        return gr.update(value='Invalid resource type', visible=True)
-
-                    try:
-                        if operation == 'Download':
-                            if not resource_name:
-                                return gr.update(value='Please enter a resource name', visible=True)
-                            if not target_value:
-                                directories = resource_service.get_directories_for_type(resource_type)
-                                target_value = directories[0] if directories else None
-                                if not target_value:
-                                    return gr.update(value='No target directory available for this resource type', visible=True)
-                            url = resource_url.strip() if resource_url and resource_url.strip() else None
-                            result = resource_service.download_to_path(resource_type, resource_name, target_value, url=url)
-                            if result is None:
-                                msg = f'No registered resource named "{resource_name}" in {resource_type_value}. Please provide a download URL.'
-                            elif result is True:
-                                msg = f'Download started for {resource_name} → {target_value}'
-                            else:
-                                msg = f'Download may already be in progress for {resource_name}'
-                        elif operation == 'Rehash':
-                            if not target_value:
-                                return gr.update(value='Please select a file path to rehash', visible=True)
-                            hash_val = resource_service.rehash_path(resource_type, target_value)
-                            if hash_val:
-                                msg = f'Rehash completed: {hash_val}\nPath: {target_value}'
-                            else:
-                                msg = f'File not found or not a file: {target_value}'
-                        elif operation == 'Scan type':
-                            resource_service.scan_type(resource_type, force=True)
-                            modules.config.update_files()
-                            msg = f'Scan completed for {resource_type_value}'
-                        else:
-                            msg = f'Unknown operation: {operation}'
-                        return gr.update(value=msg, visible=True)
-                    except ValueError as e:
-                        return gr.update(value=f'Security: {str(e)}', visible=True)
-                    except Exception as e:
-                        return gr.update(value=f'Error: {str(e)}', visible=True)
-
-                def resource_center_full_refresh(resource_type_value):
-                    from modules.resource_service import ResourceType
-                    try:
-                        resource_type = ResourceType(resource_type_value)
-                    except ValueError:
-                        return render_resource_center(resource_type_value), gr.update(choices=[])
-                    status = resource_service.get_resource_status(resource_type)
-                    resource_names = sorted(status.keys())
-                    return render_resource_center(resource_type_value), gr.update(choices=resource_names)
-
-                resource_type_selector.change(
-                    resource_type_changed,
-                    inputs=[resource_type_selector],
-                    outputs=[resource_center_html, resource_name_selector, resource_target_selector]
-                )
-                resource_name_selector.change(
-                    resource_name_changed,
-                    inputs=[resource_type_selector, resource_operation, resource_name_selector],
-                    outputs=[resource_target_selector]
-                )
-                resource_operation.change(
-                    resource_operation_changed,
-                    inputs=[resource_operation, resource_type_selector, resource_name_selector],
-                    outputs=[resource_name_selector, resource_target_selector, resource_url_input]
-                )
-                resource_center_refresh.click(
-                    resource_center_full_refresh,
-                    inputs=[resource_type_selector],
-                    outputs=[resource_center_html, resource_name_selector]
-                )
-                resource_execute_btn.click(
-                    execute_resource_operation,
-                    inputs=[resource_operation, resource_type_selector, resource_name_selector, resource_target_selector, resource_url_input],
-                    outputs=[resource_operation_result]
-                ).then(
-                    resource_center_full_refresh,
-                    inputs=[resource_type_selector],
-                    outputs=[resource_center_html, resource_name_selector]
-                )
-
         state_is_generating = gr.State(False)
 
         load_data_outputs = [advanced_checkbox, image_number, prompt, negative_prompt, style_selections,
@@ -1354,8 +1031,10 @@ with shared.gradio_root:
 
         if not args_manager.args.disable_preset_selection:
             def preset_selection_change(preset, is_generating, inpaint_mode):
+                service = get_metadata_service()
                 preset_content = modules.config.try_get_preset_content(preset) if preset != 'initial' else {}
-                preset_prepared = modules.meta_parser.parse_meta_from_preset(preset_content)
+                metadata = service.parse_from_preset(preset_content)
+                preset_prepared = metadata.to_simple_dict()
 
                 default_model = preset_prepared.get('base_model')
                 previous_default_models = preset_prepared.get('previous_default_models', [])
@@ -1364,14 +1043,17 @@ with shared.gradio_root:
                 lora_downloads = preset_prepared.get('lora_downloads', {})
                 vae_downloads = preset_prepared.get('vae_downloads', {})
 
-                preset_prepared['base_model'], preset_prepared['checkpoint_downloads'] = launch.download_models(
+                base_model, checkpoint_downloads = launch.download_models(
                     default_model, previous_default_models, checkpoint_downloads, embeddings_downloads, lora_downloads,
                     vae_downloads)
+                metadata.set_field('base_model', base_model, source=MetadataSource.PRESET)
+                metadata.set_field('checkpoint_downloads', checkpoint_downloads, source=MetadataSource.PRESET)
 
                 if 'prompt' in preset_prepared and preset_prepared.get('prompt') == '':
-                    del preset_prepared['prompt']
+                    if 'prompt' in metadata.fields:
+                        del metadata.fields['prompt']
 
-                return modules.meta_parser.load_parameter_button_click(json.dumps(preset_prepared), is_generating, inpaint_mode)
+                return service.build_load_parameters(metadata, is_generating, inpaint_mode)
 
 
             def inpaint_engine_state_change(inpaint_engine_version, *args):
@@ -1491,15 +1173,12 @@ with shared.gradio_root:
         load_parameter_button.click(modules.meta_parser.load_parameter_button_click, inputs=[prompt, state_is_generating, inpaint_mode], outputs=load_data_outputs, queue=False, show_progress=False)
 
         def trigger_metadata_import(file, state_is_generating):
-            parameters, metadata_scheme = modules.meta_parser.read_info_from_image(file)
-            if parameters is None:
+            service = get_metadata_service()
+            metadata = service.parse_from_image(file)
+            if not metadata.fields:
                 print('Could not find metadata in the image!')
-                parsed_parameters = {}
-            else:
-                metadata_parser = modules.meta_parser.get_metadata_parser(metadata_scheme)
-                parsed_parameters = metadata_parser.to_json(parameters)
 
-            return modules.meta_parser.load_parameter_button_click(parsed_parameters, state_is_generating, inpaint_mode)
+            return service.build_load_parameters(metadata, state_is_generating, inpaint_mode)
 
         metadata_import_button.click(trigger_metadata_import, inputs=[metadata_input_image, state_is_generating], outputs=load_data_outputs, queue=False, show_progress=True) \
             .then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)

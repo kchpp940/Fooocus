@@ -18,12 +18,9 @@ ssl._create_default_https_context = ssl._create_unverified_context
 import platform
 import fooocus_version
 
-import args_manager
 from build_launcher import build_launcher
 from modules.launch_util import is_installed, run, python, run_pip, requirements_met, delete_folder_content
 from modules.model_loader import load_file_from_url
-from modules.resource_service import get_resource_service, ResourceType
-from modules.resource_registry import VAE_APPROX_RESOURCES, FOOOCUS_EXPANSION_RESOURCES
 
 REINSTALL_ALL = False
 TRY_INSTALL_XFORMERS = False
@@ -62,6 +59,14 @@ def prepare_environment():
     return
 
 
+vae_approx_filenames = [
+    ('xlvaeapp.pth', 'https://huggingface.co/lllyasviel/misc/resolve/main/xlvaeapp.pth'),
+    ('vaeapp_sd15.pth', 'https://huggingface.co/lllyasviel/misc/resolve/main/vaeapp_sd15.pt'),
+    ('xl-to-v1_interposer-v4.0.safetensors',
+     'https://huggingface.co/mashb1t/misc/resolve/main/xl-to-v1_interposer-v4.0.safetensors')
+]
+
+
 def ini_args():
     from args_manager import args
     return args
@@ -80,9 +85,7 @@ if args.hf_mirror is not None:
     print("Set hf_mirror to:", args.hf_mirror)
 
 from modules import config
-
-resource_service = get_resource_service()
-resource_service.set_config_provider(config)
+from modules.hash_cache import init_cache
 
 os.environ["U2NET_HOME"] = config.path_inpaint
 
@@ -98,22 +101,25 @@ if config.temp_path_cleanup_on_launch:
 
 
 def download_models(default_model, previous_default_models, checkpoint_downloads, embeddings_downloads, lora_downloads, vae_downloads):
-    for resource in VAE_APPROX_RESOURCES:
-        resource_service.download(resource.resource_id)
+    from modules.util import get_file_from_folder_list
 
-    for resource in FOOOCUS_EXPANSION_RESOURCES:
-        resource_service.download(resource.resource_id)
+    for file_name, url in vae_approx_filenames:
+        load_file_from_url(url=url, model_dir=config.path_vae_approx, file_name=file_name)
+
+    load_file_from_url(
+        url='https://huggingface.co/lllyasviel/misc/resolve/main/fooocus_expansion.bin',
+        model_dir=config.path_fooocus_expansion,
+        file_name='pytorch_model.bin'
+    )
 
     if args.disable_preset_download:
         print('Skipped model download.')
         return default_model, checkpoint_downloads
 
     if not args.always_download_new_model:
-        default_model_path = resource_service.get_filepath(ResourceType.CHECKPOINT, default_model)
-        if not default_model_path or not os.path.isfile(default_model_path):
+        if not os.path.isfile(get_file_from_folder_list(default_model, config.paths_checkpoints)):
             for alternative_model_name in previous_default_models:
-                alt_path = resource_service.get_filepath(ResourceType.CHECKPOINT, alternative_model_name)
-                if alt_path and os.path.isfile(alt_path):
+                if os.path.isfile(get_file_from_folder_list(alternative_model_name, config.paths_checkpoints)):
                     print(f'You do not have [{default_model}] but you have [{alternative_model_name}].')
                     print(f'Fooocus will use [{alternative_model_name}] to avoid downloading new models, '
                           f'but you are not using the latest models.')
@@ -122,10 +128,16 @@ def download_models(default_model, previous_default_models, checkpoint_downloads
                     default_model = alternative_model_name
                     break
 
-    resource_service.download_from_config(ResourceType.CHECKPOINT, checkpoint_downloads)
-    resource_service.download_from_config(ResourceType.EMBEDDING, embeddings_downloads)
-    resource_service.download_from_config(ResourceType.LORA, lora_downloads)
-    resource_service.download_from_config(ResourceType.VAE, vae_downloads)
+    for file_name, url in checkpoint_downloads.items():
+        model_dir = os.path.dirname(get_file_from_folder_list(file_name, config.paths_checkpoints))
+        load_file_from_url(url=url, model_dir=model_dir, file_name=file_name)
+    for file_name, url in embeddings_downloads.items():
+        load_file_from_url(url=url, model_dir=config.path_embeddings, file_name=file_name)
+    for file_name, url in lora_downloads.items():
+        model_dir = os.path.dirname(get_file_from_folder_list(file_name, config.paths_loras))
+        load_file_from_url(url=url, model_dir=model_dir, file_name=file_name)
+    for file_name, url in vae_downloads.items():
+        load_file_from_url(url=url, model_dir=config.path_vae, file_name=file_name)
 
     return default_model, checkpoint_downloads
 
@@ -135,11 +147,6 @@ config.default_base_model_name, config.checkpoint_downloads = download_models(
     config.embeddings_downloads, config.lora_downloads, config.vae_downloads)
 
 config.update_files()
-
-resource_service.load_hash_cache()
-if args_manager.args.rebuild_hash_cache:
-    max_workers = args_manager.args.rebuild_hash_cache if args_manager.args.rebuild_hash_cache > 0 else None
-    resource_service.rebuild_hash_cache(max_workers=max_workers)
-resource_service.save_hash_cache()
+init_cache(config.model_filenames, config.paths_checkpoints, config.lora_filenames, config.paths_loras)
 
 from webui import *

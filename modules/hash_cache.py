@@ -5,29 +5,57 @@ from multiprocessing import cpu_count
 
 import args_manager
 from modules.util import sha256, HASH_SHA256_LENGTH, get_file_from_folder_list
-from modules.resource_service import get_resource_service, ResourceType
 
 hash_cache_filename = 'hash_cache.txt'
 hash_cache = {}
 
-_resource_service = get_resource_service()
-
 
 def sha256_from_cache(filepath):
-    return _resource_service.get_hash(filepath)
+    global hash_cache
+    if filepath not in hash_cache:
+        print(f"[Cache] Calculating sha256 for {filepath}")
+        hash_value = sha256(filepath)
+        print(f"[Cache] sha256 for {filepath}: {hash_value}")
+        hash_cache[filepath] = hash_value
+        save_cache_to_file(filepath, hash_value)
+
+    return hash_cache[filepath]
 
 
 def load_cache_from_file():
-    _resource_service.load_hash_cache()
     global hash_cache
-    hash_cache = {entry.filepath: entry.hash for entry in _resource_service._hash_cache.values()}
+
+    try:
+        if os.path.exists(hash_cache_filename):
+            with open(hash_cache_filename, 'rt', encoding='utf-8') as fp:
+                for line in fp:
+                    entry = json.loads(line)
+                    for filepath, hash_value in entry.items():
+                        if not os.path.exists(filepath) or not isinstance(hash_value, str) and len(hash_value) != HASH_SHA256_LENGTH:
+                            print(f'[Cache] Skipping invalid cache entry: {filepath}')
+                            continue
+                        hash_cache[filepath] = hash_value
+    except Exception as e:
+        print(f'[Cache] Loading failed: {e}')
 
 
 def save_cache_to_file(filename=None, hash_value=None):
+    global hash_cache
+
     if filename is not None and hash_value is not None:
-        _resource_service._save_hash_cache_entry(filename, hash_value)
+        items = [(filename, hash_value)]
+        mode = 'at'
     else:
-        _resource_service.save_hash_cache()
+        items = sorted(hash_cache.items())
+        mode = 'wt'
+
+    try:
+        with open(hash_cache_filename, mode, encoding='utf-8') as fp:
+            for filepath, hash_value in items:
+                json.dump({filepath: hash_value}, fp)
+                fp.write('\n')
+    except Exception as e:
+        print(f'[Cache] Saving failed: {e}')
 
 
 def init_cache(model_filenames, paths_checkpoints, lora_filenames, paths_loras):
@@ -37,6 +65,7 @@ def init_cache(model_filenames, paths_checkpoints, lora_filenames, paths_loras):
         max_workers = args_manager.args.rebuild_hash_cache if args_manager.args.rebuild_hash_cache > 0 else cpu_count()
         rebuild_cache(lora_filenames, model_filenames, paths_checkpoints, paths_loras, max_workers)
 
+    # write cache to file again for sorting and cleanup of invalid cache entries
     save_cache_to_file()
 
 

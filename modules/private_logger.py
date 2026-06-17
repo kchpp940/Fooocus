@@ -6,8 +6,13 @@ import urllib.parse
 
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
-from modules.flags import OutputFormat
-from modules.meta_parser import MetadataParser, get_exif
+from modules.flags import OutputFormat, MetadataScheme
+from modules.metadata_service import (
+    MetadataService,
+    MetadataResult,
+    MetadataSource,
+    get_metadata_service,
+)
 from modules.util import generate_temp_filename
 
 log_cache = {}
@@ -21,27 +26,51 @@ def get_current_html_path(output_format=None):
     return html_name
 
 
-def log(img, metadata, metadata_parser: MetadataParser | None = None, output_format=None, task=None, persist_image=True) -> str:
+def log(img, metadata, metadata_parser=None, output_format=None, task=None, persist_image=True) -> str:
+    service = get_metadata_service()
     path_outputs = modules.config.temp_path if args_manager.args.disable_image_log or not persist_image else modules.config.path_outputs
     output_format = output_format if output_format else modules.config.default_output_format
     date_string, local_temp_filename, only_name = generate_temp_filename(folder=path_outputs, extension=output_format)
     os.makedirs(os.path.dirname(local_temp_filename), exist_ok=True)
 
-    parsed_parameters = metadata_parser.to_string(metadata.copy()) if metadata_parser is not None else ''
+    scheme = metadata_parser.get_scheme() if metadata_parser is not None else MetadataScheme.FOOOCUS
+
+    metadata_result = MetadataResult(scheme=scheme, source=MetadataSource.PRIVATE_LOG)
+    for label, key, value in metadata:
+        metadata_result.set_field(key, value)
+
+    if metadata_parser is not None:
+        extra_data = {
+            'full_prompt': metadata_parser.full_prompt if hasattr(metadata_parser, 'full_prompt') else [],
+            'full_negative_prompt': metadata_parser.full_negative_prompt if hasattr(metadata_parser, 'full_negative_prompt') else [],
+            'steps': metadata_parser.steps if hasattr(metadata_parser, 'steps') else 30,
+            'base_model_name': metadata_parser.base_model_name if hasattr(metadata_parser, 'base_model_name') else '',
+            'base_model_hash': metadata_parser.base_model_hash if hasattr(metadata_parser, 'base_model_hash') else '',
+            'refiner_model_name': metadata_parser.refiner_model_name if hasattr(metadata_parser, 'refiner_model_name') else '',
+            'refiner_model_hash': metadata_parser.refiner_model_hash if hasattr(metadata_parser, 'refiner_model_hash') else '',
+            'vae_name': metadata_parser.vae_name if hasattr(metadata_parser, 'vae_name') else '',
+            'loras': metadata_parser.loras if hasattr(metadata_parser, 'loras') else [],
+        }
+        parsed_parameters = service.serialize_metadata(metadata_result, scheme, extra_data)
+    else:
+        parsed_parameters = ''
+
     image = Image.fromarray(img)
 
     if output_format == OutputFormat.PNG.value:
         if parsed_parameters != '':
             pnginfo = PngInfo()
             pnginfo.add_text('parameters', parsed_parameters)
-            pnginfo.add_text('fooocus_scheme', metadata_parser.get_scheme().value)
+            pnginfo.add_text('fooocus_scheme', scheme.value)
         else:
             pnginfo = None
         image.save(local_temp_filename, pnginfo=pnginfo)
     elif output_format == OutputFormat.JPEG.value:
-        image.save(local_temp_filename, quality=95, optimize=True, progressive=True, exif=get_exif(parsed_parameters, metadata_parser.get_scheme().value) if metadata_parser else Image.Exif())
+        exif_data = service.get_exif(parsed_parameters, scheme.value) if metadata_parser else Image.Exif()
+        image.save(local_temp_filename, quality=95, optimize=True, progressive=True, exif=exif_data)
     elif output_format == OutputFormat.WEBP.value:
-        image.save(local_temp_filename, quality=95, lossless=False, exif=get_exif(parsed_parameters, metadata_parser.get_scheme().value) if metadata_parser else Image.Exif())
+        exif_data = service.get_exif(parsed_parameters, scheme.value) if metadata_parser else Image.Exif()
+        image.save(local_temp_filename, quality=95, lossless=False, exif=exif_data)
     else:
         image.save(local_temp_filename)
 
