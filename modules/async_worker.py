@@ -292,6 +292,9 @@ def worker():
         param_overrides = task.get('param_overrides', {})
         orig_cfg_scale = async_task.cfg_scale
         orig_sampler_name = async_task.sampler_name
+        orig_scheduler_name_async = async_task.scheduler_name
+        orig_steps_async = async_task.steps
+        orig_refiner_switch = async_task.refiner_switch
         orig_scheduler = final_scheduler_name
         orig_steps = steps
         orig_switch = switch
@@ -312,10 +315,13 @@ def worker():
                     async_task.sampler_name = str(val)
                 elif target == 'scheduler':
                     final_scheduler_name = str(val)
+                    async_task.scheduler_name = str(val)
                 elif target == 'steps':
                     steps = int(float(val))
+                    async_task.steps = int(float(val))
                 elif target == 'refiner_switch':
                     switch = float(val)
+                    async_task.refiner_switch = float(val)
                 elif target == 'width':
                     width = int(float(val))
                 elif target == 'height':
@@ -341,6 +347,9 @@ def worker():
             except (ValueError, TypeError, IndexError):
                 pass
 
+        imgs = None
+        img_paths = []
+        current_progress = base_progress
         try:
             if 'cn' in goals:
                 for cn_flag, cn_path in [
@@ -369,9 +378,24 @@ def worker():
                 refiner_swap_method=async_task.refiner_swap_method,
                 disable_preview=async_task.disable_preview
             )
+
+            del positive_cond, negative_cond
+            if inpaint_worker.current_task is not None:
+                imgs = [inpaint_worker.current_task.post_process(x) for x in imgs]
+            current_progress = int(base_progress + (100 - preparation_steps) / float(all_steps) * steps)
+            if modules.config.default_black_out_nsfw or async_task.black_out_nsfw:
+                progressbar(async_task, current_progress, 'Checking for NSFW content ...')
+                imgs = default_censor(imgs)
+            progressbar(async_task, current_progress, f'Saving image {current_task_id + 1}/{total_count} to system ...')
+            img_paths = save_and_log(async_task, height, imgs, task, use_expansion, width, task_loras, persist_image)
+            yield_result(async_task, img_paths, current_progress, async_task.black_out_nsfw, False,
+                         do_not_show_finished_images=not show_intermediate_results or async_task.disable_intermediate_results)
         finally:
             async_task.cfg_scale = orig_cfg_scale
             async_task.sampler_name = orig_sampler_name
+            async_task.scheduler_name = orig_scheduler_name_async
+            async_task.steps = orig_steps_async
+            async_task.refiner_switch = orig_refiner_switch
             async_task.sharpness = orig_sharpness
             async_task.adaptive_cfg = orig_adaptive_cfg
             if orig_loras is not None:
@@ -389,18 +413,6 @@ def worker():
             switch = orig_switch
             width = orig_width
             height = orig_height
-
-        del positive_cond, negative_cond
-        if inpaint_worker.current_task is not None:
-            imgs = [inpaint_worker.current_task.post_process(x) for x in imgs]
-        current_progress = int(base_progress + (100 - preparation_steps) / float(all_steps) * steps)
-        if modules.config.default_black_out_nsfw or async_task.black_out_nsfw:
-            progressbar(async_task, current_progress, 'Checking for NSFW content ...')
-            imgs = default_censor(imgs)
-        progressbar(async_task, current_progress, f'Saving image {current_task_id + 1}/{total_count} to system ...')
-        img_paths = save_and_log(async_task, height, imgs, task, use_expansion, width, task_loras, persist_image)
-        yield_result(async_task, img_paths, current_progress, async_task.black_out_nsfw, False,
-                     do_not_show_finished_images=not show_intermediate_results or async_task.disable_intermediate_results)
 
         return imgs, img_paths, current_progress
 
