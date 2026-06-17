@@ -31,6 +31,8 @@ class DirectoryMatch:
     directory_path: str
     size: Optional[int] = None
     last_modified: Optional[float] = None
+    hash: Optional[str] = None
+    hash_status: str = "unverified"
 
 
 @dataclass
@@ -184,13 +186,17 @@ class ResourceService:
 
                     try:
                         stat = os.stat(full_path)
+                        abs_path = os.path.abspath(full_path)
+                        cached_hash, hash_status = self._get_cached_hash_for_path(abs_path, stat)
                         match = DirectoryMatch(
                             name=filename,
-                            path=full_path,
+                            path=abs_path,
                             directory_index=dir_index,
                             directory_path=directory,
                             size=stat.st_size,
                             last_modified=stat.st_mtime,
+                            hash=cached_hash,
+                            hash_status=hash_status,
                         )
                     except OSError:
                         match = DirectoryMatch(
@@ -198,6 +204,7 @@ class ResourceService:
                             path=full_path,
                             directory_index=dir_index,
                             directory_path=directory,
+                            hash_status="unverified",
                         )
 
                     if filename not in matches_by_name:
@@ -220,6 +227,8 @@ class ResourceService:
                 directory_path=primary_match.directory_path,
                 is_primary=True,
                 all_matches=matches,
+                hash=primary_match.hash,
+                hash_verified=primary_match.hash_status == "verified" or primary_match.hash_status == "cached",
                 size=primary_match.size,
                 last_modified=primary_match.last_modified,
             )
@@ -231,6 +240,23 @@ class ResourceService:
         self._instance_name_index.update(
             {(resource_type, inst.name): inst for inst in instances}
         )
+
+    def _get_cached_hash_for_path(
+        self, filepath: str, stat_result: Any
+    ) -> Tuple[Optional[str], str]:
+        filepath = os.path.abspath(filepath)
+        with self._hash_lock:
+            if filepath in self._hash_cache:
+                entry = self._hash_cache[filepath]
+                try:
+                    if (
+                        entry.last_modified == stat_result.st_mtime
+                        and entry.size == stat_result.st_size
+                    ):
+                        return entry.hash, "cached"
+                except (OSError, AttributeError):
+                    pass
+        return None, "unverified"
 
     def get_instances_by_type(self, resource_type: ResourceType) -> List[ResourceInstance]:
         if resource_type not in self._scanned_instances:
@@ -706,10 +732,39 @@ class ResourceService:
         filepath = os.path.abspath(filepath)
         if not os.path.isfile(filepath):
             return None
+
+        if not self._is_path_in_resource_directories(resource_type, filepath):
+            raise ValueError(
+                f"Path is not within any configured {resource_type.value} directories: {filepath}"
+            )
+
         hash_val = self.get_hash(filepath, force_recompute=True)
         self.scan_type(resource_type, force=True)
         self._notify_observers()
         return hash_val
+
+    def is_valid_resource_directory(
+        self, resource_type: ResourceType, directory: str
+    ) -> bool:
+        directory = os.path.abspath(directory)
+        directories = self._get_directories_for_type(resource_type)
+        abs_dirs = [os.path.abspath(d) for d in directories]
+        return directory in abs_dirs
+
+    def _is_path_in_resource_directories(
+        self, resource_type: ResourceType, filepath: str
+    ) -> bool:
+        filepath = os.path.abspath(filepath)
+        directories = self._get_directories_for_type(resource_type)
+        for d in directories:
+            abs_dir = os.path.abspath(d)
+            try:
+                common = os.path.commonpath([abs_dir, filepath])
+                if common == abs_dir:
+                    return True
+            except ValueError:
+                continue
+        return False
 
     def download_to_path(
         self,
@@ -720,6 +775,12 @@ class ResourceService:
         on_progress: Optional[Callable[[DownloadState], None]] = None,
     ) -> Optional[bool]:
         target_dir = os.path.abspath(target_dir)
+
+        if not self.is_valid_resource_directory(resource_type, target_dir):
+            raise ValueError(
+                f"Target directory is not in the configured {resource_type.value} directory list: {target_dir}"
+            )
+
         os.makedirs(target_dir, exist_ok=True)
 
         definitions = get_resources_by_type(resource_type)
@@ -863,6 +924,9 @@ class ResourceService:
                         "directory_path": match.directory_path,
                         "size": match.size,
                         "last_modified": match.last_modified,
+                        "hash": match.hash,
+                        "hash_status": match.hash_status,
+                        "exists": True,
                         "is_primary": match.directory_index == instance.directory_index,
                     })
                 status["all_matches"] = all_hits_info

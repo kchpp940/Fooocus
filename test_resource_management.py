@@ -329,7 +329,6 @@ def test_architecture_integrity():
         "get_resource_status",
         "resource_service.get_directories_for_type",
         "download_to_path",
-        "rehash_by_name",
         "rehash_path",
         "all_matches",
         "is_primary",
@@ -342,45 +341,50 @@ def test_architecture_integrity():
     else:
         print("  ⚠️  Resource Center may not be fully integrated with ResourceService")
 
-    print("\n9. Checking resource_service has path-level APIs for WebUI:")
+    print("\n9. Checking resource_service has full path-level state and APIs:")
     service_source = read_file('modules/resource_service.py')
-    has_path_apis = all(kw in service_source for kw in [
+    has_full_path_state = all(kw in service_source for kw in [
         "def download_by_name",
         "def download_to_path",
         "def rehash_by_name",
         "def rehash_path",
         "def _download_to_target_dir",
         "def get_resource_status",
+        "def is_valid_resource_directory",
+        "def _is_path_in_resource_directories",
+        "hash_status",
         "all_matches",
         "is_primary",
         "directory_index",
     ])
-    if has_path_apis:
-        print("  ✓ download_by_name() - download by type+filename (defaults to dir index 0)")
+    if has_full_path_state:
+        print("  ✓ DirectoryMatch has hash + hash_status per path")
         print("  ✓ download_to_path() - download to a user-specified target directory")
-        print("  ✓ rehash_by_name() - rehash the primary (index 0) path only")
-        print("  ✓ rehash_path() - rehash a specific file path (any directory)")
-        print("  ✓ get_resource_status() - returns rich status with all_matches, is_primary, directory_index")
+        print("  ✓ rehash_path() - rehash a specific file path")
+        print("  ✓ is_valid_resource_directory() - validates dir is in config list")
+        print("  ✓ _is_path_in_resource_directories() - validates file path")
+        print("  ✓ get_resource_status() - all_matches returns per-path hash / hash_status / exists / is_primary")
     else:
-        print("  ⚠️  Some path-level APIs may be missing")
+        print("  ⚠️  Some path-level features may be missing")
 
-    print("\n10. Checking webui.py operations are path-level:")
+    print("\n10. Checking webui.py operations are path-level from structured state:")
     webui_source = read_file('webui.py')
-    has_path_ops = all(kw in webui_source for kw in [
-        "Download (pick target dir)",
-        "Rehash (primary path)",
-        "Rehash (specific path)",
-        "resource_target_dir",
-        "resource_specific_path",
+    has_structured_ops = all(kw in webui_source for kw in [
+        "resource_name_selector",
+        "resource_target_selector",
+        "all_matches",
         "download_to_path",
         "rehash_path",
+        "from config paths only",
     ])
-    if has_path_ops:
-        print("  ✓ Download now lets user pick target directory (not just dir index 0)")
-        print("  ✓ Rehash split into primary-path vs specific-path operations")
-        print("  ✓ Target directory and specific path are explicit inputs, not hidden defaults")
+    if has_structured_ops:
+        print("  ✓ Resource names are populated from runtime status (not hand-typed)")
+        print("  ✓ Targets are populated from all_matches / directories (not arbitrary paths)")
+        print("  ✓ Download uses download_to_path with directory-validity check")
+        print("  ✓ Rehash uses rehash_path with file-path-in-dirs check")
+        print("  ✓ All operations are bounded by config.py path list (security)")
     else:
-        print("  ⚠️  Path-level operations may not be fully wired in webui.py")
+        print("  ⚠️  Structured path-level operations may not be fully wired in webui.py")
 
     print("\n11. Checking all modified files for syntax:")
     files_to_check = [

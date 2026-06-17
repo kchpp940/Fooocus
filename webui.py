@@ -1005,7 +1005,7 @@ with shared.gradio_root:
 
                     with gr.Tab(label='Resource Center'):
                         gr.Markdown('### Resource Center')
-                        gr.Markdown('Unified path-level resource status, download targets, per-path hash verification and multi-directory match info powered by `ResourceService`.')
+                        gr.Markdown('Unified path-level resource status, download targets, per-path hash verification and multi-directory match info powered by `ResourceService`. All paths and directories are from config.py paths list — no arbitrary path operations.')
                         with gr.Row():
                             resource_type_selector = gr.Dropdown(
                                 label='Resource Type',
@@ -1015,34 +1015,30 @@ with shared.gradio_root:
                             )
                             resource_center_refresh = gr.Button('🔄 Refresh', variant='secondary', scale=1)
                         resource_center_html = gr.HTML(value='')
-                        gr.Markdown('#### Operations (path-level)')
+                        gr.Markdown('#### Operations (path-level, from config paths only)')
                         with gr.Row():
                             with gr.Column(scale=1):
                                 resource_operation = gr.Radio(
                                     label='Operation',
                                     choices=[
-                                        'Download (pick target dir)',
-                                        'Rehash (primary path)',
-                                        'Rehash (specific path)',
+                                        'Download',
+                                        'Rehash',
                                         'Scan type'
                                     ],
-                                    value='Download (pick target dir)'
+                                    value='Download'
                                 )
                             with gr.Column(scale=2):
-                                resource_name_input = gr.Textbox(
-                                    label='Resource Name (filename)',
-                                    placeholder='e.g. sdxl_lightning_4step_lora.safetensors'
-                                )
-                                resource_target_dir = gr.Dropdown(
-                                    label='Target Directory (for Download)',
+                                resource_name_selector = gr.Dropdown(
+                                    label='Resource Name',
                                     choices=[],
                                     allow_custom_value=True,
-                                    info='Directory to save the downloaded file (index 0 = highest priority, will be loaded first)'
+                                    info='Select from scanned files, or type a filename for new downloads'
                                 )
-                                resource_specific_path = gr.Textbox(
-                                    label='Specific File Path (for Rehash)',
-                                    placeholder='Absolute path to the file, e.g. /models/.../file.safetensors',
-                                    visible=False
+                                resource_target_selector = gr.Dropdown(
+                                    label='Target Directory / Path',
+                                    choices=[],
+                                    value=None,
+                                    info='For Download: target directory (index 0 = highest priority). For Rehash: file path to verify.'
                                 )
                                 resource_url_input = gr.Textbox(
                                     label='Download URL (optional, for custom downloads)',
@@ -1124,20 +1120,28 @@ with shared.gradio_root:
                             status_label = '<span style="color: #9ca3af;">⭕ Not downloaded</span>'
                         matches_html = ''
                         if all_matches:
-                            matches_html = '<ul style="margin: 0; padding-left: 16px; font-size: 11px;">'
+                            matches_html = '<ul style="margin: 0; padding-left: 16px; font-size: 11px; list-style: none;">'
                             sorted_matches = sorted(all_matches, key=lambda m: m.get('directory_index', 999))
                             for m in sorted_matches:
                                 primary = m.get('is_primary', False)
                                 dir_idx = m.get('directory_index', -1)
                                 m_path = m.get('path', '')
                                 m_size = m.get('size', None)
+                                m_hash = m.get('hash', None)
+                                m_hash_status = m.get('hash_status', 'unknown')
                                 size_info = ''
                                 if isinstance(m_size, int) and m_size > 0:
-                                    size_info = f' ({m_size / (1024*1024):.1f} MB)'
-                                if primary:
-                                    matches_html += f'<li style="color: #059669;"><strong>★ Primary</strong> (idx={dir_idx}): <code>{m_path}</code>{size_info} <small>&larr; will be loaded by get_file_from_folder_list()</small></li>'
+                                    size_info = f' · {m_size / (1024*1024):.1f} MB'
+                                hash_info = ''
+                                if m_hash:
+                                    hash_short = m_hash[:10] + '...' if len(m_hash) > 10 else m_hash
+                                    hash_info = f' <span style="font-family: monospace;">{hash_short}</span> <small>({m_hash_status})</small>'
                                 else:
-                                    matches_html += f'<li style="color: #6b7280;">(idx={dir_idx}): <code>{m_path}</code>{size_info}</li>'
+                                    hash_info = f' <small>({m_hash_status})</small>'
+                                primary_badge = ' <span style="background: #d1fae5; color: #065f46; padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: bold;">★ Primary</span>' if primary else ''
+                                primary_note = ' <small style="color: #059669;">← will be loaded</small>' if primary else ''
+                                color = '#059669' if primary else '#6b7280'
+                                matches_html += f'<li style="color: {color}; padding: 2px 0;">{primary_badge}<code>{m_path}</code>{size_info}{primary_note}<br>&nbsp;&nbsp;{hash_info}</li>'
                             matches_html += '</ul>'
                         else:
                             matches_html = '<span style="color: #9ca3af; font-size: 11px;">no matches</span>'
@@ -1166,27 +1170,94 @@ with shared.gradio_root:
                     try:
                         resource_type = ResourceType(resource_type_value)
                     except ValueError:
-                        return render_resource_center(resource_type_value), gr.update(choices=[])
+                        return render_resource_center(resource_type_value), gr.update(choices=[]), gr.update(choices=[])
                     directories = resource_service.get_directories_for_type(resource_type)
-                    dir_choices = []
-                    for i, d in enumerate(directories):
-                        priority_tag = ' [index 0, highest priority]' if i == 0 else f' [index {i}]'
-                        dir_choices.append((f'{d}{priority_tag}', d))
-                    return render_resource_center(resource_type_value), gr.update(choices=dir_choices, value=directories[0] if directories else None)
+                    status = resource_service.get_resource_status(resource_type)
+                    resource_names = sorted(status.keys())
+                    return render_resource_center(resource_type_value), gr.update(choices=resource_names), gr.update(choices=[])
 
-                def resource_operation_changed(operation):
-                    is_download = 'Download' in operation
-                    is_rehash_specific = operation == 'Rehash (specific path)'
-                    is_rehash_primary = operation == 'Rehash (primary path)'
-                    needs_name = is_download or is_rehash_primary
+                def resource_name_changed(resource_type_value, operation, resource_name):
+                    from modules.resource_service import ResourceType
+                    if not resource_name:
+                        return gr.update(choices=[])
+                    try:
+                        resource_type = ResourceType(resource_type_value)
+                    except ValueError:
+                        return gr.update(choices=[])
+                    if operation == 'Download':
+                        directories = resource_service.get_directories_for_type(resource_type)
+                        dir_choices = []
+                        for i, d in enumerate(directories):
+                            tag = ' [index 0, highest priority]' if i == 0 else f' [index {i}]'
+                            dir_choices.append((f'{d}{tag}', d))
+                        return gr.update(choices=dir_choices, value=directories[0] if directories else None)
+                    elif operation == 'Rehash':
+                        all_matches, _ = _get_all_matches_for_name(resource_type, resource_name)
+                        path_choices = []
+                        for m in all_matches:
+                            idx = m.get('directory_index', -1)
+                            is_primary = m.get('is_primary', False)
+                            path = m.get('path', '')
+                            hash_s = m.get('hash_status', 'unknown')
+                            prefix = '★ Primary - ' if is_primary else '  '
+                            label = f'{prefix}[idx={idx}] {path} ({hash_s})'
+                            path_choices.append((label, path))
+                        if path_choices:
+                            first_path = all_matches[0].get('path', '')
+                            return gr.update(choices=path_choices, value=first_path)
+                        return gr.update(choices=[])
+                    else:
+                        return gr.update(choices=[])
+
+                def resource_operation_changed(operation, resource_type_value, resource_name):
+                    from modules.resource_service import ResourceType
+                    try:
+                        resource_type = ResourceType(resource_type_value)
+                    except ValueError:
+                        resource_type = None
+                    is_download = operation == 'Download'
+                    is_rehash = operation == 'Rehash'
+                    is_scan = operation == 'Scan type'
+                    show_name = not is_scan
+                    show_target = not is_scan
+                    show_url = is_download
+                    target_info = 'Target directory to save the downloaded file' if is_download else ('File path to rehash' if is_rehash else '')
+                    target_label = 'Target Directory' if is_download else ('File Path' if is_rehash else 'Target')
+                    target_choices = []
+                    target_value = None
+                    if resource_type and not is_scan:
+                        if is_download:
+                            directories = resource_service.get_directories_for_type(resource_type)
+                            for i, d in enumerate(directories):
+                                tag = ' [index 0, highest priority]' if i == 0 else f' [index {i}]'
+                                target_choices.append((f'{d}{tag}', d))
+                            target_value = directories[0] if directories else None
+                        elif is_rehash and resource_name:
+                            all_matches, _ = _get_all_matches_for_name(resource_type, resource_name)
+                            for m in all_matches:
+                                idx = m.get('directory_index', -1)
+                                is_primary = m.get('is_primary', False)
+                                path = m.get('path', '')
+                                hash_s = m.get('hash_status', 'unknown')
+                                prefix = '★ Primary - ' if is_primary else '  '
+                                label = f'{prefix}[idx={idx}] {path} ({hash_s})'
+                                target_choices.append((label, path))
+                            if all_matches:
+                                target_value = all_matches[0].get('path', '')
                     return [
-                        gr.update(visible=needs_name),
-                        gr.update(visible=is_download),
-                        gr.update(visible=is_rehash_specific),
-                        gr.update(visible=is_download),
+                        gr.update(visible=show_name),
+                        gr.update(visible=show_target, choices=target_choices, value=target_value, label=target_label, info=target_info),
+                        gr.update(visible=show_url),
                     ]
 
-                def execute_resource_operation(operation, resource_type_value, resource_name, target_dir, specific_path, resource_url):
+                def _get_all_matches_for_name(resource_type, resource_name):
+                    status = resource_service.get_resource_status(resource_type)
+                    if resource_name not in status:
+                        return [], None
+                    info = status[resource_name]
+                    return info.get('all_matches', []), info
+
+                def execute_resource_operation(operation, resource_type_value, resource_name, target_value, resource_url):
                     from modules.resource_service import ResourceType
                     try:
                         resource_type = ResourceType(resource_type_value)
@@ -1194,38 +1265,30 @@ with shared.gradio_root:
                         return gr.update(value='Invalid resource type', visible=True)
 
                     try:
-                        if operation == 'Download (pick target dir)':
+                        if operation == 'Download':
                             if not resource_name:
                                 return gr.update(value='Please enter a resource name', visible=True)
-                            if not target_dir:
+                            if not target_value:
                                 directories = resource_service.get_directories_for_type(resource_type)
-                                target_dir = directories[0] if directories else None
-                                if not target_dir:
+                                target_value = directories[0] if directories else None
+                                if not target_value:
                                     return gr.update(value='No target directory available for this resource type', visible=True)
                             url = resource_url.strip() if resource_url and resource_url.strip() else None
-                            result = resource_service.download_to_path(resource_type, resource_name, target_dir, url=url)
+                            result = resource_service.download_to_path(resource_type, resource_name, target_value, url=url)
                             if result is None:
                                 msg = f'No registered resource named "{resource_name}" in {resource_type_value}. Please provide a download URL.'
                             elif result is True:
-                                msg = f'Download started for {resource_name} → {target_dir}'
+                                msg = f'Download started for {resource_name} → {target_value}'
                             else:
                                 msg = f'Download may already be in progress for {resource_name}'
-                        elif operation == 'Rehash (primary path)':
-                            if not resource_name:
-                                return gr.update(value='Please enter a resource name', visible=True)
-                            hash_val = resource_service.rehash_by_name(resource_type, resource_name)
+                        elif operation == 'Rehash':
+                            if not target_value:
+                                return gr.update(value='Please select a file path to rehash', visible=True)
+                            hash_val = resource_service.rehash_path(resource_type, target_value)
                             if hash_val:
-                                msg = f'Rehash (primary path) completed for {resource_name}: {hash_val}'
+                                msg = f'Rehash completed: {hash_val}\nPath: {target_value}'
                             else:
-                                msg = f'Primary file not found: {resource_name}'
-                        elif operation == 'Rehash (specific path)':
-                            if not specific_path:
-                                return gr.update(value='Please enter the specific file path', visible=True)
-                            hash_val = resource_service.rehash_path(resource_type, specific_path)
-                            if hash_val:
-                                msg = f'Rehash (specific path) completed: {hash_val}\nPath: {specific_path}'
-                            else:
-                                msg = f'File not found or not a file: {specific_path}'
+                                msg = f'File not found or not a file: {target_value}'
                         elif operation == 'Scan type':
                             resource_service.scan_type(resource_type, force=True)
                             modules.config.update_files()
@@ -1233,17 +1296,50 @@ with shared.gradio_root:
                         else:
                             msg = f'Unknown operation: {operation}'
                         return gr.update(value=msg, visible=True)
+                    except ValueError as e:
+                        return gr.update(value=f'Security: {str(e)}', visible=True)
                     except Exception as e:
                         return gr.update(value=f'Error: {str(e)}', visible=True)
 
-                resource_type_selector.change(resource_type_changed, inputs=[resource_type_selector], outputs=[resource_center_html, resource_target_dir])
-                resource_operation.change(resource_operation_changed, inputs=[resource_operation], outputs=[resource_name_input, resource_target_dir, resource_specific_path, resource_url_input])
-                resource_center_refresh.click(resource_center_refresh_clicked, inputs=[resource_type_selector], outputs=[resource_center_html])
+                def resource_center_full_refresh(resource_type_value):
+                    from modules.resource_service import ResourceType
+                    try:
+                        resource_type = ResourceType(resource_type_value)
+                    except ValueError:
+                        return render_resource_center(resource_type_value), gr.update(choices=[])
+                    status = resource_service.get_resource_status(resource_type)
+                    resource_names = sorted(status.keys())
+                    return render_resource_center(resource_type_value), gr.update(choices=resource_names)
+
+                resource_type_selector.change(
+                    resource_type_changed,
+                    inputs=[resource_type_selector],
+                    outputs=[resource_center_html, resource_name_selector, resource_target_selector]
+                )
+                resource_name_selector.change(
+                    resource_name_changed,
+                    inputs=[resource_type_selector, resource_operation, resource_name_selector],
+                    outputs=[resource_target_selector]
+                )
+                resource_operation.change(
+                    resource_operation_changed,
+                    inputs=[resource_operation, resource_type_selector, resource_name_selector],
+                    outputs=[resource_name_selector, resource_target_selector, resource_url_input]
+                )
+                resource_center_refresh.click(
+                    resource_center_full_refresh,
+                    inputs=[resource_type_selector],
+                    outputs=[resource_center_html, resource_name_selector]
+                )
                 resource_execute_btn.click(
                     execute_resource_operation,
-                    inputs=[resource_operation, resource_type_selector, resource_name_input, resource_target_dir, resource_specific_path, resource_url_input],
+                    inputs=[resource_operation, resource_type_selector, resource_name_selector, resource_target_selector, resource_url_input],
                     outputs=[resource_operation_result]
-                ).then(resource_center_refresh_clicked, inputs=[resource_type_selector], outputs=[resource_center_html])
+                ).then(
+                    resource_center_full_refresh,
+                    inputs=[resource_type_selector],
+                    outputs=[resource_center_html, resource_name_selector]
+                )
 
         state_is_generating = gr.State(False)
 
