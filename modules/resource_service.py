@@ -1,584 +1,681 @@
 import os
 import json
+import time
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from enum import Enum
 from multiprocessing import cpu_count
-from typing import Dict, List, Optional
+from typing import Optional, List, Dict, Tuple, Callable, Any, Literal
 
+import args_manager
 from modules.resource_registry import (
-    ResourceCategory, ResourceType, ResourceDefinition,
-    RESOURCE_TYPE_MAP, HASHED_CATEGORIES, INPAINT_VERSION_PATCH_URLS,
-    PERFORMANCE_LORA_URLS, IP_ADAPTER_URLS,
-    BUILTIN_RESOURCE_DEFINITIONS, BUILTIN_DEFINITIONS_MAP, CATEGORY_LABELS,
-    CHECKPOINT, LORA, VAE, VAE_APPROX, EMBEDDING, INPAINT,
-    CONTROLNET, CLIP_VISION, UPSCALE_MODEL, FOOOCUS_EXPANSION,
-    SAFETY_CHECKER, SAM, WILDCARD,
+    ResourceType,
+    ResourceDefinition,
+    get_resource_definition,
+    get_resources_by_type,
+    get_resource_type_config,
+    RESOURCE_TYPE_CONFIG,
 )
+from modules.util import sha256, HASH_SHA256_LENGTH, get_files_from_folder
 from modules.model_loader import load_file_from_url
 
 
-class ResourceState(Enum):
-    MISSING = "missing"
-    EXISTS = "exists"
-    DOWNLOADING = "downloading"
-    HASH_MISMATCH = "hash_mismatch"
-    HASH_UNVERIFIED = "hash_unverified"
-    HASH_VERIFIED = "hash_verified"
+DownloadStatus = Literal["idle", "downloading", "completed", "failed"]
 
 
 @dataclass
-class ResourceStatus:
-    resource_id: str
-    category: ResourceCategory
-    filename: str
-    state: ResourceState = ResourceState.MISSING
-    url: Optional[str] = None
-    required: bool = False
-    group: Optional[str] = None
-    description: Optional[str] = None
-    disk_path: Optional[str] = None
-    file_size: int = 0
-    hash_cached: Optional[str] = None
+class ResourceInstance:
+    name: str
+    path: str
+    directory_priority: int
+    resource_type: ResourceType
+    hash: Optional[str] = None
     hash_verified: bool = False
-    expected_hash: Optional[str] = None
-    duplicate_paths: List[str] = field(default_factory=list)
-    download_progress: float = -1.0
-    builtin: bool = False
-
-    def to_dict(self) -> dict:
-        return {
-            "resource_id": self.resource_id,
-            "category": self.category.value,
-            "filename": self.filename,
-            "state": self.state.value,
-            "url": self.url,
-            "required": self.required,
-            "group": self.group,
-            "description": self.description,
-            "disk_path": self.disk_path,
-            "file_size": self.file_size,
-            "hash_cached": self.hash_cached,
-            "hash_verified": self.hash_verified,
-            "expected_hash": self.expected_hash,
-            "duplicate_paths": self.duplicate_paths,
-            "download_progress": self.download_progress,
-            "builtin": self.builtin,
-        }
+    size: Optional[int] = None
+    last_modified: Optional[float] = None
 
 
-_hash_cache: Dict[str, str] = {}
-_hash_cache_filename = "hash_cache.txt"
-_path_registry: Dict[ResourceCategory, List[str]] = {}
-_file_registry: Dict[ResourceCategory, List[str]] = {}
-_download_registry: Dict[str, str] = {}
-_status_registry: Dict[str, ResourceStatus] = {}
-_download_progress: Dict[str, float] = {}
-_initialized = False
-_lock = threading.Lock()
+@dataclass
+class DownloadState:
+    resource_id: str
+    status: DownloadStatus = "idle"
+    progress: float = 0.0
+    current_url: Optional[str] = None
+    error: Optional[str] = None
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    total_size: Optional[int] = None
+    downloaded_size: Optional[int] = None
 
 
-def initialize(paths_map: Dict[ResourceCategory, List[str]]) -> None:
-    global _initialized
-    if _initialized:
-        return
-    _initialized = True
-    for category, paths in paths_map.items():
-        _path_registry[category] = paths
-    _load_hash_cache_from_file()
-    _register_builtin_definitions()
-    refresh_all_files()
-    _refresh_status_registry()
-    from modules.model_loader import register_download_callback, register_progress_callback
-    register_download_callback(_on_file_downloaded)
-    register_progress_callback(_on_download_progress)
+@dataclass
+class HashCacheEntry:
+    filepath: str
+    hash: str
+    last_modified: float
+    size: int
 
 
-def register_path(category: ResourceCategory, paths: List[str]) -> None:
-    _path_registry[category] = paths
+class ResourceService:
+    _instance: Optional["ResourceService"] = None
+    _instance_lock = threading.Lock()
 
+    def __new__(cls) -> "ResourceService":
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
 
-def register_resource_definition(definition: ResourceDefinition) -> None:
-    key = definition.resource_id
-    status = ResourceStatus(
-        resource_id=definition.resource_id,
-        category=definition.category,
-        filename=definition.filename,
-        url=definition.url,
-        required=definition.required,
-        group=definition.group,
-        description=definition.description,
-        expected_hash=definition.expected_hash,
-        builtin=True,
-    )
-    _status_registry[key] = status
+    def __init__(self) -> None:
+        if self._initialized:
+            return
+        self._initialized = True
 
+        self._config_provider: Optional[Any] = None
+        self._scan_lock = threading.Lock()
+        self._hash_lock = threading.Lock()
+        self._download_locks: Dict[str, threading.Lock] = {}
+        self._download_lock_lock = threading.Lock()
 
-def _register_builtin_definitions() -> None:
-    for d in BUILTIN_RESOURCE_DEFINITIONS:
-        register_resource_definition(d)
+        self._scanned_instances: Dict[ResourceType, List[ResourceInstance]] = {}
+        self._instance_name_index: Dict[Tuple[ResourceType, str], ResourceInstance] = {}
+        self._hash_cache: Dict[str, HashCacheEntry] = {}
+        self._download_states: Dict[str, DownloadState] = {}
 
+        self._custom_directories: Dict[ResourceType, List[Tuple[str, int]]] = {}
+        self._hash_cache_filename = "hash_cache.txt"
 
-def _on_file_downloaded(filepath: str, url: str) -> None:
-    category = _infer_category_from_path(filepath)
-    if category is not None and category in RESOURCE_TYPE_MAP:
-        _file_registry[category] = scan_files(RESOURCE_TYPE_MAP[category])
-    _refresh_status_registry()
+        self._observers: List[Callable[[], None]] = []
 
+    def set_config_provider(self, config_provider: Any) -> None:
+        self._config_provider = config_provider
 
-def _on_download_progress(filepath: str, progress: float) -> None:
-    filename = os.path.basename(filepath)
-    for key, status in _status_registry.items():
-        if status.filename == filename:
-            with _lock:
-                status.download_progress = progress
-                if progress < 0:
-                    status.state = ResourceState.EXISTS
-                    status.download_progress = -1.0
-                else:
-                    status.state = ResourceState.DOWNLOADING
-            break
+    def add_observer(self, observer: Callable[[], None]) -> None:
+        self._observers.append(observer)
 
+    def remove_observer(self, observer: Callable[[], None]) -> None:
+        if observer in self._observers:
+            self._observers.remove(observer)
 
-def _infer_category_from_path(filepath: str) -> Optional[ResourceCategory]:
-    for category, paths in _path_registry.items():
-        for p in paths:
-            if filepath.startswith(p):
-                return category
-    return None
+    def _notify_observers(self) -> None:
+        for observer in self._observers:
+            try:
+                observer()
+            except Exception as e:
+                print(f"[ResourceService] Observer notification failed: {e}")
 
+    def _get_directories_for_type(self, resource_type: ResourceType) -> List[Tuple[str, int]]:
+        type_config = RESOURCE_TYPE_CONFIG.get(resource_type, {})
+        path_config_key = type_config.get("path_config_key")
+        is_multi_dir = type_config.get("is_multi_dir", False)
 
-def _refresh_status_registry() -> None:
-    with _lock:
-        for key, status in _status_registry.items():
-            _update_single_status(status)
-        for category in RESOURCE_TYPE_MAP:
-            rt = RESOURCE_TYPE_MAP[category]
-            filenames = _file_registry.get(category, [])
-            for filename in filenames:
-                rid = f"{category.value}:{filename}"
-                if rid not in _status_registry:
-                    status = ResourceStatus(
-                        resource_id=rid,
-                        category=category,
-                        filename=filename,
-                        builtin=False,
-                    )
-                    _update_single_status(status)
-                    _status_registry[rid] = status
+        directories: List[Tuple[str, int]] = []
 
+        custom_directories = self._custom_directories.get(resource_type, [])
+        for path, priority in custom_directories:
+            if os.path.isdir(path):
+                directories.append((os.path.abspath(path), priority))
 
-def _update_single_status(status: ResourceStatus) -> None:
-    category = status.category
-    paths = _path_registry.get(category, [])
-    found_path = None
-    duplicates = []
-    for folder in paths:
-        full = os.path.abspath(os.path.realpath(os.path.join(folder, status.filename)))
-        if os.path.isfile(full):
-            if found_path is None:
-                found_path = full
-            else:
-                duplicates.append(full)
-    if found_path is not None:
-        status.disk_path = found_path
-        status.duplicate_paths = duplicates
+        if self._config_provider is not None and path_config_key:
+            config_value = getattr(self._config_provider, path_config_key, None)
+            if config_value is not None:
+                if is_multi_dir and isinstance(config_value, list):
+                    for idx, path in enumerate(config_value):
+                        if os.path.isdir(path):
+                            directories.append((os.path.abspath(path), 100 + idx))
+                elif isinstance(config_value, str) and os.path.isdir(config_value):
+                    directories.append((os.path.abspath(config_value), 100))
+
+        default_path = type_config.get("default_path")
+        if default_path:
+            modules_dir = os.path.dirname(os.path.abspath(__file__))
+            abs_default_path = os.path.abspath(os.path.join(modules_dir, default_path))
+            if os.path.isdir(abs_default_path):
+                directories.append((abs_default_path, 0))
+
+        docker_paths = self._get_docker_volume_paths(resource_type)
+        for idx, path in enumerate(docker_paths):
+            if os.path.isdir(path):
+                directories.append((os.path.abspath(path), 200 + idx))
+
+        directories.sort(key=lambda x: x[1], reverse=True)
+        return directories
+
+    def _get_docker_volume_paths(self, resource_type: ResourceType) -> List[str]:
+        paths = []
+        env_key = f"DOCKER_{resource_type.name.upper()}_PATH"
+        env_value = os.getenv(env_key)
+        if env_value:
+            for path in env_value.split(":"):
+                if path.strip():
+                    paths.append(path.strip())
+        return paths
+
+    def add_custom_directory(self, resource_type: ResourceType, path: str, priority: int = 0) -> None:
+        if resource_type not in self._custom_directories:
+            self._custom_directories[resource_type] = []
+        self._custom_directories[resource_type].append((path, priority))
+
+    def scan_all(self, force: bool = False) -> None:
+        with self._scan_lock:
+            for resource_type in ResourceType:
+                self._scan_type_internal(resource_type, force)
+            self._notify_observers()
+
+    def scan_type(self, resource_type: ResourceType, force: bool = False) -> None:
+        with self._scan_lock:
+            self._scan_type_internal(resource_type, force)
+            self._notify_observers()
+
+    def _scan_type_internal(self, resource_type: ResourceType, force: bool = False) -> None:
+        if not force and resource_type in self._scanned_instances:
+            return
+
+        type_config = RESOURCE_TYPE_CONFIG.get(resource_type, {})
+        extensions = type_config.get("extensions", [])
+        directories = self._get_directories_for_type(resource_type)
+
+        instances: List[ResourceInstance] = []
+        seen_names: Dict[str, ResourceInstance] = {}
+
+        for directory, priority in directories:
+            try:
+                files = get_files_from_folder(directory, extensions)
+                for filename in files:
+                    full_path = os.path.join(directory, filename)
+                    if not os.path.isfile(full_path):
+                        continue
+
+                    if filename in seen_names:
+                        existing = seen_names[filename]
+                        if priority > existing.directory_priority:
+                            try:
+                                stat = os.stat(full_path)
+                                new_instance = ResourceInstance(
+                                    name=filename,
+                                    path=full_path,
+                                    directory_priority=priority,
+                                    resource_type=resource_type,
+                                    size=stat.st_size,
+                                    last_modified=stat.st_mtime,
+                                )
+                                seen_names[filename] = new_instance
+                            except OSError:
+                                pass
+                    else:
+                        try:
+                            stat = os.stat(full_path)
+                            new_instance = ResourceInstance(
+                                name=filename,
+                                path=full_path,
+                                directory_priority=priority,
+                                resource_type=resource_type,
+                                size=stat.st_size,
+                                last_modified=stat.st_mtime,
+                            )
+                            seen_names[filename] = new_instance
+                        except OSError:
+                            pass
+
+            except Exception as e:
+                print(f"[ResourceService] Scan error for {resource_type.value} in {directory}: {e}")
+
+        instances = list(seen_names.values())
+        instances.sort(key=lambda x: x.name.casefold())
+
+        self._scanned_instances[resource_type] = instances
+        self._instance_name_index.update(
+            {(resource_type, inst.name): inst for inst in instances}
+        )
+
+    def get_instances_by_type(self, resource_type: ResourceType) -> List[ResourceInstance]:
+        if resource_type not in self._scanned_instances:
+            self.scan_type(resource_type)
+        return self._scanned_instances.get(resource_type, [])
+
+    def get_filenames_by_type(self, resource_type: ResourceType) -> List[str]:
+        instances = self.get_instances_by_type(resource_type)
+        return [inst.name for inst in instances]
+
+    def get_resource_instance(
+        self, resource_type: ResourceType, filename: str
+    ) -> Optional[ResourceInstance]:
+        key = (resource_type, filename)
+        if key not in self._instance_name_index:
+            self.scan_type(resource_type)
+        return self._instance_name_index.get(key)
+
+    def get_filepath(
+        self, resource_type: ResourceType, filename: str
+    ) -> Optional[str]:
+        instance = self.get_resource_instance(resource_type, filename)
+        return instance.path if instance else None
+
+    def find_filepath_by_name(
+        self, resource_type: ResourceType, filename: str
+    ) -> Optional[str]:
+        directories = self._get_directories_for_type(resource_type)
+        for directory, _ in directories:
+            full_path = os.path.join(directory, filename)
+            if os.path.isfile(full_path):
+                return os.path.abspath(full_path)
+        if directories:
+            return os.path.abspath(os.path.join(directories[0][0], filename))
+        return None
+
+    def load_hash_cache(self) -> None:
+        with self._hash_lock:
+            self._hash_cache.clear()
+            try:
+                if os.path.exists(self._hash_cache_filename):
+                    with open(self._hash_cache_filename, "rt", encoding="utf-8") as fp:
+                        for line in fp:
+                            try:
+                                entry = json.loads(line)
+                                for filepath, hash_value in entry.items():
+                                    if not os.path.exists(filepath):
+                                        continue
+                                    if not isinstance(hash_value, str) or len(hash_value) != HASH_SHA256_LENGTH:
+                                        continue
+                                    try:
+                                        stat = os.stat(filepath)
+                                        self._hash_cache[filepath] = HashCacheEntry(
+                                            filepath=filepath,
+                                            hash=hash_value,
+                                            last_modified=stat.st_mtime,
+                                            size=stat.st_size,
+                                        )
+                                    except OSError:
+                                        continue
+                            except (json.JSONDecodeError, ValueError):
+                                continue
+            except Exception as e:
+                print(f"[ResourceService] Load hash cache failed: {e}")
+
+    def save_hash_cache(self) -> None:
+        with self._hash_lock:
+            try:
+                with open(self._hash_cache_filename, "wt", encoding="utf-8") as fp:
+                    for entry in sorted(self._hash_cache.values(), key=lambda x: x.filepath):
+                        json.dump({entry.filepath: entry.hash}, fp)
+                        fp.write("\n")
+            except Exception as e:
+                print(f"[ResourceService] Save hash cache failed: {e}")
+
+    def get_hash(
+        self,
+        filepath: str,
+        force_recompute: bool = False,
+        use_addnet_hash: bool = False,
+    ) -> Optional[str]:
+        if not os.path.isfile(filepath):
+            return None
+
+        filepath = os.path.abspath(filepath)
+
+        with self._hash_lock:
+            if not force_recompute and filepath in self._hash_cache:
+                entry = self._hash_cache[filepath]
+                try:
+                    stat = os.stat(filepath)
+                    if stat.st_mtime == entry.last_modified and stat.st_size == entry.size:
+                        return entry.hash
+                except OSError:
+                    pass
+
+            print(f"[ResourceService] Calculating hash for {filepath}")
+            hash_value = sha256(filepath, use_addnet_hash=use_addnet_hash)
+            print(f"[ResourceService] Hash for {filepath}: {hash_value}")
+
+            try:
+                stat = os.stat(filepath)
+                self._hash_cache[filepath] = HashCacheEntry(
+                    filepath=filepath,
+                    hash=hash_value,
+                    last_modified=stat.st_mtime,
+                    size=stat.st_size,
+                )
+                self._save_hash_cache_entry(filepath, hash_value)
+            except OSError:
+                pass
+
+            return hash_value
+
+    def _save_hash_cache_entry(self, filepath: str, hash_value: str) -> None:
         try:
-            status.file_size = os.path.getsize(found_path)
-        except OSError:
-            status.file_size = 0
-        cached_hash = _hash_cache.get(found_path)
-        status.hash_cached = cached_hash
-        if status.expected_hash is not None:
-            if cached_hash is not None:
-                if cached_hash == status.expected_hash:
-                    status.state = ResourceState.HASH_VERIFIED
-                    status.hash_verified = True
-                else:
-                    status.state = ResourceState.HASH_MISMATCH
-                    status.hash_verified = False
-            else:
-                status.state = ResourceState.HASH_UNVERIFIED
-                status.hash_verified = False
-        else:
-            if cached_hash is not None:
-                status.state = ResourceState.HASH_VERIFIED
-                status.hash_verified = True
-            else:
-                if category in HASHED_CATEGORIES:
-                    status.state = ResourceState.HASH_UNVERIFIED
-                    status.hash_verified = False
-                else:
-                    status.state = ResourceState.EXISTS
-                    status.hash_verified = False
-    else:
-        status.disk_path = None
-        status.duplicate_paths = []
-        status.file_size = 0
-        status.hash_cached = None
-        status.hash_verified = False
-        if status.download_progress >= 0:
-            status.state = ResourceState.DOWNLOADING
-        else:
-            status.state = ResourceState.MISSING
-
-
-def get_paths(category: ResourceCategory) -> List[str]:
-    return _path_registry.get(category, [])
-
-
-def get_path(category: ResourceCategory) -> str:
-    paths = _path_registry.get(category, [])
-    return paths[0] if paths else ""
-
-
-def set_paths(category: ResourceCategory, paths: List[str]) -> None:
-    _path_registry[category] = paths
-
-
-def refresh_all_files() -> None:
-    global _file_registry
-    for rt in [CHECKPOINT, LORA, VAE, WILDCARD]:
-        _file_registry[rt.category] = scan_files(rt)
-
-
-def scan_files(rt: ResourceType) -> List[str]:
-    paths = _path_registry.get(rt.category, [])
-    if not paths:
-        return []
-    files = []
-    for folder in paths:
-        if os.path.isdir(folder):
-            for root, _, fs in os.walk(folder, topdown=False):
-                relative_path = os.path.relpath(root, folder)
-                if relative_path == ".":
-                    relative_path = ""
-                for filename in sorted(fs, key=lambda s: s.casefold()):
-                    _, file_extension = os.path.splitext(filename)
-                    if rt.extensions is None or file_extension.lower() in rt.extensions:
-                        if rt.name_filter is None or rt.name_filter in filename:
-                            path = os.path.join(relative_path, filename)
-                            files.append(path)
-    return files
-
-
-def get_filenames(category: ResourceCategory) -> List[str]:
-    return _file_registry.get(category, [])
-
-
-def get_file_path(filename: str, category: ResourceCategory) -> str:
-    paths = _path_registry.get(category, [])
-    if not isinstance(paths, list):
-        paths = [paths]
-    for folder in paths:
-        full = os.path.abspath(os.path.realpath(os.path.join(folder, filename)))
-        if os.path.isfile(full):
-            return full
-    if paths:
-        return os.path.abspath(os.path.realpath(os.path.join(paths[0], filename)))
-    return filename
-
-
-def get_status(resource_id: str) -> Optional[ResourceStatus]:
-    with _lock:
-        return _status_registry.get(resource_id)
-
-
-def get_all_statuses() -> List[ResourceStatus]:
-    with _lock:
-        return list(_status_registry.values())
-
-
-def get_statuses_by_category(category: ResourceCategory) -> List[ResourceStatus]:
-    with _lock:
-        return [s for s in _status_registry.values() if s.category == category]
-
-
-def get_builtin_statuses() -> List[ResourceStatus]:
-    with _lock:
-        return [s for s in _status_registry.values() if s.builtin]
-
-
-def get_missing_required() -> List[ResourceStatus]:
-    with _lock:
-        return [s for s in _status_registry.values() if s.required and s.state == ResourceState.MISSING]
-
-
-def get_resource_status_summary() -> dict:
-    with _lock:
-        total = len(_status_registry)
-        exists = sum(1 for s in _status_registry.values() if s.state in (ResourceState.EXISTS, ResourceState.HASH_VERIFIED, ResourceState.HASH_UNVERIFIED))
-        missing = sum(1 for s in _status_registry.values() if s.state == ResourceState.MISSING)
-        downloading = sum(1 for s in _status_registry.values() if s.state == ResourceState.DOWNLOADING)
-        hash_mismatch = sum(1 for s in _status_registry.values() if s.state == ResourceState.HASH_MISMATCH)
-        required_missing = sum(1 for s in _status_registry.values() if s.required and s.state == ResourceState.MISSING)
-        by_category = {}
-        for cat in ResourceCategory:
-            cat_statuses = [s for s in _status_registry.values() if s.category == cat]
-            if cat_statuses:
-                by_category[cat.value] = {
-                    "label": CATEGORY_LABELS.get(cat, cat.value),
-                    "total": len(cat_statuses),
-                    "exists": sum(1 for s in cat_statuses if s.state in (ResourceState.EXISTS, ResourceState.HASH_VERIFIED, ResourceState.HASH_UNVERIFIED)),
-                    "missing": sum(1 for s in cat_statuses if s.state == ResourceState.MISSING),
-                    "downloading": sum(1 for s in cat_statuses if s.state == ResourceState.DOWNLOADING),
-                }
-        return {
-            "total": total,
-            "exists": exists,
-            "missing": missing,
-            "downloading": downloading,
-            "hash_mismatch": hash_mismatch,
-            "required_missing": required_missing,
-            "by_category": by_category,
-        }
-
-
-def download_known_file(category: ResourceCategory, filename: str, progress: bool = True) -> str:
-    rt = RESOURCE_TYPE_MAP.get(category)
-    if rt is None:
-        raise ValueError(f"Unknown resource category: {category}")
-    url = rt.known_urls.get(filename) or _download_registry.get(filename)
-    if url is None:
-        for d in BUILTIN_RESOURCE_DEFINITIONS:
-            if d.category == category and d.filename == filename:
-                url = d.url
-                break
-    if url is None:
-        raise ValueError(f"No known URL for {filename} in {category.value}")
-    rid = None
-    for key, status in _status_registry.items():
-        if status.category == category and status.filename == filename:
-            rid = key
-            with _lock:
-                status.state = ResourceState.DOWNLOADING
-                status.download_progress = 0.0
-            break
-    model_dir = get_path(category)
-    result = load_file_from_url(url=url, model_dir=model_dir, file_name=filename, progress=progress)
-    if rid is not None:
-        with _lock:
-            s = _status_registry.get(rid)
-            if s is not None:
-                s.download_progress = -1.0
-    _refresh_status_registry()
-    return result
-
-
-def download_file(url: str, category: ResourceCategory, filename: Optional[str] = None, progress: bool = True) -> str:
-    model_dir = get_path(category)
-    return load_file_from_url(url=url, model_dir=model_dir, file_name=filename, progress=progress)
-
-
-def download_resource_by_id(resource_id: str) -> str:
-    status = _status_registry.get(resource_id)
-    if status is None:
-        raise ValueError(f"Unknown resource: {resource_id}")
-    if status.url is None:
-        raise ValueError(f"No URL for resource: {resource_id}")
-    with _lock:
-        status.state = ResourceState.DOWNLOADING
-        status.download_progress = 0.0
-    model_dir = get_path(status.category)
-    result = load_file_from_url(url=status.url, model_dir=model_dir, file_name=status.filename, progress=True)
-    with _lock:
-        status.download_progress = -1.0
-    _refresh_status_registry()
-    return result
-
-
-def download_inpaint_models(v: str) -> tuple:
-    assert v in ["v1", "v2.5", "v2.6"]
-    download_known_file(ResourceCategory.INPAINT, "fooocus_inpaint_head.pth")
-    head_file = os.path.join(get_path(ResourceCategory.INPAINT), "fooocus_inpaint_head.pth")
-    patch_file = None
-    patch_filename = INPAINT_VERSION_PATCH_URLS.get(v)
-    if patch_filename:
-        download_known_file(ResourceCategory.INPAINT, patch_filename)
-        patch_file = os.path.join(get_path(ResourceCategory.INPAINT), patch_filename)
-    return head_file, patch_file
-
-
-def download_controlnet_canny() -> str:
-    download_known_file(ResourceCategory.CONTROLNET, "control-lora-canny-rank128.safetensors")
-    return os.path.join(get_path(ResourceCategory.CONTROLNET), "control-lora-canny-rank128.safetensors")
-
-
-def download_controlnet_cpds() -> str:
-    download_known_file(ResourceCategory.CONTROLNET, "fooocus_xl_cpds_128.safetensors")
-    return os.path.join(get_path(ResourceCategory.CONTROLNET), "fooocus_xl_cpds_128.safetensors")
-
-
-def download_ip_adapters(v: str) -> list:
-    assert v in ["ip", "face"]
-    results = []
-    entries = IP_ADAPTER_URLS.get(v, [])
-    for filename, url, category in entries:
-        download_known_file(category, filename)
-        results.append(os.path.join(get_path(category), filename))
-    return results
-
-
-def download_upscale_model() -> str:
-    download_known_file(ResourceCategory.UPSCALE_MODEL, "fooocus_upscaler_s409985e5.bin")
-    return os.path.join(get_path(ResourceCategory.UPSCALE_MODEL), "fooocus_upscaler_s409985e5.bin")
-
-
-def download_safety_checker_model() -> str:
-    download_known_file(ResourceCategory.SAFETY_CHECKER, "stable-diffusion-safety-checker.bin")
-    return os.path.join(get_path(ResourceCategory.SAFETY_CHECKER), "stable-diffusion-safety-checker.bin")
-
-
-def download_sam_model(sam_model: str) -> str:
-    filename_map = {
-        "vit_b": "sam_vit_b_01ec64.pth",
-        "vit_l": "sam_vit_l_0b3195.pth",
-        "vit_h": "sam_vit_h_4b8939.pth",
-    }
-    if sam_model not in filename_map:
-        raise ValueError(f"sam model {sam_model} does not exist.")
-    filename = filename_map[sam_model]
-    download_known_file(ResourceCategory.SAM, filename)
-    return os.path.join(get_path(ResourceCategory.SAM), filename)
-
-
-def download_performance_lora(performance_key: str) -> str:
-    if performance_key not in PERFORMANCE_LORA_URLS:
-        raise ValueError(f"Unknown performance key: {performance_key}")
-    filename, url = PERFORMANCE_LORA_URLS[performance_key]
-    download_known_file(ResourceCategory.LORA, filename)
-    return filename
-
-
-def download_vae_approx_files() -> None:
-    for filename in VAE_APPROX.known_urls:
-        download_known_file(ResourceCategory.VAE_APPROX, filename)
-
-
-def download_expansion_model() -> None:
-    download_known_file(ResourceCategory.FOOOCUS_EXPANSION, "pytorch_model.bin")
-
-
-def download_preset_models(
-    default_model: str,
-    previous_default_models: list,
-    checkpoint_downloads: dict,
-    embeddings_downloads: dict,
-    lora_downloads: dict,
-    vae_downloads: dict,
-    disable_preset_download: bool = False,
-    always_download_new_model: bool = False,
-) -> tuple:
-    download_vae_approx_files()
-    download_expansion_model()
-
-    if disable_preset_download:
-        print("Skipped model download.")
-        return default_model, checkpoint_downloads
-
-    if not always_download_new_model:
-        if not _file_exists_in_category(default_model, ResourceCategory.CHECKPOINT):
-            for alternative_model_name in previous_default_models:
-                if _file_exists_in_category(alternative_model_name, ResourceCategory.CHECKPOINT):
-                    print(f"You do not have [{default_model}] but you have [{alternative_model_name}].")
-                    print(f"Fooocus will use [{alternative_model_name}] to avoid downloading new models, "
-                          f"but you are not using the latest models.")
-                    print("Use --always-download-new-model to avoid fallback and always get new models.")
-                    checkpoint_downloads = {}
-                    default_model = alternative_model_name
-                    break
-
-    for file_name, url in checkpoint_downloads.items():
-        download_file(url, ResourceCategory.CHECKPOINT, file_name)
-    for file_name, url in embeddings_downloads.items():
-        download_file(url, ResourceCategory.EMBEDDING, file_name)
-    for file_name, url in lora_downloads.items():
-        download_file(url, ResourceCategory.LORA, file_name)
-    for file_name, url in vae_downloads.items():
-        download_file(url, ResourceCategory.VAE, file_name)
-
-    return default_model, checkpoint_downloads
-
-
-def _file_exists_in_category(filename: str, category: ResourceCategory) -> bool:
-    filepath = get_file_path(filename, category)
-    return os.path.isfile(filepath)
-
-
-def register_download_url(filename: str, url: str) -> None:
-    _download_registry[filename] = url
-
-
-def sha256_from_cache(filepath: str) -> str:
-    global _hash_cache
-    if filepath not in _hash_cache:
-        from modules.util import sha256, HASH_SHA256_LENGTH
-        print(f"[Cache] Calculating sha256 for {filepath}")
-        hash_value = sha256(filepath)
-        print(f"[Cache] sha256 for {filepath}: {hash_value}")
-        _hash_cache[filepath] = hash_value
-        _save_hash_cache_entry(filepath, hash_value)
-    return _hash_cache[filepath]
-
-
-def init_hash_cache(rebuild: int = 0) -> None:
-    if rebuild:
-        max_workers = rebuild if rebuild > 0 else cpu_count()
-        rebuild_hash_cache(max_workers)
-    _save_hash_cache_full()
-
-
-def rebuild_hash_cache(max_workers: int = 0) -> None:
-    if max_workers <= 0:
-        max_workers = cpu_count()
-
-    def _compute_hash(filename, paths):
-        filepath = get_file_path(filename, ResourceCategory.CHECKPOINT)
-        sha256_from_cache(filepath)
-
-    print("[Cache] Rebuilding hash cache")
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for filename in get_filenames(ResourceCategory.CHECKPOINT):
-            executor.submit(_compute_hash, filename, get_paths(ResourceCategory.CHECKPOINT))
-        for filename in get_filenames(ResourceCategory.LORA):
-            executor.submit(_compute_hash, filename, get_paths(ResourceCategory.LORA))
-    print("[Cache] Done")
-
-
-def _load_hash_cache_from_file() -> None:
-    global _hash_cache
-    from modules.util import HASH_SHA256_LENGTH
-    try:
-        if os.path.exists(_hash_cache_filename):
-            with open(_hash_cache_filename, "rt", encoding="utf-8") as fp:
-                for line in fp:
-                    entry = json.loads(line)
-                    for filepath, hash_value in entry.items():
-                        if not os.path.exists(filepath) or not isinstance(hash_value, str) or len(hash_value) != HASH_SHA256_LENGTH:
-                            print(f"[Cache] Skipping invalid cache entry: {filepath}")
-                            continue
-                        _hash_cache[filepath] = hash_value
-    except Exception as e:
-        print(f"[Cache] Loading failed: {e}")
-
-
-def _save_hash_cache_entry(filepath: str, hash_value: str) -> None:
-    try:
-        with open(_hash_cache_filename, "at", encoding="utf-8") as fp:
-            json.dump({filepath: hash_value}, fp)
-            fp.write("\n")
-    except Exception as e:
-        print(f"[Cache] Saving failed: {e}")
-
-
-def _save_hash_cache_full() -> None:
-    global _hash_cache
-    try:
-        items = sorted(_hash_cache.items())
-        with open(_hash_cache_filename, "wt", encoding="utf-8") as fp:
-            for filepath, hash_value in items:
+            with open(self._hash_cache_filename, "at", encoding="utf-8") as fp:
                 json.dump({filepath: hash_value}, fp)
                 fp.write("\n")
-    except Exception as e:
-        print(f"[Cache] Saving failed: {e}")
+        except Exception as e:
+            print(f"[ResourceService] Save hash entry failed: {e}")
+
+    def rebuild_hash_cache(
+        self,
+        resource_types: Optional[List[ResourceType]] = None,
+        max_workers: Optional[int] = None,
+    ) -> None:
+        if resource_types is None:
+            resource_types = [ResourceType.CHECKPOINT, ResourceType.LORA]
+
+        if max_workers is None or max_workers <= 0:
+            max_workers = cpu_count()
+
+        all_files: List[Tuple[str, bool]] = []
+        for resource_type in resource_types:
+            instances = self.get_instances_by_type(resource_type)
+            use_addnet = resource_type == ResourceType.LORA
+            for instance in instances:
+                all_files.append((instance.path, use_addnet))
+
+        print(f"[ResourceService] Rebuilding hash cache for {len(all_files)} files")
+
+        def calc_hash(filepath: str, use_addnet: bool) -> Tuple[str, Optional[str]]:
+            return filepath, self.get_hash(filepath, force_recompute=True, use_addnet_hash=use_addnet)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(calc_hash, fp, ua) for fp, ua in all_files]
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"[ResourceService] Hash calculation error: {e}")
+
+        self.save_hash_cache()
+        print("[ResourceService] Hash cache rebuild complete")
+
+    def verify_resource_hash(self, resource_id: str) -> bool:
+        definition = get_resource_definition(resource_id)
+        if not definition or not definition.expected_hash:
+            return True
+
+        filepath = self.find_filepath_by_name(definition.resource_type, definition.name)
+        if not filepath or not os.path.isfile(filepath):
+            return False
+
+        actual_hash = self.get_hash(filepath)
+        return actual_hash == definition.expected_hash
+
+    def _get_download_lock(self, resource_id: str) -> threading.Lock:
+        with self._download_lock_lock:
+            if resource_id not in self._download_locks:
+                self._download_locks[resource_id] = threading.Lock()
+            return self._download_locks[resource_id]
+
+    def get_download_state(self, resource_id: str) -> DownloadState:
+        if resource_id not in self._download_states:
+            self._download_states[resource_id] = DownloadState(resource_id=resource_id)
+        return self._download_states[resource_id]
+
+    def is_downloaded(self, resource_id: str) -> bool:
+        definition = get_resource_definition(resource_id)
+        if not definition:
+            return False
+        filepath = self.find_filepath_by_name(definition.resource_type, definition.name)
+        return filepath is not None and os.path.isfile(filepath)
+
+    def download(
+        self,
+        resource_id: str,
+        on_progress: Optional[Callable[[DownloadState], None]] = None,
+    ) -> bool:
+        definition = get_resource_definition(resource_id)
+        if not definition:
+            print(f"[ResourceService] Resource not found: {resource_id}")
+            return False
+
+        if self.is_downloaded(resource_id):
+            state = self.get_download_state(resource_id)
+            state.status = "completed"
+            state.progress = 100.0
+            if on_progress:
+                on_progress(state)
+            return True
+
+        lock = self._get_download_lock(resource_id)
+        if not lock.acquire(blocking=False):
+            print(f"[ResourceService] Download already in progress: {resource_id}")
+            return False
+
+        try:
+            state = self.get_download_state(resource_id)
+            state.status = "downloading"
+            state.progress = 0.0
+            state.started_at = time.time()
+            state.error = None
+
+            if on_progress:
+                on_progress(state)
+
+            type_config = get_resource_type_config(definition.resource_type)
+            default_path = type_config.get("default_path", "")
+            modules_dir = os.path.dirname(os.path.abspath(__file__))
+            model_dir = os.path.abspath(os.path.join(modules_dir, default_path))
+
+            for url in definition.urls:
+                try:
+                    state.current_url = url
+                    if on_progress:
+                        on_progress(state)
+
+                    print(f"[ResourceService] Downloading {definition.name} from {url}")
+                    downloaded_path = load_file_from_url(
+                        url=url,
+                        model_dir=model_dir,
+                        file_name=definition.name,
+                        progress=True,
+                    )
+
+                    if os.path.isfile(downloaded_path):
+                        self.scan_type(definition.resource_type, force=True)
+                        self.get_hash(downloaded_path, force_recompute=True)
+
+                        state.status = "completed"
+                        state.progress = 100.0
+                        state.completed_at = time.time()
+                        if on_progress:
+                            on_progress(state)
+
+                        self._notify_observers()
+                        return True
+
+                except Exception as e:
+                    print(f"[ResourceService] Download failed from {url}: {e}")
+                    state.error = str(e)
+                    continue
+
+            state.status = "failed"
+            if on_progress:
+                on_progress(state)
+            return False
+
+        finally:
+            lock.release()
+
+    def download_by_definition(
+        self,
+        definition: ResourceDefinition,
+        on_progress: Optional[Callable[[DownloadState], None]] = None,
+    ) -> bool:
+        if definition.resource_id in [r.resource_id for r in get_resources_by_type(definition.resource_type)]:
+            return self.download(definition.resource_id, on_progress)
+
+        resource_id = f"custom_{definition.resource_type.value}_{definition.name}"
+        return self._download_custom(definition, resource_id, on_progress)
+
+    def _download_custom(
+        self,
+        definition: ResourceDefinition,
+        resource_id: str,
+        on_progress: Optional[Callable[[DownloadState], None]] = None,
+    ) -> bool:
+        lock = self._get_download_lock(resource_id)
+        if not lock.acquire(blocking=False):
+            return False
+
+        try:
+            state = self.get_download_state(resource_id)
+            state.status = "downloading"
+            state.progress = 0.0
+            state.started_at = time.time()
+            state.error = None
+
+            if on_progress:
+                on_progress(state)
+
+            type_config = get_resource_type_config(definition.resource_type)
+            default_path = type_config.get("default_path", "")
+            modules_dir = os.path.dirname(os.path.abspath(__file__))
+            model_dir = os.path.abspath(os.path.join(modules_dir, default_path))
+
+            for url in definition.urls:
+                try:
+                    state.current_url = url
+                    if on_progress:
+                        on_progress(state)
+
+                    print(f"[ResourceService] Downloading {definition.name} from {url}")
+                    downloaded_path = load_file_from_url(
+                        url=url,
+                        model_dir=model_dir,
+                        file_name=definition.name,
+                        progress=True,
+                    )
+
+                    if os.path.isfile(downloaded_path):
+                        self.scan_type(definition.resource_type, force=True)
+
+                        state.status = "completed"
+                        state.progress = 100.0
+                        state.completed_at = time.time()
+                        if on_progress:
+                            on_progress(state)
+
+                        self._notify_observers()
+                        return True
+
+                except Exception as e:
+                    print(f"[ResourceService] Download failed from {url}: {e}")
+                    state.error = str(e)
+                    continue
+
+            state.status = "failed"
+            if on_progress:
+                on_progress(state)
+            return False
+
+        finally:
+            lock.release()
+
+    def download_batch(
+        self,
+        resource_ids: List[str],
+        on_progress: Optional[Callable[[str, DownloadState], None]] = None,
+    ) -> Dict[str, bool]:
+        results: Dict[str, bool] = {}
+        for resource_id in resource_ids:
+            def progress_callback(state: DownloadState, rid: str = resource_id) -> None:
+                if on_progress:
+                    on_progress(rid, state)
+
+            results[resource_id] = self.download(resource_id, progress_callback)
+        return results
+
+    def download_from_config(
+        self,
+        resource_type: ResourceType,
+        downloads_dict: Dict[str, str],
+        on_progress: Optional[Callable[[str, DownloadState], None]] = None,
+    ) -> None:
+        for filename, url in downloads_dict.items():
+            definition = ResourceDefinition(
+                resource_id=f"config_{resource_type.value}_{filename}",
+                resource_type=resource_type,
+                name=filename,
+                urls=[url],
+            )
+            self.download_by_definition(
+                definition,
+                on_progress=lambda s, f=filename: on_progress(f, s) if on_progress else None,
+            )
+
+    def ensure_core_resources(self) -> None:
+        from modules.resource_registry import (
+            VAE_APPROX_RESOURCES,
+            FOOOCUS_EXPANSION_RESOURCES,
+        )
+
+        core_resources = VAE_APPROX_RESOURCES + FOOOCUS_EXPANSION_RESOURCES
+        for resource in core_resources:
+            if not self.is_downloaded(resource.resource_id):
+                self.download(resource.resource_id)
+
+    def get_all_download_states(self) -> Dict[str, DownloadState]:
+        return dict(self._download_states)
+
+    def get_resource_status(
+        self, resource_type: Optional[ResourceType] = None
+    ) -> Dict[str, Dict[str, Any]]:
+        if resource_type is None:
+            result: Dict[str, Dict[str, Any]] = {}
+            for rt in ResourceType:
+                result[rt.value] = self.get_resource_status(rt)
+            return result
+
+        instances = self.get_instances_by_type(resource_type)
+        definitions = get_resources_by_type(resource_type)
+
+        registered_names = {d.name: d for d in definitions}
+        scanned_names = {i.name: i for i in instances}
+
+        all_names = set(registered_names.keys()) | set(scanned_names.keys())
+
+        status_dict: Dict[str, Dict[str, Any]] = {}
+        for name in sorted(all_names):
+            definition = registered_names.get(name)
+            instance = scanned_names.get(name)
+
+            status = {
+                "name": name,
+                "is_registered": definition is not None,
+                "is_scanned": instance is not None,
+                "is_downloaded": instance is not None,
+                "path": instance.path if instance else None,
+                "hash": instance.hash if instance else None,
+                "description": definition.description if definition else None,
+                "urls": definition.urls if definition else [],
+            }
+
+            if definition:
+                download_state = self.get_download_state(definition.resource_id)
+                status["download_status"] = download_state.status
+                status["download_progress"] = download_state.progress
+                status["download_error"] = download_state.error
+
+            status_dict[name] = status
+
+        return status_dict
+
+    def get_resource_summary(self) -> Dict[str, Any]:
+        summary = {
+            "total_registered": len([r for r in get_resources_by_type(ResourceType.CHECKPOINT)]),
+            "by_type": {},
+        }
+
+        for resource_type in ResourceType:
+            instances = self.get_instances_by_type(resource_type)
+            definitions = get_resources_by_type(resource_type)
+            downloaded = [r for r in definitions if self.is_downloaded(r.resource_id)]
+
+            summary["by_type"][resource_type.value] = {
+                "registered": len(definitions),
+                "scanned": len(instances),
+                "downloaded": len(downloaded),
+            }
+
+        return summary
+
+
+def get_resource_service() -> ResourceService:
+    return ResourceService()

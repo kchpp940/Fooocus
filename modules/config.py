@@ -8,8 +8,15 @@ import tempfile
 import modules.flags
 import modules.sdxl_styles
 
+from modules.model_loader import load_file_from_url
 from modules.extra_utils import makedirs_with_log, get_files_from_folder, try_eval_env_var
 from modules.flags import OutputFormat, Performance, MetadataScheme
+from modules.resource_service import get_resource_service, ResourceType
+from modules.resource_registry import (
+    INPAINT_RESOURCES,
+    IP_ADAPTER_RESOURCES,
+    SAM_RESOURCES,
+)
 
 _root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -421,36 +428,10 @@ path_fooocus_expansion = get_dir_or_set_default('path_fooocus_expansion', '../mo
 path_wildcards = get_dir_or_set_default('path_wildcards', '../wildcards/')
 path_safety_checker = get_dir_or_set_default('path_safety_checker', '../models/safety_checker/')
 path_sam = get_dir_or_set_default('path_sam', '../models/sam/')
-
-_resource_service_initialized = False
-
-
-def init_resource_service():
-    global _resource_service_initialized
-    if _resource_service_initialized:
-        return
-    _resource_service_initialized = True
-    from modules import resource_service
-    from modules.resource_registry import ResourceCategory
-    paths_map = {
-        ResourceCategory.CHECKPOINT: paths_checkpoints if isinstance(paths_checkpoints, list) else [paths_checkpoints],
-        ResourceCategory.LORA: paths_loras if isinstance(paths_loras, list) else [paths_loras],
-        ResourceCategory.VAE: [path_vae] if isinstance(path_vae, str) else path_vae,
-        ResourceCategory.VAE_APPROX: [path_vae_approx] if isinstance(path_vae_approx, str) else path_vae_approx,
-        ResourceCategory.EMBEDDING: [path_embeddings] if isinstance(path_embeddings, str) else path_embeddings,
-        ResourceCategory.INPAINT: [path_inpaint] if isinstance(path_inpaint, str) else path_inpaint,
-        ResourceCategory.CONTROLNET: [path_controlnet] if isinstance(path_controlnet, str) else path_controlnet,
-        ResourceCategory.CLIP_VISION: [path_clip_vision] if isinstance(path_clip_vision, str) else path_clip_vision,
-        ResourceCategory.UPSCALE_MODEL: [path_upscale_models] if isinstance(path_upscale_models, str) else path_upscale_models,
-        ResourceCategory.FOOOCUS_EXPANSION: [path_fooocus_expansion] if isinstance(path_fooocus_expansion, str) else path_fooocus_expansion,
-        ResourceCategory.SAFETY_CHECKER: [path_safety_checker] if isinstance(path_safety_checker, str) else path_safety_checker,
-        ResourceCategory.SAM: [path_sam] if isinstance(path_sam, str) else path_sam,
-        ResourceCategory.WILDCARD: [path_wildcards] if isinstance(path_wildcards, str) else path_wildcards,
-    }
-    resource_service.initialize(paths_map)
-
-
 path_outputs = get_path_output()
+
+resource_service = get_resource_service()
+resource_service.set_config_provider(__import__(__name__))
 
 
 def get_config_item_or_set_default(key, default_value, validator, disable_empty_as_none=False, expected_type=None):
@@ -1061,77 +1042,104 @@ def get_model_filenames(folder_paths, extensions=None, name_filter=None):
 
 def update_files():
     global model_filenames, lora_filenames, vae_filenames, wildcard_filenames, available_presets
-    from modules import resource_service
-    from modules.resource_registry import ResourceCategory
-    resource_service.refresh_all_files()
-    resource_service._refresh_status_registry()
-    model_filenames = resource_service.get_filenames(ResourceCategory.CHECKPOINT)
-    lora_filenames = resource_service.get_filenames(ResourceCategory.LORA)
-    vae_filenames = resource_service.get_filenames(ResourceCategory.VAE)
-    wildcard_filenames = resource_service.get_filenames(ResourceCategory.WILDCARD)
+    resource_service.scan_all(force=True)
+    model_filenames = resource_service.get_filenames_by_type(ResourceType.CHECKPOINT)
+    lora_filenames = resource_service.get_filenames_by_type(ResourceType.LORA)
+    vae_filenames = resource_service.get_filenames_by_type(ResourceType.VAE)
+    wildcard_filenames = get_files_from_folder(path_wildcards, ['.txt'])
     available_presets = get_presets()
     return
 
 
 def downloading_inpaint_models(v):
-    from modules import resource_service
-    return resource_service.download_inpaint_models(v)
+    assert v in modules.flags.inpaint_engine_versions
+
+    resource_ids = [r.resource_id for r in INPAINT_RESOURCES.get(v, [])]
+    for resource_id in resource_ids:
+        resource_service.download(resource_id)
+
+    head_file = resource_service.find_filepath_by_name(ResourceType.INPAINT, 'fooocus_inpaint_head.pth')
+    patch_file = None
+
+    if v == 'v1':
+        patch_file = resource_service.find_filepath_by_name(ResourceType.INPAINT, 'inpaint.fooocus.patch')
+    if v == 'v2.5':
+        patch_file = resource_service.find_filepath_by_name(ResourceType.INPAINT, 'inpaint_v25.fooocus.patch')
+    if v == 'v2.6':
+        patch_file = resource_service.find_filepath_by_name(ResourceType.INPAINT, 'inpaint_v26.fooocus.patch')
+
+    return head_file, patch_file
 
 
 def downloading_sdxl_lcm_lora():
-    from modules import resource_service
-    return resource_service.download_performance_lora("EXTREME_SPEED")
+    resource_service.download('lora_lcm')
+    return modules.flags.PerformanceLoRA.EXTREME_SPEED.value
 
 
 def downloading_sdxl_lightning_lora():
-    from modules import resource_service
-    return resource_service.download_performance_lora("LIGHTNING")
+    resource_service.download('lora_lightning')
+    return modules.flags.PerformanceLoRA.LIGHTNING.value
 
 
 def downloading_sdxl_hyper_sd_lora():
-    from modules import resource_service
-    return resource_service.download_performance_lora("HYPER_SD")
+    resource_service.download('lora_hyper_sd')
+    return modules.flags.PerformanceLoRA.HYPER_SD.value
 
 
 def downloading_controlnet_canny():
-    from modules import resource_service
-    return resource_service.download_controlnet_canny()
+    resource_service.download('controlnet_canny')
+    return resource_service.find_filepath_by_name(ResourceType.CONTROLNET, 'control-lora-canny-rank128.safetensors')
 
 
 def downloading_controlnet_cpds():
-    from modules import resource_service
-    return resource_service.download_controlnet_cpds()
+    resource_service.download('controlnet_cpds')
+    return resource_service.find_filepath_by_name(ResourceType.CONTROLNET, 'fooocus_xl_cpds_128.safetensors')
 
 
 def downloading_ip_adapters(v):
-    from modules import resource_service
-    return resource_service.download_ip_adapters(v)
+    assert v in ['ip', 'face']
+
+    resource_ids = [r.resource_id for r in IP_ADAPTER_RESOURCES.get(v, [])]
+    for resource_id in resource_ids:
+        resource_service.download(resource_id)
+
+    results = []
+    results += [resource_service.find_filepath_by_name(ResourceType.CLIP_VISION, 'clip_vision_vit_h.safetensors')]
+    results += [resource_service.find_filepath_by_name(ResourceType.CONTROLNET, 'fooocus_ip_negative.safetensors')]
+
+    if v == 'ip':
+        results += [resource_service.find_filepath_by_name(ResourceType.CONTROLNET, 'ip-adapter-plus_sdxl_vit-h.bin')]
+    if v == 'face':
+        results += [resource_service.find_filepath_by_name(ResourceType.CONTROLNET, 'ip-adapter-plus-face_sdxl_vit-h.bin')]
+
+    return results
 
 
 def downloading_upscale_model():
-    from modules import resource_service
-    return resource_service.download_upscale_model()
+    resource_service.download('upscaler_fooocus')
+    return resource_service.find_filepath_by_name(ResourceType.UPSCALE, 'fooocus_upscaler_s409985e5.bin')
+
 
 def downloading_safety_checker_model():
-    from modules import resource_service
-    return resource_service.download_safety_checker_model()
+    resource_service.download('safety_checker_stable_diffusion')
+    return resource_service.find_filepath_by_name(ResourceType.SAFETY_CHECKER, 'stable-diffusion-safety-checker.bin')
 
 
 def download_sam_model(sam_model: str) -> str:
-    from modules import resource_service
-    return resource_service.download_sam_model(sam_model)
+    if sam_model in SAM_RESOURCES:
+        resource = SAM_RESOURCES[sam_model]
+        resource_service.download(resource.resource_id)
+        return resource_service.find_filepath_by_name(ResourceType.SAM, resource.name)
+    raise ValueError(f"sam model {sam_model} does not exist.")
 
 
 def downloading_sam_vit_b():
-    from modules import resource_service
-    return resource_service.download_sam_model("vit_b")
+    return download_sam_model('vit_b')
 
 
 def downloading_sam_vit_l():
-    from modules import resource_service
-    return resource_service.download_sam_model("vit_l")
+    return download_sam_model('vit_l')
 
 
 def downloading_sam_vit_h():
-    from modules import resource_service
-    return resource_service.download_sam_model("vit_h")
+    return download_sam_model('vit_h')
