@@ -295,9 +295,10 @@ with shared.gradio_root:
                             def update_matrix_info(enabled, config_text):
                                 if not enabled:
                                     return '<div style="color: #888; font-size: 12px;">Matrix disabled.</div>'
-                                from modules.util import parse_prompt_matrix_config, get_matrix_combination_count
+                                from modules.util import parse_prompt_matrix_config, get_matrix_combination_count, validate_matrix_config
                                 config = parse_prompt_matrix_config(config_text)
                                 count = get_matrix_combination_count(config)
+                                validation = validate_matrix_config(config)
                                 text_vars = []
                                 param_vars = []
                                 for v in config:
@@ -314,7 +315,20 @@ with shared.gradio_root:
                                     parts.append(f"<span style='color:#f59e0b;'><b>Param:</b> {', '.join(param_vars)}</span>")
                                 if not parts:
                                     parts = ['<span style="color:#888;">None defined</span>']
-                                return f'<div style="font-size: 12px;">{" | ".join(parts)} | <strong style="color:#10b981;">Total: {count}</strong></div>'
+                                status_color = '#10b981' if validation['valid'] else '#ef4444'
+                                status_text = 'OK' if validation['valid'] else 'ERROR'
+                                html = f'<div style="font-size: 12px;">{" | ".join(parts)} | <strong style="color:{status_color};">Total: {count} [{status_text}]</strong></div>'
+                                if validation.get('errors'):
+                                    html += f'<div style="color:#ef4444; font-size: 11px; margin-top: 4px; line-height: 1.4;">'
+                                    for err in validation['errors']:
+                                        html += f'✗ {err}<br>'
+                                    html += '</div>'
+                                if validation.get('warnings'):
+                                    html += f'<div style="color:#f59e0b; font-size: 11px; margin-top: 4px; line-height: 1.4;">'
+                                    for w in validation['warnings']:
+                                        html += f'⚠ {w}<br>'
+                                    html += '</div>'
+                                return html
 
                             prompt_matrix.change(
                                 lambda x: gr.update(visible=x),

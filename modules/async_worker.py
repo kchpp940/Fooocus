@@ -1306,6 +1306,22 @@ def worker():
 
         loras = async_task.loras
         if not skip_prompt_processing:
+            if async_task.prompt_matrix:
+                from modules.util import validate_matrix_config
+                validation = validate_matrix_config(
+                    async_task.prompt_matrix_config,
+                    max_combinations=modules.config.default_prompt_matrix_max_combinations,
+                    max_variables=modules.config.default_prompt_matrix_max_variables,
+                    image_number=async_task.image_number
+                )
+                if not validation['valid']:
+                    error_msg = f'Prompt Matrix Error: {"; ".join(validation["errors"])}'
+                    print(f'[Prompt Matrix] Validation FAILED: {validation["errors"]}')
+                    progressbar(async_task, current_progress, error_msg)
+                    async_task.last_stop = error_msg
+                    stop_processing(async_task, 0)
+                    return
+
             tasks, use_expansion, loras, current_progress = process_prompt(async_task, async_task.prompt, async_task.negative_prompt,
                                                          base_model_additional_loras, async_task.image_number,
                                                          async_task.disable_seed_increment, use_expansion, use_style,

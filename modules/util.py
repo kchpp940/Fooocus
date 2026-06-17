@@ -685,3 +685,208 @@ def get_matrix_combination_count(matrix_config: list) -> int:
         count *= len(var.get('values', []))
     return count
 
+
+def validate_matrix_config(matrix_config: list, max_combinations: int = 512,
+                           max_variables: int = 20, image_number: int = 1) -> dict:
+    result = {'valid': True, 'errors': [], 'warnings': [],
+              'total_combinations': 0, 'total_tasks': 0}
+
+    if not matrix_config:
+        result['total_combinations'] = 1
+        result['total_tasks'] = image_number
+        return result
+
+    result['total_combinations'] = get_matrix_combination_count(matrix_config)
+    result['total_tasks'] = result['total_combinations'] * image_number
+
+    if len(matrix_config) > max_variables:
+        result['errors'].append(
+            f'Too many variables: {len(matrix_config)} (max {max_variables})')
+        result['valid'] = False
+
+    if result['total_combinations'] > max_combinations:
+        result['errors'].append(
+            f'Too many matrix combinations: {result["total_combinations"]} '
+            f'(max {max_combinations}). Reduce variables or values.')
+        result['valid'] = False
+
+    for var in matrix_config:
+        name = var.get('name', '')
+        values = var.get('values', [])
+
+        if not name or not name.strip():
+            result['errors'].append('Variable with empty name found')
+            result['valid'] = False
+            continue
+
+        if not values or len(values) == 0:
+            result['errors'].append(f'Variable "{name}" has no values')
+            result['valid'] = False
+            continue
+
+        if any(v is None or (isinstance(v, str) and not v.strip()) for v in values):
+            result['errors'].append(f'Variable "{name}" contains empty values')
+            result['valid'] = False
+
+        if len(values) > 100:
+            result['warnings'].append(
+                f'Variable "{name}" has {len(values)} values, may take very long')
+
+        if var.get('is_param_override'):
+            _validate_param_binding(var, result)
+
+    if result['errors']:
+        result['valid'] = False
+
+    return result
+
+
+def _validate_param_binding(var: dict, result: dict):
+    name = var['name']
+    target = var.get('param_target', name.lstrip('@'))
+    spec = var.get('param_spec', {})
+    values = var.get('values', [])
+
+    if target in ('seed',):
+        for v in values:
+            try:
+                iv = int(float(v))
+                if iv < 0 or iv > 2**32 - 1:
+                    result['errors'].append(
+                        f'{name}: seed value "{v}" out of valid range [0, 2^32-1]')
+                    result['valid'] = False
+            except (ValueError, TypeError):
+                result['errors'].append(f'{name}: invalid seed value "{v}" (must be integer)')
+                result['valid'] = False
+
+    elif target in ('cfg', 'cfg_scale'):
+        for v in values:
+            try:
+                fv = float(v)
+                if fv < 0.0 or fv > 50.0:
+                    result['warnings'].append(
+                        f'{name}: cfg value "{v}" is outside typical range [0, 50]')
+            except (ValueError, TypeError):
+                result['errors'].append(f'{name}: invalid cfg value "{v}" (must be number)')
+                result['valid'] = False
+
+    elif target == 'steps':
+        for v in values:
+            try:
+                iv = int(float(v))
+                if iv < 1 or iv > 200:
+                    result['warnings'].append(
+                        f'{name}: steps value "{v}" is outside typical range [1, 200]')
+            except (ValueError, TypeError):
+                result['errors'].append(f'{name}: invalid steps value "{v}" (must be integer)')
+                result['valid'] = False
+
+    elif target in ('width', 'height'):
+        for v in values:
+            try:
+                iv = int(float(v))
+                if iv < 128 or iv > 4096:
+                    result['warnings'].append(
+                        f'{name}: {target} value "{v}" is outside typical range [128, 4096]')
+                if iv % 8 != 0:
+                    result['warnings'].append(
+                        f'{name}: {target} value "{v}" is not a multiple of 8, may cause issues')
+            except (ValueError, TypeError):
+                result['errors'].append(f'{name}: invalid {target} value "{v}" (must be integer)')
+                result['valid'] = False
+
+    elif target == 'sharpness':
+        for v in values:
+            try:
+                fv = float(v)
+                if fv < 0.0 or fv > 10.0:
+                    result['warnings'].append(
+                        f'{name}: sharpness value "{v}" is outside typical range [0, 10]')
+            except (ValueError, TypeError):
+                result['errors'].append(f'{name}: invalid sharpness value "{v}" (must be number)')
+                result['valid'] = False
+
+    elif target == 'refiner_switch':
+        for v in values:
+            try:
+                fv = float(v)
+                if fv < 0.0 or fv > 1.0:
+                    result['warnings'].append(
+                        f'{name}: refiner_switch value "{v}" is outside valid range [0, 1]')
+            except (ValueError, TypeError):
+                result['errors'].append(f'{name}: invalid refiner_switch value "{v}" (must be number)')
+                result['valid'] = False
+
+    elif target == 'sampler':
+        try:
+            from modules.flags import sampler_list
+            valid_samplers = set(sampler_list)
+            valid_lower = {s.lower(): s for s in sampler_list}
+            for v in values:
+                vs = str(v)
+                if vs not in valid_samplers and vs.lower() not in valid_lower:
+                    result['errors'].append(
+                        f'{name}: unknown sampler "{vs}". Valid samplers: {", ".join(sampler_list[:8])}...')
+                    result['valid'] = False
+        except Exception as e:
+            result['warnings'].append(f'Cannot validate sampler list: {e}')
+
+    elif target == 'scheduler':
+        try:
+            from modules.flags import scheduler_list
+            valid_schedulers = set(scheduler_list)
+            valid_lower = {s.lower(): s for s in scheduler_list}
+            for v in values:
+                vs = str(v)
+                if vs not in valid_schedulers and vs.lower() not in valid_lower:
+                    result['errors'].append(
+                        f'{name}: unknown scheduler "{vs}". Valid schedulers: {", ".join(scheduler_list)}')
+                    result['valid'] = False
+        except Exception as e:
+            result['warnings'].append(f'Cannot validate scheduler list: {e}')
+
+    elif target in ('style', 'styles'):
+        try:
+            from modules.sdxl_styles import styles as sdxl_styles
+            valid_styles = set(sdxl_styles.keys())
+            valid_lower = {s.lower(): s for s in sdxl_styles.keys()}
+            for v in values:
+                vs = str(v)
+                style_names = [s.strip() for s in vs.split('|') if s.strip()]
+                if not style_names:
+                    result['errors'].append(f'{name}: empty style value "{vs}"')
+                    result['valid'] = False
+                    continue
+                for sn in style_names:
+                    if sn not in valid_styles and sn.lower() not in valid_lower:
+                        result['errors'].append(
+                            f'{name}: unknown style "{sn}". '
+                            f'Use style names from the Style dropdown.')
+                        result['valid'] = False
+        except Exception as e:
+            result['warnings'].append(f'Cannot validate style list: {e}')
+
+    elif spec.get('is_lora_weight'):
+        lora_idx = spec.get('lora_index')
+        if lora_idx is None or lora_idx < 1:
+            result['errors'].append(f'{name}: invalid LoRA index')
+            result['valid'] = False
+        try:
+            from modules.config import default_max_lora_number
+            if lora_idx is not None and lora_idx > default_max_lora_number:
+                result['errors'].append(
+                    f'{name}: LoRA index {lora_idx} exceeds max {default_max_lora_number}')
+                result['valid'] = False
+        except Exception:
+            pass
+        for v in values:
+            try:
+                fv = float(v)
+                if fv < -2.0 or fv > 2.0:
+                    result['warnings'].append(
+                        f'{name}: LoRA weight "{v}" is outside typical range [-2, 2]')
+            except (ValueError, TypeError):
+                result['errors'].append(
+                    f'{name}: invalid LoRA weight value "{v}" (must be number)')
+                result['valid'] = False
+

@@ -954,6 +954,20 @@ default_prompt_matrix_config = get_config_item_or_set_default(
     expected_type=list
 )
 
+default_prompt_matrix_max_combinations = get_config_item_or_set_default(
+    key='default_prompt_matrix_max_combinations',
+    default_value=512,
+    validator=lambda x: isinstance(x, int) and x > 0,
+    expected_type=int
+)
+
+default_prompt_matrix_max_variables = get_config_item_or_set_default(
+    key='default_prompt_matrix_max_variables',
+    default_value=20,
+    validator=lambda x: isinstance(x, int) and x > 0,
+    expected_type=int
+)
+
 config_dict["default_loras"] = default_loras = default_loras[:default_max_lora_number] + [[True, 'None', 1.0] for _ in range(default_max_lora_number - len(default_loras))]
 
 # mapping config to meta parameter
