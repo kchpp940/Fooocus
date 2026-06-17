@@ -61,7 +61,7 @@ def log(img, metadata, metadata_parser: MetadataParser | None = None, output_for
         ".image-container img { height: auto; max-width: 512px; display: block; padding-right:10px; } "
         ".image-container div { text-align: center; padding: 4px; } "
         "hr { border-color: gray; } "
-        "button { background-color: black; color: white; border: 1px solid grey; border-radius: 5px; padding: 5px 10px; text-align: center; display: inline-block; font-size: 16px; cursor: pointer;}"
+        "button { background-color: black; color: white; border: 1px solid grey; border-radius: 5px; padding: 5px 10px; text-align: center; display: inline-block; font-size: 16px; cursor: pointer; }"
         "button:hover {background-color: grey; color: black;}"
         "</style>"
     )
