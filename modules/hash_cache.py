@@ -2,6 +2,7 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import cpu_count
+from typing import Optional, Dict, List
 
 import args_manager
 from modules.util import sha256, HASH_SHA256_LENGTH, get_file_from_folder_list
@@ -20,6 +21,47 @@ def sha256_from_cache(filepath):
         save_cache_to_file(filepath, hash_value)
 
     return hash_cache[filepath]
+
+
+def is_hash_cached(filepath: str) -> bool:
+    global hash_cache
+    load_cache_from_file()
+    abs_path = os.path.abspath(filepath)
+    return abs_path in hash_cache
+
+
+def get_cached_hash(filepath: str) -> Optional[str]:
+    global hash_cache
+    load_cache_from_file()
+    abs_path = os.path.abspath(filepath)
+    return hash_cache.get(abs_path)
+
+
+def invalidate_cache(filepath: str) -> bool:
+    global hash_cache
+    abs_path = os.path.abspath(filepath)
+    if abs_path in hash_cache:
+        del hash_cache[abs_path]
+        save_cache_to_file()
+        return True
+    return False
+
+
+def get_all_cached_entries() -> Dict[str, str]:
+    load_cache_from_file()
+    return dict(hash_cache)
+
+
+def verify_hash(filepath: str, expected_hash: str) -> Optional[bool]:
+    if not os.path.isfile(filepath):
+        return None
+    load_cache_from_file()
+    current = get_cached_hash(filepath)
+    if current is None:
+        current = sha256_from_cache(filepath)
+    if expected_hash and current:
+        return current.startswith(expected_hash) or expected_hash.startswith(current)
+    return None
 
 
 def load_cache_from_file():

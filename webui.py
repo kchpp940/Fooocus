@@ -17,6 +17,7 @@ import args_manager
 import copy
 import launch
 from extras.inpaint_mask import SAMOptions
+from modules import model_resource_center as mrc
 
 from modules.sdxl_styles import legal_style_names
 from modules.private_logger import get_current_html_path
@@ -118,6 +119,232 @@ def format_preset_details_html(preset_name):
             html_parts.append('</div>')
 
     html_parts.append('</div>')
+    return ''.join(html_parts)
+
+
+STATUS_LABELS = {
+    "missing": ("❌ 缺失", "#dc2626", "#fef2f2"),
+    "exists": ("✅ 已存在", "#059669", "#ecfdf5"),
+    "downloading": ("⬇️ 下载中", "#2563eb", "#eff6ff"),
+    "download_failed": ("⚠️ 下载失败", "#d97706", "#fffbeb"),
+    "hash_verifying": ("🔍 校验中", "#7c3aed", "#f5f3ff"),
+    "hash_mismatch": ("❌ Hash 不匹配", "#dc2626", "#fef2f2"),
+    "hash_verified": ("✅ Hash 已验证", "#059669", "#ecfdf5"),
+}
+
+TYPE_LABELS = {
+    "checkpoint": ("🏛️ Checkpoint", "#7c3aed"),
+    "lora": ("🧩 LoRA", "#0891b2"),
+    "vae": ("🌊 VAE", "#059669"),
+    "controlnet": ("🎛️ ControlNet", "#db2777"),
+    "inpaint": ("🎨 Inpaint", "#ea580c"),
+    "vae_approx": ("⚡ VAE Approx", "#0d9488"),
+    "clip_vision": ("👁️ CLIP Vision", "#4f46e5"),
+    "upscale": ("🔍 Upscale", "#ca8a04"),
+    "safety_checker": ("🛡️ Safety Checker", "#64748b"),
+    "sam": ("✂️ SAM", "#9333ea"),
+    "expansion": ("✨ Expansion", "#be185d"),
+    "embedding": ("📝 Embedding", "#0284c7"),
+}
+
+
+def _get_status_badge(status: str) -> str:
+    label, color, bg = STATUS_LABELS.get(status, (status, "#666", "#f5f5f5"))
+    return f'<span style="display:inline-block; padding: 2px 10px; border-radius: 12px; color: {color}; background: {bg}; font-size: 12px; font-weight: 500;">{label}</span>'
+
+
+def _get_type_badge(rtype: str) -> str:
+    label, color = TYPE_LABELS.get(rtype, (rtype, "#666"))
+    return f'<span style="color: {color}; font-weight: 500; font-size: 13px;">{label}</span>'
+
+
+def _format_speed(speed_bytes: float) -> str:
+    if speed_bytes <= 0:
+        return "-"
+    units = ["B/s", "KB/s", "MB/s", "GB/s"]
+    i = 0
+    s = float(speed_bytes)
+    while s >= 1024 and i < len(units) - 1:
+        s /= 1024
+        i += 1
+    return f"{s:.2f} {units[i]}"
+
+
+def format_resource_center_html(selected_filter: str = "all") -> str:
+    all_resources = mrc.get_all_resources()
+    summary = mrc.get_resources_summary()
+
+    by_type = summary.get("by_type", {})
+    by_status = summary.get("by_status", {})
+
+    html_parts = []
+
+    summary_cards = [
+        ("📦 总资源数", summary["total"], "#6366f1", "#eef2ff"),
+        ("✅ 已存在", by_status.get("exists", 0) + by_status.get("hash_verified", 0), "#059669", "#ecfdf5"),
+        ("⬇️ 下载中", by_status.get("downloading", 0), "#2563eb", "#eff6ff"),
+        ("❌ 缺失", by_status.get("missing", 0) + by_status.get("download_failed", 0) + by_status.get("hash_mismatch", 0), "#dc2626", "#fef2f2"),
+    ]
+
+    html_parts.append('<div style="display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap;">')
+    for title, count, color, bg in summary_cards:
+        html_parts.append(f'''
+            <div style="flex: 1; min-width: 140px; padding: 12px 16px; background: {bg}; border-radius: 10px; border: 1px solid {color}22;">
+                <div style="font-size: 12px; color: {color}; font-weight: 500; margin-bottom: 4px;">{title}</div>
+                <div style="font-size: 24px; font-weight: 700; color: {color};">{count}</div>
+            </div>
+        ''')
+    html_parts.append('</div>')
+
+    html_parts.append('<div style="max-height: 600px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 10px;">')
+    html_parts.append('<table style="width: 100%; border-collapse: collapse; font-size: 13px;">')
+    html_parts.append('''
+        <thead style="position: sticky; top: 0; background: #f9fafb; z-index: 1;">
+            <tr style="border-bottom: 2px solid #e5e7eb;">
+                <th style="padding: 10px 12px; text-align: left; color: #374151;">类型</th>
+                <th style="padding: 10px 12px; text-align: left; color: #374151;">名称</th>
+                <th style="padding: 10px 12px; text-align: left; color: #374151;">状态</th>
+                <th style="padding: 10px 12px; text-align: left; color: #374151;">大小</th>
+                <th style="padding: 10px 12px; text-align: left; color: #374151;">Hash (SHA256)</th>
+                <th style="padding: 10px 12px; text-align: left; color: #374151;">目录</th>
+                <th style="padding: 10px 12px; text-align: left; color: #374151;">操作</th>
+            </tr>
+        </thead>
+        <tbody>
+    ''')
+
+    sorted_resources = sorted(
+        all_resources.values(),
+        key=lambda r: (r.resource_type.value, r.name.lower())
+    )
+
+    row_idx = 0
+    for res in sorted_resources:
+        rd = res.to_dict()
+        rkey = f"{rd['resource_type']}:{rd['filename']}"
+
+        if selected_filter != "all":
+            if selected_filter == "missing":
+                if rd["status"] not in ("missing", "download_failed", "hash_mismatch"):
+                    continue
+            elif selected_filter == "downloading":
+                if rd["status"] != "downloading":
+                    continue
+            elif selected_filter != rd["resource_type"]:
+                continue
+
+        row_bg = "#ffffff" if row_idx % 2 == 0 else "#fafafa"
+        row_idx += 1
+
+        progress_html = ""
+        if rd["status"] == "downloading":
+            pct = round(rd["download_progress"] * 100, 1)
+            speed = _format_speed(rd["download_speed"])
+            progress_html = f'''
+                <div style="margin-top: 4px;">
+                    <div style="height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden; width: 120px;">
+                        <div style="height: 100%; background: #2563eb; width: {pct}%; border-radius: 3px; transition: width 0.3s;"></div>
+                    </div>
+                    <div style="font-size: 11px; color: #6b7280; margin-top: 2px;">{pct}% · {speed}</div>
+                </div>
+            '''
+
+        hash_display = "-"
+        hash_class = ""
+        if rd["current_hash"]:
+            hash_trusted_style = "color: #059669;" if rd["hash_trusted"] else "color: #6b7280;"
+            trusted_badge = "✓" if rd["hash_trusted"] else "?"
+            hash_display = f'<code style="font-family: monospace; font-size: 11px; {hash_trusted_style} background: #f3f4f6; padding: 1px 6px; border-radius: 4px;">{rd["current_hash"]}</code> <span style="font-size: 10px; {hash_trusted_style}">{trusted_badge}</span>'
+
+        error_html = ""
+        if rd["error_message"]:
+            err_short = rd["error_message"][:80] + "..." if len(rd["error_message"]) > 80 else rd["error_message"]
+            error_html = f'<div style="font-size: 11px; color: #dc2626; margin-top: 2px; font-style: italic;" title="{rd["error_message"]}">⚠️ {err_short}</div>'
+
+        source_url_html = ""
+        if rd["source_url"]:
+            url_display = rd["source_url"]
+            if len(url_display) > 60:
+                url_display = url_display[:57] + "..."
+            source_url_html = f'<div style="font-size: 11px; color: #6b7280; margin-top: 2px;"><a href="{rd["source_url"]}" target="_blank" style="color: #2563eb; text-decoration: none; word-break: break-all;">{url_display}</a></div>'
+
+        builtin_badge = ' <span style="font-size: 10px; background: #e0e7ff; color: #4338ca; padding: 1px 6px; border-radius: 10px; margin-left: 4px;">内置</span>' if rd["is_builtin"] else ""
+
+        download_btn = ""
+        if rd["source_url"]:
+            btn_label = "重新下载" if rd["status"] in ("exists", "hash_verified", "hash_mismatch") else "下载"
+            btn_color = "#d97706" if rd["status"] in ("missing", "download_failed") else "#6b7280"
+            download_btn = f'''
+                <button onclick="downloadResource('{rkey}')" style="
+                    padding: 4px 10px; font-size: 11px; border-radius: 6px; border: none; cursor: pointer;
+                    background: {btn_color}11; color: {btn_color}; font-weight: 500; margin: 2px 2px;"
+                    onmouseover="this.style.background='{btn_color}22'" onmouseout="this.style.background='{btn_color}11'">
+                    ⬇️ {btn_label}
+                </button>
+            '''
+
+        rehash_btn = ""
+        if rd["status"] in ("exists", "hash_verified", "hash_mismatch"):
+            rehash_btn = f'''
+                <button onclick="rehashResource('{rkey}')" style="
+                    padding: 4px 10px; font-size: 11px; border-radius: 6px; border: none; cursor: pointer;
+                    background: #2563eb11; color: #2563eb; font-weight: 500; margin: 2px 2px;"
+                    onmouseover="this.style.background='#2563eb22'" onmouseout="this.style.background='#2563eb11'">
+                    🔍 校验
+                </button>
+            '''
+
+        dir_display = rd["directory"]
+        if len(dir_display) > 45:
+            dir_display = "..." + dir_display[-42:]
+        dir_full = rd["directory"]
+
+        html_parts.append(f'''
+            <tr style="border-bottom: 1px solid #f0f0f0; background: {row_bg};">
+                <td style="padding: 10px 12px; vertical-align: top; white-space: nowrap;">{_get_type_badge(rd["resource_type"])}</td>
+                <td style="padding: 10px 12px; vertical-align: top;">
+                    <div style="font-weight: 500; color: #111827; word-break: break-word;">{rd["name"]}{builtin_badge}</div>
+                    <div style="font-size: 11px; color: #6b7280; margin-top: 2px;">{rd["filename"]}</div>
+                    {source_url_html}
+                    {error_html}
+                </td>
+                <td style="padding: 10px 12px; vertical-align: top; white-space: nowrap;">
+                    {_get_status_badge(rd["status"])}
+                    {progress_html}
+                </td>
+                <td style="padding: 10px 12px; vertical-align: top; white-space: nowrap; color: #374151;">{rd["file_size_human"]}</td>
+                <td style="padding: 10px 12px; vertical-align: top;">{hash_display}</td>
+                <td style="padding: 10px 12px; vertical-align: top;" title="{dir_full}">
+                    <span style="font-family: monospace; font-size: 11px; color: #4b5563; background: #f3f4f6; padding: 2px 6px; border-radius: 4px; word-break: break-all;">{dir_display}</span>
+                </td>
+                <td style="padding: 10px 12px; vertical-align: top; white-space: nowrap;">
+                    {download_btn}
+                    {rehash_btn}
+                </td>
+            </tr>
+        ''')
+
+    if row_idx == 0:
+        html_parts.append('''
+            <tr>
+                <td colspan="7" style="padding: 40px; text-align: center; color: #9ca3af;">
+                    📭 当前筛选条件下没有资源
+                </td>
+            </tr>
+        ''')
+
+    html_parts.append('</tbody></table></div>')
+
+    html_parts.append(f'''
+        <div style="margin-top: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; color: #6b7280;">
+            <div>📁 Checkpoint 目录: <code style="background:#f3f4f6;padding:1px 6px;border-radius:4px;">{modules.config.paths_checkpoints}</code></div>
+            <div>📁 LoRA 目录: <code style="background:#f3f4f6;padding:1px 6px;border-radius:4px;">{modules.config.paths_loras}</code></div>
+            <div>📁 VAE 目录: <code style="background:#f3f4f6;padding:1px 6px;border-radius:4px;">{modules.config.path_vae}</code></div>
+            <div>📁 Inpaint 目录: <code style="background:#f3f4f6;padding:1px 6px;border-radius:4px;">{modules.config.path_inpaint}</code></div>
+            <div>📁 ControlNet 目录: <code style="background:#f3f4f6;padding:1px 6px;border-radius:4px;">{modules.config.path_controlnet}</code></div>
+        </div>
+    ''')
+
     return ''.join(html_parts)
 
 
@@ -272,98 +499,6 @@ with shared.gradio_root:
                     default_prompt = modules.config.default_prompt
                     if isinstance(default_prompt, str) and default_prompt != '':
                         shared.gradio_root.load(lambda: default_prompt, outputs=prompt)
-
-                    with gr.Accordion("Prompt Variable Matrix (Experimental)", open=False, visible=True) as prompt_matrix_accordion:
-                        prompt_matrix = gr.Checkbox(
-                            label='Enable Prompt Variable Matrix',
-                            value=modules.config.default_prompt_matrix,
-                            info='Text vars: {var} in prompt. Param bindings: @seed @cfg @style @sampler @steps @width/@height @sharpness @lora_weight_N.',
-                            container=False,
-                            elem_classes='min_check'
-                        )
-                        with gr.Column(visible=modules.config.default_prompt_matrix) as prompt_matrix_panel:
-                            prompt_matrix_config = gr.Textbox(
-                                label='Variable Definitions',
-                                placeholder='Text variables (replace in prompt):\n  subject: cat, dog, rabbit\n  style_desc: cinematic, anime, watercolor\n\nParam binding (@ prefix - changes generation params):\n  @seed: 12345, 67890, 11111\n  @cfg: 3.5, 5.0, 7.5\n  @style: Fooocus V2, Cinematic Default, Sai Anime\n  @sampler: dpmpp_2m_sde_gpu, euler_ancestral\n  @steps: 20, 30, 50\n  @width: 832, 1024, 1280\n  @lora_weight_1: 0.5, 0.8, 1.0\n\nMultiple styles use | separator:\n  @style: Fooocus V2, Fooocus V2|Sai Anime, Cinematic Default|Fooocus V2\n\nJSON format also supported:\n[{"name": "subject", "values": ["cat", "dog"]}, {"name": "@seed", "values": [123, 456], "is_param_override": true}]',
-                                lines=8,
-                                value=''
-                            )
-                            prompt_matrix_info = gr.HTML(
-                                value='<div style="color: #888; font-size: 12px;">Enter variables above. Total combinations will be calculated when you click Generate.</div>'
-                            )
-
-                            def update_matrix_info(enabled, config_text, img_num):
-                                if not enabled:
-                                    return '<div style="color: #888; font-size: 12px;">Matrix disabled.</div>'
-                                from modules.util import parse_prompt_matrix_config, get_matrix_combination_count, validate_matrix_config
-                                import modules.config
-                                config = parse_prompt_matrix_config(config_text)
-                                count = get_matrix_combination_count(config)
-                                validation = validate_matrix_config(
-                                    config,
-                                    max_combinations=modules.config.default_prompt_matrix_max_combinations,
-                                    max_variables=modules.config.default_prompt_matrix_max_variables,
-                                    image_number=int(img_num or 1)
-                                )
-                                text_vars = []
-                                param_vars = []
-                                for v in config:
-                                    label = f"{v['name']}({len(v['values'])})"
-                                    if v.get('is_param_override'):
-                                        disp = v.get('param_spec', {}).get('display', v.get('param_target', v['name']))
-                                        param_vars.append(f"@{disp}({len(v['values'])})")
-                                    else:
-                                        text_vars.append(label)
-                                parts = []
-                                if text_vars:
-                                    parts.append(f"<span style='color:#2563eb;'><b>Text:</b> {', '.join(text_vars)}</span>")
-                                if param_vars:
-                                    parts.append(f"<span style='color:#f59e0b;'><b>Param:</b> {', '.join(param_vars)}</span>")
-                                if not parts:
-                                    parts = ['<span style="color:#888;">None defined</span>']
-                                status_color = '#10b981' if validation['valid'] else '#ef4444'
-                                status_text = 'OK' if validation['valid'] else 'ERROR'
-                                total_tasks = validation.get('total_tasks', count)
-                                html = f'<div style="font-size: 12px;">{" | ".join(parts)} | <strong style="color:{status_color};">Combos: {count} | Tasks: {total_tasks} [{status_text}]</strong></div>'
-                                if validation.get('errors'):
-                                    html += f'<div style="color:#ef4444; font-size: 11px; margin-top: 4px; line-height: 1.4;">'
-                                    for err in validation['errors']:
-                                        html += f'✗ {err}<br>'
-                                    html += '</div>'
-                                if validation.get('warnings'):
-                                    html += f'<div style="color:#f59e0b; font-size: 11px; margin-top: 4px; line-height: 1.4;">'
-                                    for w in validation['warnings']:
-                                        html += f'⚠ {w}<br>'
-                                    html += '</div>'
-                                return html
-
-                            prompt_matrix.change(
-                                lambda x: gr.update(visible=x),
-                                inputs=[prompt_matrix],
-                                outputs=[prompt_matrix_panel],
-                                queue=False,
-                                show_progress=False
-                            ).then(
-                                update_matrix_info,
-                                inputs=[prompt_matrix, prompt_matrix_config, image_number],
-                                outputs=[prompt_matrix_info],
-                                queue=False,
-                                show_progress=False
-                            )
-                            prompt_matrix_config.change(
-                                update_matrix_info,
-                                inputs=[prompt_matrix, prompt_matrix_config, image_number],
-                                outputs=[prompt_matrix_info],
-                                queue=False,
-                                show_progress=False
-                            )
-                            image_number.change(
-                                update_matrix_info,
-                                inputs=[prompt_matrix, prompt_matrix_config, image_number],
-                                outputs=[prompt_matrix_info],
-                                queue=False,
-                                show_progress=False
-                            )
 
                 with gr.Column(scale=3, min_width=0):
                     generate_button = gr.Button(label="Generate", value="Generate", elem_classes='type_row', elem_id='generate_button', visible=True)
@@ -915,6 +1050,149 @@ with shared.gradio_root:
 
                 with gr.Row():
                     refresh_files = gr.Button(label='Refresh', value='\U0001f504 Refresh All Files', variant='secondary', elem_classes='refresh_button')
+            with gr.Tab(label='资源中心 📦') as resource_center_tab:
+                with gr.Row():
+                    resource_filter = gr.Dropdown(
+                        label='筛选',
+                        choices=[
+                            ("🌐 全部", "all"),
+                            ("❌ 缺失/有问题", "missing"),
+                            ("⬇️ 下载中", "downloading"),
+                            ("🏛️ Checkpoint", "checkpoint"),
+                            ("🧩 LoRA", "lora"),
+                            ("🌊 VAE", "vae"),
+                            ("🎛️ ControlNet", "controlnet"),
+                            ("🎨 Inpaint", "inpaint"),
+                            ("⚡ VAE Approx", "vae_approx"),
+                            ("👁️ CLIP Vision", "clip_vision"),
+                            ("🔍 Upscale", "upscale"),
+                            ("🛡️ Safety Checker", "safety_checker"),
+                            ("✂️ SAM", "sam"),
+                            ("✨ Expansion", "expansion"),
+                            ("📝 Embedding", "embedding"),
+                        ],
+                        value="all",
+                        scale=2
+                    )
+                    refresh_resource_center_btn = gr.Button(
+                        label='🔄 刷新状态',
+                        variant='primary',
+                        scale=1
+                    )
+                    auto_refresh_cb = gr.Checkbox(
+                        label='自动刷新 (5s)',
+                        value=True,
+                        container=False,
+                        scale=1
+                    )
+
+                resource_center_html = gr.HTML(value=format_resource_center_html("all"))
+                resource_center_action_output = gr.Textbox(
+                    label='操作结果',
+                    visible=False,
+                    interactive=False,
+                    elem_id='resource_center_action_output'
+                )
+                resource_center_download_input = gr.Textbox(
+                    visible=False,
+                    interactive=False,
+                    elem_id='resource_center_download_input'
+                )
+                resource_center_rehash_input = gr.Textbox(
+                    visible=False,
+                    interactive=False,
+                    elem_id='resource_center_rehash_input'
+                )
+
+                resource_filter.change(
+                    fn=format_resource_center_html,
+                    inputs=[resource_filter],
+                    outputs=[resource_center_html],
+                    queue=False,
+                    show_progress=False
+                )
+
+                refresh_resource_center_btn.click(
+                    fn=lambda f: (mrc.refresh_all_files(), format_resource_center_html(f))[1],
+                    inputs=[resource_filter],
+                    outputs=[resource_center_html],
+                    queue=False,
+                    show_progress=False
+                )
+
+                def _trigger_download(resource_key, filter_val):
+                    if not resource_key:
+                        return format_resource_center_html(filter_val), "❌ 无效的资源标识"
+                    ok = mrc.download_resource(resource_key, force=False)
+                    msg = "✅ 已开始下载" if ok else "⚠️ 无法启动下载（可能没有下载链接或已存在）"
+                    return format_resource_center_html(filter_val), msg
+
+                def _trigger_rehash(resource_key, filter_val):
+                    if not resource_key:
+                        return format_resource_center_html(filter_val), "❌ 无效的资源标识"
+                    ok = mrc.rehash_resource(resource_key)
+                    msg = "✅ 已开始重新校验 Hash" if ok else "⚠️ 无法启动校验（文件可能不存在）"
+                    return format_resource_center_html(filter_val), msg
+
+                resource_center_download_input.change(
+                    fn=_trigger_download,
+                    inputs=[resource_center_download_input, resource_filter],
+                    outputs=[resource_center_html, resource_center_action_output],
+                    queue=False,
+                    show_progress=False
+                )
+
+                resource_center_rehash_input.change(
+                    fn=_trigger_rehash,
+                    inputs=[resource_center_rehash_input, resource_filter],
+                    outputs=[resource_center_html, resource_center_action_output],
+                    queue=False,
+                    show_progress=False
+                )
+
+                auto_refresh_tick = gr.State(0)
+
+                def _auto_refresh(tick, filter_val, enabled):
+                    new_tick = tick + 1
+                    if enabled:
+                        return new_tick, format_resource_center_html(filter_val)
+                    return new_tick, gr.update()
+
+                shared.gradio_root.load(
+                    fn=_auto_refresh,
+                    inputs=[auto_refresh_tick, resource_filter, auto_refresh_cb],
+                    outputs=[auto_refresh_tick, resource_center_html],
+                    every=5,
+                    show_progress=False,
+                    queue=False
+                )
+
+                resource_center_js = '''
+                <script>
+                function downloadResource(key) {
+                    const el = document.getElementById('resource_center_download_input');
+                    if (el) {
+                        el.querySelector('textarea') ? el.querySelector('textarea').value = key : null;
+                        const ev = new Event('input', { bubbles: true });
+                        (el.querySelector('textarea') || el.querySelector('input')).value = key;
+                        (el.querySelector('textarea') || el.querySelector('input')).dispatchEvent(ev);
+                    }
+                }
+                function rehashResource(key) {
+                    const el = document.getElementById('resource_center_rehash_input');
+                    if (el) {
+                        (el.querySelector('textarea') || el.querySelector('input')).value = key;
+                        const ev = new Event('input', { bubbles: true });
+                        (el.querySelector('textarea') || el.querySelector('input')).dispatchEvent(ev);
+                    }
+                }
+                document.addEventListener('DOMContentLoaded', function() {
+                    window.downloadResource = downloadResource;
+                    window.rehashResource = rehashResource;
+                });
+                </script>
+                '''
+                gr.HTML(resource_center_js)
             with gr.Tab(label='Advanced'):
                 guidance_scale = gr.Slider(label='Guidance Scale', minimum=1.0, maximum=30.0, step=0.01,
                                            value=modules.config.default_cfg_scale,
@@ -1247,8 +1525,6 @@ with shared.gradio_root:
                   enhance_input_image, enhance_checkbox, enhance_uov_method, enhance_uov_processing_order,
                   enhance_uov_prompt_type]
         ctrls += enhance_ctrls
-
-        ctrls += [prompt_matrix, prompt_matrix_config]
 
         def parse_meta(raw_prompt_txt, is_generating):
             loaded_json = None

@@ -158,11 +158,6 @@ class AsyncTask:
         self.images_to_enhance_count = 0
         self.enhance_stats = {}
 
-        from modules.util import parse_prompt_matrix_config
-        self.prompt_matrix = bool(args.pop())
-        self.prompt_matrix_config_raw = str(args.pop() or '')
-        self.prompt_matrix_config = parse_prompt_matrix_config(self.prompt_matrix_config_raw) if self.prompt_matrix else []
-
 async_tasks = []
 
 
@@ -288,131 +283,44 @@ def worker():
                      total_count, show_intermediate_results, persist_image=True):
         if async_task.last_stop is not False:
             ldm_patched.modules.model_management.interrupt_current_processing()
-
-        param_overrides = task.get('param_overrides', {})
-        orig_cfg_scale = async_task.cfg_scale
-        orig_sampler_name = async_task.sampler_name
-        orig_scheduler_name_async = async_task.scheduler_name
-        orig_steps_async = async_task.steps
-        orig_refiner_switch = async_task.refiner_switch
-        orig_scheduler = final_scheduler_name
-        orig_steps = steps
-        orig_switch = switch
-        orig_width = width
-        orig_height = height
-        orig_sharpness = async_task.sharpness
-        orig_adaptive_cfg = async_task.adaptive_cfg
-        task_loras = loras
-        orig_loras = [(n, w) for n, w in loras] if loras else None
-
-        for target, info in param_overrides.items():
-            val = info['value']
-            spec = info.get('spec', {})
-            try:
-                if target in ('cfg', 'cfg_scale'):
-                    async_task.cfg_scale = float(val)
-                elif target == 'sampler':
-                    async_task.sampler_name = str(val)
-                elif target == 'scheduler':
-                    final_scheduler_name = str(val)
-                    async_task.scheduler_name = str(val)
-                elif target == 'steps':
-                    steps = int(float(val))
-                    async_task.steps = int(float(val))
-                elif target == 'refiner_switch':
-                    switch = float(val)
-                    async_task.refiner_switch = float(val)
-                elif target == 'width':
-                    width = int(float(val))
-                elif target == 'height':
-                    height = int(float(val))
-                elif target == 'sharpness':
-                    async_task.sharpness = float(val)
-                    patch_settings[pid] = PatchSettings(
-                        async_task.sharpness,
-                        async_task.adm_scaler_end,
-                        async_task.adm_scaler_positive,
-                        async_task.adm_scaler_negative,
-                        async_task.controlnet_softness,
-                        async_task.adaptive_cfg
-                    )
-                elif spec.get('is_lora_weight') and target.startswith('lora_weight_'):
-                    lora_idx = spec.get('lora_index')
-                    if lora_idx is not None and task_loras:
-                        adjusted_idx = lora_idx - 1
-                        if 0 <= adjusted_idx < len(task_loras):
-                            lora_name, _ = task_loras[adjusted_idx]
-                            task_loras = list(task_loras)
-                            task_loras[adjusted_idx] = (lora_name, float(val))
-            except (ValueError, TypeError, IndexError):
-                pass
-
-        imgs = None
-        img_paths = []
-        current_progress = base_progress
-        try:
-            if 'cn' in goals:
-                for cn_flag, cn_path in [
-                    (flags.cn_canny, controlnet_canny_path),
-                    (flags.cn_cpds, controlnet_cpds_path)
-                ]:
-                    for cn_img, cn_stop, cn_weight in async_task.cn_tasks[cn_flag]:
-                        positive_cond, negative_cond = core.apply_controlnet(
-                            positive_cond, negative_cond,
-                            pipeline.loaded_ControlNets[cn_path], cn_img, cn_weight, 0, cn_stop)
-            imgs = pipeline.process_diffusion(
-                positive_cond=positive_cond,
-                negative_cond=negative_cond,
-                steps=steps,
-                switch=switch,
-                width=width,
-                height=height,
-                image_seed=task['task_seed'],
-                callback=callback,
-                sampler_name=async_task.sampler_name,
-                scheduler_name=final_scheduler_name,
-                latent=initial_latent,
-                denoise=denoising_strength,
-                tiled=tiled,
-                cfg_scale=async_task.cfg_scale,
-                refiner_swap_method=async_task.refiner_swap_method,
-                disable_preview=async_task.disable_preview
-            )
-
-            del positive_cond, negative_cond
-            if inpaint_worker.current_task is not None:
-                imgs = [inpaint_worker.current_task.post_process(x) for x in imgs]
-            current_progress = int(base_progress + (100 - preparation_steps) / float(all_steps) * steps)
-            if modules.config.default_black_out_nsfw or async_task.black_out_nsfw:
-                progressbar(async_task, current_progress, 'Checking for NSFW content ...')
-                imgs = default_censor(imgs)
-            progressbar(async_task, current_progress, f'Saving image {current_task_id + 1}/{total_count} to system ...')
-            img_paths = save_and_log(async_task, height, imgs, task, use_expansion, width, task_loras, persist_image)
-            yield_result(async_task, img_paths, current_progress, async_task.black_out_nsfw, False,
-                         do_not_show_finished_images=not show_intermediate_results or async_task.disable_intermediate_results)
-        finally:
-            async_task.cfg_scale = orig_cfg_scale
-            async_task.sampler_name = orig_sampler_name
-            async_task.scheduler_name = orig_scheduler_name_async
-            async_task.steps = orig_steps_async
-            async_task.refiner_switch = orig_refiner_switch
-            async_task.sharpness = orig_sharpness
-            async_task.adaptive_cfg = orig_adaptive_cfg
-            if orig_loras is not None:
-                task_loras = orig_loras
-            patch_settings[pid] = PatchSettings(
-                async_task.sharpness,
-                async_task.adm_scaler_end,
-                async_task.adm_scaler_positive,
-                async_task.adm_scaler_negative,
-                async_task.controlnet_softness,
-                async_task.adaptive_cfg
-            )
-            final_scheduler_name = orig_scheduler
-            steps = orig_steps
-            switch = orig_switch
-            width = orig_width
-            height = orig_height
+        if 'cn' in goals:
+            for cn_flag, cn_path in [
+                (flags.cn_canny, controlnet_canny_path),
+                (flags.cn_cpds, controlnet_cpds_path)
+            ]:
+                for cn_img, cn_stop, cn_weight in async_task.cn_tasks[cn_flag]:
+                    positive_cond, negative_cond = core.apply_controlnet(
+                        positive_cond, negative_cond,
+                        pipeline.loaded_ControlNets[cn_path], cn_img, cn_weight, 0, cn_stop)
+        imgs = pipeline.process_diffusion(
+            positive_cond=positive_cond,
+            negative_cond=negative_cond,
+            steps=steps,
+            switch=switch,
+            width=width,
+            height=height,
+            image_seed=task['task_seed'],
+            callback=callback,
+            sampler_name=async_task.sampler_name,
+            scheduler_name=final_scheduler_name,
+            latent=initial_latent,
+            denoise=denoising_strength,
+            tiled=tiled,
+            cfg_scale=async_task.cfg_scale,
+            refiner_swap_method=async_task.refiner_swap_method,
+            disable_preview=async_task.disable_preview
+        )
+        del positive_cond, negative_cond  # Save memory
+        if inpaint_worker.current_task is not None:
+            imgs = [inpaint_worker.current_task.post_process(x) for x in imgs]
+        current_progress = int(base_progress + (100 - preparation_steps) / float(all_steps) * steps)
+        if modules.config.default_black_out_nsfw or async_task.black_out_nsfw:
+            progressbar(async_task, current_progress, 'Checking for NSFW content ...')
+            imgs = default_censor(imgs)
+        progressbar(async_task, current_progress, f'Saving image {current_task_id + 1}/{total_count} to system ...')
+        img_paths = save_and_log(async_task, height, imgs, task, use_expansion, width, loras, persist_image)
+        yield_result(async_task, img_paths, current_progress, async_task.black_out_nsfw, False,
+                     do_not_show_finished_images=not show_intermediate_results or async_task.disable_intermediate_results)
 
         return imgs, img_paths, current_progress
 
@@ -470,21 +378,6 @@ def worker():
             for li, (n, w) in enumerate(loras):
                 if n != 'None':
                     d.append((f'LoRA {li + 1}', f'lora_combined_{li + 1}', f'{n} : {w}'))
-
-            variable_combination = task.get('variable_combination', {})
-            param_overrides = task.get('param_overrides', {})
-            if variable_combination:
-                for var_name, var_value in variable_combination.items():
-                    if var_name.startswith('@') and var_name.lstrip('@') in param_overrides:
-                        info = param_overrides[var_name.lstrip('@')]
-                        display = info.get('display_name', var_name.lstrip('@'))
-                        d.append((f'Param: {display}', f'param_{var_name.lstrip("@")}', var_value))
-                    else:
-                        d.append((f'Matrix: {var_name}', f'matrix_{var_name}', var_value))
-                d.append(('Matrix Variables', 'matrix_variables', str(variable_combination)))
-                if param_overrides:
-                    param_summary = {t: i['value'] for t, i in param_overrides.items()}
-                    d.append(('Param Overrides', 'param_overrides', str(param_summary)))
 
             metadata_parser = None
             if async_task.save_metadata_to_images:
@@ -747,8 +640,6 @@ def worker():
 
     def process_prompt(async_task, prompt, negative_prompt, base_model_additional_loras, image_number, disable_seed_increment, use_expansion, use_style,
                        use_synthetic_refiner, current_progress, advance_progress=False):
-        from modules.util import get_matrix_combinations, apply_prompt_variables, extract_param_overrides
-
         prompts = remove_empty_str([safe_str(p) for p in prompt.splitlines()], default='')
         negative_prompts = remove_empty_str([safe_str(p) for p in negative_prompt.splitlines()], default='')
         prompt = prompts[0]
@@ -775,109 +666,69 @@ def worker():
         if advance_progress:
             current_progress += 1
         progressbar(async_task, current_progress, 'Processing prompts ...')
-
-        matrix_combinations = get_matrix_combinations(async_task.prompt_matrix_config) if async_task.prompt_matrix else [{}]
-        if async_task.prompt_matrix:
-            print(f'[Prompt Matrix] {len(matrix_combinations)} combinations generated')
-
         tasks = []
-        for combo_idx, variables in enumerate(matrix_combinations):
-            combo_prompt = apply_prompt_variables(prompt, variables)
-            combo_negative_prompt = apply_prompt_variables(negative_prompt, variables)
-            combo_extra_positive = [apply_prompt_variables(p, variables) for p in extra_positive_prompts]
-            combo_extra_negative = [apply_prompt_variables(p, variables) for p in extra_negative_prompts]
+        for i in range(image_number):
+            if disable_seed_increment:
+                task_seed = async_task.seed % (constants.MAX_SEED + 1)
+            else:
+                task_seed = (async_task.seed + i) % (constants.MAX_SEED + 1)  # randint is inclusive, % is not
 
-            param_overrides = extract_param_overrides(async_task.prompt_matrix_config, variables)
+            task_rng = random.Random(task_seed)  # may bind to inpaint noise in the future
+            task_prompt = apply_wildcards(prompt, task_rng, i, async_task.read_wildcards_in_order)
+            task_prompt = apply_arrays(task_prompt, i)
+            task_negative_prompt = apply_wildcards(negative_prompt, task_rng, i, async_task.read_wildcards_in_order)
+            task_extra_positive_prompts = [apply_wildcards(pmt, task_rng, i, async_task.read_wildcards_in_order) for pmt
+                                           in
+                                           extra_positive_prompts]
+            task_extra_negative_prompts = [apply_wildcards(pmt, task_rng, i, async_task.read_wildcards_in_order) for pmt
+                                           in
+                                           extra_negative_prompts]
 
-            for i in range(image_number):
-                global_task_idx = combo_idx * image_number + i
-                if disable_seed_increment:
-                    task_seed = async_task.seed % (constants.MAX_SEED + 1)
-                else:
-                    task_seed = (async_task.seed + global_task_idx) % (constants.MAX_SEED + 1)
+            positive_basic_workloads = []
+            negative_basic_workloads = []
 
-                if 'seed' in param_overrides:
-                    try:
-                        task_seed = int(float(param_overrides['seed']['value'])) % (constants.MAX_SEED + 1)
-                    except (ValueError, TypeError):
-                        pass
+            task_styles = async_task.style_selections.copy()
+            if use_style:
+                placeholder_replaced = False
 
-                task_rng = random.Random(task_seed)
-                task_prompt = apply_wildcards(combo_prompt, task_rng, global_task_idx, async_task.read_wildcards_in_order)
-                task_prompt = apply_arrays(task_prompt, global_task_idx)
-                task_negative_prompt = apply_wildcards(combo_negative_prompt, task_rng, global_task_idx, async_task.read_wildcards_in_order)
-                task_extra_positive_prompts = [apply_wildcards(pmt, task_rng, global_task_idx, async_task.read_wildcards_in_order) for pmt
-                                               in
-                                               combo_extra_positive]
-                task_extra_negative_prompts = [apply_wildcards(pmt, task_rng, global_task_idx, async_task.read_wildcards_in_order) for pmt
-                                               in
-                                               combo_extra_negative]
+                for j, s in enumerate(task_styles):
+                    if s == random_style_name:
+                        s = get_random_style(task_rng)
+                        task_styles[j] = s
+                    p, n, style_has_placeholder = apply_style(s, positive=task_prompt)
+                    if style_has_placeholder:
+                        placeholder_replaced = True
+                    positive_basic_workloads = positive_basic_workloads + p
+                    negative_basic_workloads = negative_basic_workloads + n
 
-                positive_basic_workloads = []
-                negative_basic_workloads = []
+                if not placeholder_replaced:
+                    positive_basic_workloads = [task_prompt] + positive_basic_workloads
+            else:
+                positive_basic_workloads.append(task_prompt)
 
-                task_styles = async_task.style_selections.copy()
-                if 'styles' in param_overrides:
-                    style_val = param_overrides['styles']['value']
-                    if isinstance(style_val, str):
-                        style_list = [s.strip() for s in style_val.split('|') if s.strip()]
-                        if style_list:
-                            task_styles = style_list
-                    elif isinstance(style_val, list):
-                        task_styles = [str(s).strip() for s in style_val if str(s).strip()]
-                if 'style' in param_overrides and 'styles' not in param_overrides:
-                    style_val = param_overrides['style']['value']
-                    if isinstance(style_val, str):
-                        style_list = [s.strip() for s in style_val.split('|') if s.strip()]
-                        if style_list:
-                            task_styles = style_list
-                    elif isinstance(style_val, list):
-                        task_styles = [str(s).strip() for s in style_val if str(s).strip()]
+            negative_basic_workloads.append(task_negative_prompt)  # Always use independent workload for negative.
 
-                effective_use_style = len(task_styles) > 0
-                if effective_use_style:
-                    placeholder_replaced = False
+            positive_basic_workloads = positive_basic_workloads + task_extra_positive_prompts
+            negative_basic_workloads = negative_basic_workloads + task_extra_negative_prompts
 
-                    for j, s in enumerate(task_styles):
-                        if s == random_style_name:
-                            s = get_random_style(task_rng)
-                            task_styles[j] = s
-                        p, n, style_has_placeholder = apply_style(s, positive=task_prompt)
-                        if style_has_placeholder:
-                            placeholder_replaced = True
-                        positive_basic_workloads = positive_basic_workloads + p
-                        negative_basic_workloads = negative_basic_workloads + n
+            positive_basic_workloads = remove_empty_str(positive_basic_workloads, default=task_prompt)
+            negative_basic_workloads = remove_empty_str(negative_basic_workloads, default=task_negative_prompt)
 
-                    if not placeholder_replaced:
-                        positive_basic_workloads = [task_prompt] + positive_basic_workloads
-                else:
-                    positive_basic_workloads.append(task_prompt)
-
-                negative_basic_workloads.append(task_negative_prompt)
-
-                positive_basic_workloads = positive_basic_workloads + task_extra_positive_prompts
-                negative_basic_workloads = negative_basic_workloads + task_extra_negative_prompts
-
-                positive_basic_workloads = remove_empty_str(positive_basic_workloads, default=task_prompt)
-                negative_basic_workloads = remove_empty_str(negative_basic_workloads, default=task_negative_prompt)
-
-                tasks.append(dict(
-                    task_seed=task_seed,
-                    task_prompt=task_prompt,
-                    task_negative_prompt=task_negative_prompt,
-                    positive=positive_basic_workloads,
-                    negative=negative_basic_workloads,
-                    expansion='',
-                    c=None,
-                    uc=None,
-                    positive_top_k=len(positive_basic_workloads),
-                    negative_top_k=len(negative_basic_workloads),
-                    log_positive_prompt='\n'.join([task_prompt] + task_extra_positive_prompts),
-                    log_negative_prompt='\n'.join([task_negative_prompt] + task_extra_negative_prompts),
-                    styles=task_styles,
-                    variable_combination=variables.copy() if variables else {},
-                    param_overrides=param_overrides.copy() if param_overrides else {}
-                ))
+            tasks.append(dict(
+                task_seed=task_seed,
+                task_prompt=task_prompt,
+                task_negative_prompt=task_negative_prompt,
+                positive=positive_basic_workloads,
+                negative=negative_basic_workloads,
+                expansion='',
+                c=None,
+                uc=None,
+                positive_top_k=len(positive_basic_workloads),
+                negative_top_k=len(negative_basic_workloads),
+                log_positive_prompt='\n'.join([task_prompt] + task_extra_positive_prompts),
+                log_negative_prompt='\n'.join([task_negative_prompt] + task_extra_negative_prompts),
+                styles=task_styles
+            ))
         if use_expansion:
             if advance_progress:
                 current_progress += 1
@@ -887,7 +738,7 @@ def worker():
                 expansion = pipeline.final_expansion(t['task_prompt'], t['task_seed'])
                 print(f'[Prompt Expansion] {expansion}')
                 t['expansion'] = expansion
-                t['positive'] = copy.deepcopy(t['positive']) + [expansion]
+                t['positive'] = copy.deepcopy(t['positive']) + [expansion]  # Deep copy.
         if advance_progress:
             current_progress += 1
         for i, t in enumerate(tasks):
@@ -1306,22 +1157,6 @@ def worker():
 
         loras = async_task.loras
         if not skip_prompt_processing:
-            if async_task.prompt_matrix:
-                from modules.util import validate_matrix_config
-                validation = validate_matrix_config(
-                    async_task.prompt_matrix_config,
-                    max_combinations=modules.config.default_prompt_matrix_max_combinations,
-                    max_variables=modules.config.default_prompt_matrix_max_variables,
-                    image_number=async_task.image_number
-                )
-                if not validation['valid']:
-                    error_msg = f'Prompt Matrix Error: {"; ".join(validation["errors"])}'
-                    print(f'[Prompt Matrix] Validation FAILED: {validation["errors"]}')
-                    progressbar(async_task, current_progress, error_msg)
-                    async_task.last_stop = error_msg
-                    stop_processing(async_task, 0)
-                    return
-
             tasks, use_expansion, loras, current_progress = process_prompt(async_task, async_task.prompt, async_task.negative_prompt,
                                                          base_model_additional_loras, async_task.image_number,
                                                          async_task.disable_seed_increment, use_expansion, use_style,
@@ -1393,16 +1228,6 @@ def worker():
 
         all_steps = steps * async_task.image_number
 
-        if async_task.prompt_matrix and len(async_task.prompt_matrix_config) > 0:
-            from modules.util import get_matrix_combination_count
-            matrix_count = get_matrix_combination_count(async_task.prompt_matrix_config)
-            all_steps = steps * async_task.image_number * matrix_count
-
-        effective_image_number = async_task.image_number
-        if async_task.prompt_matrix and len(async_task.prompt_matrix_config) > 0:
-            from modules.util import get_matrix_combination_count as _gmc
-            effective_image_number = async_task.image_number * _gmc(async_task.prompt_matrix_config)
-
         if async_task.enhance_checkbox and async_task.enhance_uov_method != flags.disabled.casefold():
             enhance_upscale_steps = async_task.performance_selection.steps()
             if 'upscale' in async_task.enhance_uov_method:
@@ -1411,12 +1236,12 @@ def worker():
                 else:
                     enhance_upscale_steps = async_task.performance_selection.steps_uov()
             enhance_upscale_steps, _, _, _ = apply_overrides(async_task, enhance_upscale_steps, height, width)
-            enhance_upscale_steps_total = effective_image_number * enhance_upscale_steps
+            enhance_upscale_steps_total = async_task.image_number * enhance_upscale_steps
             all_steps += enhance_upscale_steps_total
 
         if async_task.enhance_checkbox and len(async_task.enhance_ctrls) != 0:
             enhance_steps, _, _, _ = apply_overrides(async_task, async_task.original_steps, height, width)
-            all_steps += effective_image_number * len(async_task.enhance_ctrls) * enhance_steps
+            all_steps += async_task.image_number * len(async_task.enhance_ctrls) * enhance_steps
 
         all_steps = max(all_steps, 1)
 
@@ -1440,7 +1265,7 @@ def worker():
         processing_start_time = time.perf_counter()
 
         preparation_steps = current_progress
-        total_count = len(tasks) if len(tasks) > 0 else async_task.image_number
+        total_count = async_task.image_number
 
         def callback(step, x0, x, total_steps, y):
             if step == 0:
@@ -1454,7 +1279,7 @@ def worker():
         persist_image = not async_task.should_enhance or not async_task.save_final_enhanced_image_only
 
         for current_task_id, task in enumerate(tasks):
-            progressbar(async_task, current_progress, f'Preparing task {current_task_id + 1}/{total_count} ...')
+            progressbar(async_task, current_progress, f'Preparing task {current_task_id + 1}/{async_task.image_number} ...')
             execution_start_time = time.perf_counter()
 
             try:
@@ -1464,7 +1289,7 @@ def worker():
                                                                  initial_latent, async_task.steps, switch, task['c'],
                                                                  task['uc'], task, loras, tiled, use_expansion, width,
                                                                  height, current_progress, preparation_steps,
-                                                                 total_count, show_intermediate_results,
+                                                                 async_task.image_number, show_intermediate_results,
                                                                  persist_image)
 
                 current_progress = int(preparation_steps + (100 - preparation_steps) / float(all_steps) * async_task.steps * (current_task_id + 1))
