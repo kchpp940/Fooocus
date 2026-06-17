@@ -15,17 +15,28 @@ from modules.ui.generation import (
     rename_current_preset, delete_current_preset,
     inpaint_mode_change
 )
+from modules.ui.types import (
+    SettingsTabComponents, StylesTabComponents, ModelsTabComponents,
+    DebugToolsComponents, ControlTabComponents, AdvancedInpaintComponents,
+    FreeUComponents, AdvancedTabComponents, AdvancedColumnComponents
+)
 
 
 def create_settings_tab(gradio_root, output_format_ref):
-    components = {}
+    preset_selection = None
+    preset_details_html = None
+    new_preset_name_input = None
+    save_preset_btn = None
+    duplicate_preset_btn = None
+    rename_preset_btn = None
+    delete_preset_btn = None
+    preset_operation_msg = None
 
     if not args_manager.args.disable_preset_selection:
         preset_selection = gr.Dropdown(label='Preset',
                                        choices=modules.config.available_presets,
                                        value=args_manager.args.preset if args_manager.args.preset else "initial",
                                        interactive=True)
-        components['preset_selection'] = preset_selection
 
         with gr.Accordion(label='Preset Details & Management', open=True):
             preset_details_html = gr.HTML(
@@ -33,7 +44,6 @@ def create_settings_tab(gradio_root, output_format_ref):
                     args_manager.args.preset if args_manager.args.preset else "initial"
                 )
             )
-            components['preset_details_html'] = preset_details_html
 
             with gr.Row():
                 new_preset_name_input = gr.Textbox(
@@ -69,18 +79,10 @@ def create_settings_tab(gradio_root, output_format_ref):
                 show_label=True
             )
 
-            components['new_preset_name_input'] = new_preset_name_input
-            components['save_preset_btn'] = save_preset_btn
-            components['duplicate_preset_btn'] = duplicate_preset_btn
-            components['rename_preset_btn'] = rename_preset_btn
-            components['delete_preset_btn'] = delete_preset_btn
-            components['preset_operation_msg'] = preset_operation_msg
-
     performance_selection = gr.Radio(label='Performance',
                                      choices=flags.Performance.values(),
                                      value=modules.config.default_performance,
                                      elem_classes=['performance_selection'])
-    components['performance_selection'] = performance_selection
 
     with gr.Accordion(label='Aspect Ratios', open=False, elem_id='aspect_ratios_accordion') as aspect_ratios_accordion:
         aspect_ratios_selection = gr.Radio(label='Aspect Ratios', show_label=False,
@@ -88,37 +90,47 @@ def create_settings_tab(gradio_root, output_format_ref):
                                            value=modules.config.default_aspect_ratio,
                                            info='width × height',
                                            elem_classes='aspect_ratios')
-        components['aspect_ratios_selection'] = aspect_ratios_selection
 
         aspect_ratios_selection.change(lambda x: None, inputs=aspect_ratios_selection, queue=False, show_progress=False, _js='(x)=>{refresh_aspect_ratios_label(x);}')
         gradio_root.load(lambda x: None, inputs=aspect_ratios_selection, queue=False, show_progress=False, _js='(x)=>{refresh_aspect_ratios_label(x);}')
 
     image_number = gr.Slider(label='Image Number', minimum=1, maximum=modules.config.default_max_image_number, step=1, value=modules.config.default_image_number)
-    components['image_number'] = image_number
 
     output_format = gr.Radio(label='Output Format',
                              choices=flags.OutputFormat.list(),
                              value=modules.config.default_output_format)
-    components['output_format'] = output_format
     output_format_ref[0] = output_format
 
     negative_prompt = gr.Textbox(label='Negative Prompt', show_label=True, placeholder="Type prompt here.",
                                  info='Describing what you do not want to see.', lines=2,
                                  elem_id='negative_prompt',
                                  value=modules.config.default_prompt_negative)
-    components['negative_prompt'] = negative_prompt
 
     seed_random = gr.Checkbox(label='Random', value=True)
-    components['seed_random'] = seed_random
 
     image_seed = gr.Textbox(label='Seed', value=0, max_lines=1, visible=False)
-    components['image_seed'] = image_seed
 
     history_link = gr.HTML()
-    components['history_link'] = history_link
     gradio_root.load(lambda: update_history_link(output_format.value), outputs=history_link, queue=False, show_progress=False)
 
-    return components
+    return SettingsTabComponents(
+        preset_selection=preset_selection,
+        preset_details_html=preset_details_html,
+        new_preset_name_input=new_preset_name_input,
+        save_preset_btn=save_preset_btn,
+        duplicate_preset_btn=duplicate_preset_btn,
+        rename_preset_btn=rename_preset_btn,
+        delete_preset_btn=delete_preset_btn,
+        preset_operation_msg=preset_operation_msg,
+        performance_selection=performance_selection,
+        aspect_ratios_selection=aspect_ratios_selection,
+        image_number=image_number,
+        output_format=output_format,
+        negative_prompt=negative_prompt,
+        seed_random=seed_random,
+        image_seed=image_seed,
+        history_link=history_link
+    )
 
 
 def update_preset_details(preset_name):
@@ -126,8 +138,6 @@ def update_preset_details(preset_name):
 
 
 def create_styles_tab(gradio_root):
-    components = {}
-
     style_sorter.try_load_sorted_styles(
         style_names=legal_style_names,
         default_selected=modules.config.default_styles)
@@ -136,17 +146,14 @@ def create_styles_tab(gradio_root):
                                   placeholder="\U0001F50E Type here to search styles ...",
                                   value="",
                                   label='Search Styles')
-    components['style_search_bar'] = style_search_bar
 
     style_selections = gr.CheckboxGroup(show_label=False, container=False,
                                         choices=copy.deepcopy(style_sorter.all_styles),
                                         value=copy.deepcopy(modules.config.default_styles),
                                         label='Selected Styles',
                                         elem_classes=['style_selections'])
-    components['style_selections'] = style_selections
 
     gradio_receiver_style_selections = gr.Textbox(elem_id='gradio_receiver_style_selections', visible=False)
-    components['gradio_receiver_style_selections'] = gradio_receiver_style_selections
 
     gradio_root.load(lambda: gr.update(choices=copy.deepcopy(style_sorter.all_styles)),
                      outputs=style_selections)
@@ -165,12 +172,14 @@ def create_styles_tab(gradio_root):
                                            show_progress=False).then(
         lambda: None, _js='()=>{refresh_style_localization();}')
 
-    return components
+    return StylesTabComponents(
+        style_search_bar=style_search_bar,
+        style_selections=style_selections,
+        gradio_receiver_style_selections=gradio_receiver_style_selections
+    )
 
 
 def create_models_tab(gradio_root):
-    components = {}
-
     with gr.Group():
         with gr.Row():
             base_model = gr.Dropdown(label='Base Model (SDXL only)', choices=modules.config.model_filenames, value=modules.config.default_base_model_name, show_label=True)
@@ -187,10 +196,6 @@ def create_models_tab(gradio_root):
         refiner_model.change(lambda x: gr.update(visible=x != 'None'),
                              inputs=refiner_model, outputs=refiner_switch, show_progress=False, queue=False)
 
-    components['base_model'] = base_model
-    components['refiner_model'] = refiner_model
-    components['refiner_switch'] = refiner_switch
-
     with gr.Group():
         lora_ctrls = []
 
@@ -206,35 +211,32 @@ def create_models_tab(gradio_root):
                                         elem_classes='lora_weight', scale=5)
                 lora_ctrls += [lora_enabled, lora_model, lora_weight]
 
-    components['lora_ctrls'] = lora_ctrls
-
     with gr.Row():
         refresh_files = gr.Button(label='Refresh', value='\U0001f504 Refresh All Files', variant='secondary', elem_classes='refresh_button')
-    components['refresh_files'] = refresh_files
 
-    return components
+    return ModelsTabComponents(
+        base_model=base_model,
+        refiner_model=refiner_model,
+        refiner_switch=refiner_switch,
+        lora_ctrls=lora_ctrls,
+        refresh_files=refresh_files
+    )
 
 
 def create_advanced_tab(gradio_root):
-    components = {}
-
     guidance_scale = gr.Slider(label='Guidance Scale', minimum=1.0, maximum=30.0, step=0.01,
                                value=modules.config.default_cfg_scale,
                                info='Higher value means style is cleaner, vivider, and more artistic.')
-    components['guidance_scale'] = guidance_scale
 
     sharpness = gr.Slider(label='Image Sharpness', minimum=0.0, maximum=30.0, step=0.001,
                           value=modules.config.default_sample_sharpness,
                           info='Higher value means image and texture are sharper.')
-    components['sharpness'] = sharpness
 
     gr.HTML('<a href="https://github.com/lllyasviel/Fooocus/discussions/117" target="_blank">\U0001F4D4 Documentation</a>')
 
     dev_mode = gr.Checkbox(label='Developer Debug Mode', value=modules.config.default_developer_debug_mode_checkbox, container=False)
-    components['dev_mode'] = dev_mode
 
     with gr.Column(visible=modules.config.default_developer_debug_mode_checkbox) as dev_tools:
-        components['dev_tools'] = dev_tools
 
         with gr.Tab(label='Debug Tools'):
             adm_scaler_positive = gr.Slider(label='Positive ADM Guidance Scaler', minimum=0.1, maximum=3.0,
@@ -327,30 +329,32 @@ def create_advanced_tab(gradio_root):
                 save_metadata_to_images.change(lambda x: gr.update(visible=x), inputs=[save_metadata_to_images], outputs=[metadata_scheme],
                                                queue=False, show_progress=False)
 
-            components['adm_scaler_positive'] = adm_scaler_positive
-            components['adm_scaler_negative'] = adm_scaler_negative
-            components['adm_scaler_end'] = adm_scaler_end
-            components['refiner_swap_method'] = refiner_swap_method
-            components['adaptive_cfg'] = adaptive_cfg
-            components['clip_skip'] = clip_skip
-            components['sampler_name'] = sampler_name
-            components['scheduler_name'] = scheduler_name
-            components['vae_name'] = vae_name
-            components['generate_image_grid'] = generate_image_grid
-            components['overwrite_step'] = overwrite_step
-            components['overwrite_switch'] = overwrite_switch
-            components['overwrite_width'] = overwrite_width
-            components['overwrite_height'] = overwrite_height
-            components['overwrite_vary_strength'] = overwrite_vary_strength
-            components['overwrite_upscale_strength'] = overwrite_upscale_strength
-            components['disable_preview'] = disable_preview
-            components['disable_intermediate_results'] = disable_intermediate_results
-            components['disable_seed_increment'] = disable_seed_increment
-            components['read_wildcards_in_order'] = read_wildcards_in_order
-            components['black_out_nsfw'] = black_out_nsfw
-            components['save_final_enhanced_image_only'] = save_final_enhanced_image_only
-            components['save_metadata_to_images'] = save_metadata_to_images
-            components['metadata_scheme'] = metadata_scheme
+            debug_tools = DebugToolsComponents(
+                adm_scaler_positive=adm_scaler_positive,
+                adm_scaler_negative=adm_scaler_negative,
+                adm_scaler_end=adm_scaler_end,
+                refiner_swap_method=refiner_swap_method,
+                adaptive_cfg=adaptive_cfg,
+                clip_skip=clip_skip,
+                sampler_name=sampler_name,
+                scheduler_name=scheduler_name,
+                vae_name=vae_name,
+                generate_image_grid=generate_image_grid,
+                overwrite_step=overwrite_step,
+                overwrite_switch=overwrite_switch,
+                overwrite_width=overwrite_width,
+                overwrite_height=overwrite_height,
+                overwrite_vary_strength=overwrite_vary_strength,
+                overwrite_upscale_strength=overwrite_upscale_strength,
+                disable_preview=disable_preview,
+                disable_intermediate_results=disable_intermediate_results,
+                disable_seed_increment=disable_seed_increment,
+                read_wildcards_in_order=read_wildcards_in_order,
+                black_out_nsfw=black_out_nsfw,
+                save_final_enhanced_image_only=save_final_enhanced_image_only,
+                save_metadata_to_images=save_metadata_to_images,
+                metadata_scheme=metadata_scheme
+            )
 
         with gr.Tab(label='Control'):
             debugging_cn_preprocessor = gr.Checkbox(label='Debug Preprocessors', value=False,
@@ -373,13 +377,15 @@ def create_advanced_tab(gradio_root):
                 canny_high_threshold = gr.Slider(label='Canny High Threshold', minimum=1, maximum=255,
                                                  step=1, value=128)
 
-            components['debugging_cn_preprocessor'] = debugging_cn_preprocessor
-            components['skipping_cn_preprocessor'] = skipping_cn_preprocessor
-            components['mixing_image_prompt_and_vary_upscale'] = mixing_image_prompt_and_vary_upscale
-            components['mixing_image_prompt_and_inpaint'] = mixing_image_prompt_and_inpaint
-            components['controlnet_softness'] = controlnet_softness
-            components['canny_low_threshold'] = canny_low_threshold
-            components['canny_high_threshold'] = canny_high_threshold
+            control = ControlTabComponents(
+                debugging_cn_preprocessor=debugging_cn_preprocessor,
+                skipping_cn_preprocessor=skipping_cn_preprocessor,
+                mixing_image_prompt_and_vary_upscale=mixing_image_prompt_and_vary_upscale,
+                mixing_image_prompt_and_inpaint=mixing_image_prompt_and_inpaint,
+                controlnet_softness=controlnet_softness,
+                canny_low_threshold=canny_low_threshold,
+                canny_high_threshold=canny_high_threshold
+            )
 
         with gr.Tab(label='Inpaint'):
             debugging_inpaint_preprocessor = gr.Checkbox(label='Debug Inpaint Preprocessing', value=False)
@@ -417,16 +423,18 @@ def create_advanced_tab(gradio_root):
 
             inpaint_mask_color = gr.ColorPicker(label='Inpaint brush color', value='#FFFFFF', elem_id='inpaint_brush_color')
 
-            components['debugging_inpaint_preprocessor'] = debugging_inpaint_preprocessor
-            components['debugging_enhance_masks_checkbox'] = debugging_enhance_masks_checkbox
-            components['debugging_dino'] = debugging_dino
-            components['inpaint_disable_initial_latent'] = inpaint_disable_initial_latent
-            components['inpaint_engine'] = inpaint_engine
-            components['inpaint_strength'] = inpaint_strength
-            components['inpaint_respective_field'] = inpaint_respective_field
-            components['inpaint_erode_or_dilate'] = inpaint_erode_or_dilate
-            components['dino_erode_or_dilate'] = dino_erode_or_dilate
-            components['inpaint_mask_color'] = inpaint_mask_color
+            inpaint_advanced = AdvancedInpaintComponents(
+                debugging_inpaint_preprocessor=debugging_inpaint_preprocessor,
+                debugging_enhance_masks_checkbox=debugging_enhance_masks_checkbox,
+                debugging_dino=debugging_dino,
+                inpaint_disable_initial_latent=inpaint_disable_initial_latent,
+                inpaint_engine=inpaint_engine,
+                inpaint_strength=inpaint_strength,
+                inpaint_respective_field=inpaint_respective_field,
+                inpaint_erode_or_dilate=inpaint_erode_or_dilate,
+                dino_erode_or_dilate=dino_erode_or_dilate,
+                inpaint_mask_color=inpaint_mask_color
+            )
 
         with gr.Tab(label='FreeU'):
             freeu_enabled = gr.Checkbox(label='Enabled', value=False)
@@ -436,101 +444,112 @@ def create_advanced_tab(gradio_root):
             freeu_s2 = gr.Slider(label='S2', minimum=0, maximum=4, step=0.01, value=0.95)
             freeu_ctrls = [freeu_enabled, freeu_b1, freeu_b2, freeu_s1, freeu_s2]
 
-            components['freeu_enabled'] = freeu_enabled
-            components['freeu_b1'] = freeu_b1
-            components['freeu_b2'] = freeu_b2
-            components['freeu_s1'] = freeu_s1
-            components['freeu_s2'] = freeu_s2
-            components['freeu_ctrls'] = freeu_ctrls
+            freeu = FreeUComponents(
+                freeu_enabled=freeu_enabled,
+                freeu_b1=freeu_b1,
+                freeu_b2=freeu_b2,
+                freeu_s1=freeu_s1,
+                freeu_s2=freeu_s2,
+                freeu_ctrls=freeu_ctrls
+            )
 
-    return components
+    return AdvancedTabComponents(
+        guidance_scale=guidance_scale,
+        sharpness=sharpness,
+        dev_mode=dev_mode,
+        dev_tools=dev_tools,
+        debug_tools=debug_tools,
+        control=control,
+        inpaint_advanced=inpaint_advanced,
+        freeu=freeu
+    )
 
 
 def create_all_advanced_tabs(gradio_root, output_format_ref=None):
-    components = {}
-
     if output_format_ref is None:
         output_format_ref = [None]
 
     with gr.Tab(label='Settings'):
         settings = create_settings_tab(gradio_root, output_format_ref)
-        components.update(settings)
 
     with gr.Tab(label='Styles', elem_classes=['style_selections_tab']):
         styles = create_styles_tab(gradio_root)
-        components.update(styles)
 
     with gr.Tab(label='Models'):
         models = create_models_tab(gradio_root)
-        components.update(models)
 
     with gr.Tab(label='Advanced'):
-        adv = create_advanced_tab(gradio_root)
-        components.update(adv)
+        advanced = create_advanced_tab(gradio_root)
 
-    return components
+    return AdvancedColumnComponents(
+        settings=settings,
+        styles=styles,
+        models=models,
+        advanced=advanced
+    )
 
 
-def bind_advanced_column_events(components, gradio_root, inpaint_engine_state,
+def bind_advanced_column_events(components: AdvancedColumnComponents, gradio_root, inpaint_engine_state,
                                   inpaint_additional_prompt, outpaint_selections, example_inpaint_prompts,
                                   inpaint_input_image, inpaint_mask_image, inpaint_mask_generation_col,
                                   inpaint_advanced_masking_checkbox, invert_mask_checkbox,
                                   enhance_inpaint_mode_ctrls, enhance_inpaint_update_ctrls, enhance_inpaint_engine_ctrls,
                                   state_is_generating, inpaint_mode, load_data_outputs,
                                   style_selections, output_format_ref):
-    seed_random = components['seed_random']
-    image_seed = components['image_seed']
+    seed_random = components.settings.seed_random
+    image_seed = components.settings.image_seed
 
     seed_random.change(random_checked, inputs=[seed_random], outputs=[image_seed],
                        queue=False, show_progress=False)
 
-    dev_mode = components['dev_mode']
-    dev_tools = components['dev_tools']
+    dev_mode = components.advanced.dev_mode
+    dev_tools = components.advanced.dev_tools
 
     dev_mode.change(dev_mode_checked, inputs=[dev_mode], outputs=[dev_tools],
                     queue=False, show_progress=False)
 
-    if 'refresh_files' in components:
-        refresh_files = components['refresh_files']
-        base_model = components['base_model']
-        refiner_model = components['refiner_model']
-        vae_name = components['vae_name']
-        lora_ctrls = components['lora_ctrls']
+    refresh_files = components.models.refresh_files
+    if refresh_files is not None:
+        refresh_files = components.models.refresh_files
+        base_model = components.models.base_model
+        refiner_model = components.models.refiner_model
+        vae_name = components.advanced.debug_tools.vae_name
+        lora_ctrls = components.models.lora_ctrls
 
         refresh_files_output = [base_model, refiner_model, vae_name]
         if not args_manager.args.disable_preset_selection:
-            preset_selection = components['preset_selection']
+            preset_selection = components.settings.preset_selection
             refresh_files_output += [preset_selection]
 
         refresh_files.click(refresh_files_clicked, [], refresh_files_output + lora_ctrls,
                             queue=False, show_progress=False)
 
     if not args_manager.args.disable_preset_selection:
-        preset_selection = components['preset_selection']
-        new_preset_name_input = components['new_preset_name_input']
-        save_preset_btn = components['save_preset_btn']
-        duplicate_preset_btn = components['duplicate_preset_btn']
-        rename_preset_btn = components['rename_preset_btn']
-        delete_preset_btn = components['delete_preset_btn']
-        preset_details_html = components['preset_details_html']
-        preset_operation_msg = components['preset_operation_msg']
+        preset_selection = components.settings.preset_selection
+        new_preset_name_input = components.settings.new_preset_name_input
+        save_preset_btn = components.settings.save_preset_btn
+        duplicate_preset_btn = components.settings.duplicate_preset_btn
+        rename_preset_btn = components.settings.rename_preset_btn
+        delete_preset_btn = components.settings.delete_preset_btn
+        preset_details_html = components.settings.preset_details_html
+        preset_operation_msg = components.settings.preset_operation_msg
 
-        base_model = components['base_model']
-        refiner_model = components['refiner_model']
-        refiner_switch = components['refiner_switch']
-        guidance_scale = components['guidance_scale']
-        sharpness = components['sharpness']
-        adaptive_cfg = components['adaptive_cfg']
-        clip_skip = components['clip_skip']
-        sampler_name = components['sampler_name']
-        scheduler_name = components['scheduler_name']
-        vae_name = components['vae_name']
-        performance_selection = components['performance_selection']
-        aspect_ratios_selection = components['aspect_ratios_selection']
-        style_selections = components['style_selections']
-        overwrite_step = components['overwrite_step']
-        inpaint_engine = components['inpaint_engine']
-        lora_ctrls = components['lora_ctrls']
+        base_model = components.models.base_model
+        refiner_model = components.models.refiner_model
+        refiner_switch = components.models.refiner_switch
+        guidance_scale = components.advanced.guidance_scale
+        sharpness = components.advanced.sharpness
+        adaptive_cfg = components.advanced.debug_tools.adaptive_cfg
+        clip_skip = components.advanced.debug_tools.clip_skip
+        sampler_name = components.advanced.debug_tools.sampler_name
+        scheduler_name = components.advanced.debug_tools.scheduler_name
+        vae_name = components.advanced.debug_tools.vae_name
+        performance_selection = components.settings.performance_selection
+        aspect_ratios_selection = components.settings.aspect_ratios_selection
+        style_selections = components.styles.style_selections
+        overwrite_step = components.advanced.debug_tools.overwrite_step
+        inpaint_engine = components.advanced.inpaint_advanced.inpaint_engine
+        lora_ctrls = components.models.lora_ctrls
 
         preset_selection.change(
             preset_selection_change,
@@ -597,11 +616,8 @@ def bind_advanced_column_events(components, gradio_root, inpaint_engine_state,
             show_progress=False
         )
 
-    if 'inpaint_advanced_masking_checkbox' in components:
-        pass
-
-    if 'inpaint_mask_color' in components:
-        inpaint_mask_color = components['inpaint_mask_color']
+    inpaint_mask_color = components.advanced.inpaint_advanced.inpaint_mask_color
+    if inpaint_mask_color is not None:
         inpaint_mask_color.change(lambda x: gr.update(brush_color=x), inputs=inpaint_mask_color,
                                   outputs=inpaint_input_image,
                                   queue=False, show_progress=False)
@@ -611,15 +627,20 @@ def bind_advanced_column_events(components, gradio_root, inpaint_engine_state,
                                              outputs=[inpaint_mask_image, inpaint_mask_generation_col],
                                              queue=False, show_progress=False)
 
+    inpaint_disable_initial_latent = components.advanced.inpaint_advanced.inpaint_disable_initial_latent
+    inpaint_engine = components.advanced.inpaint_advanced.inpaint_engine
+    inpaint_strength = components.advanced.inpaint_advanced.inpaint_strength
+    inpaint_respective_field = components.advanced.inpaint_advanced.inpaint_respective_field
+
     inpaint_mode.change(inpaint_mode_change, inputs=[inpaint_mode, inpaint_engine_state], outputs=[
         inpaint_additional_prompt, outpaint_selections, example_inpaint_prompts,
-        components['inpaint_disable_initial_latent'], components['inpaint_engine'],
-        components['inpaint_strength'], components['inpaint_respective_field']
+        inpaint_disable_initial_latent, inpaint_engine,
+        inpaint_strength, inpaint_respective_field
     ], show_progress=False, queue=False)
 
-    default_inpaint_ctrls = [inpaint_mode, components['inpaint_disable_initial_latent'],
-                             components['inpaint_engine'], components['inpaint_strength'],
-                             components['inpaint_respective_field']]
+    default_inpaint_ctrls = [inpaint_mode, inpaint_disable_initial_latent,
+                             inpaint_engine, inpaint_strength,
+                             inpaint_respective_field]
 
     for mode, disable_initial_latent, engine, strength, respective_field in [default_inpaint_ctrls] + enhance_inpaint_update_ctrls:
         gradio_root.load(inpaint_mode_change, inputs=[mode, inpaint_engine_state], outputs=[
@@ -631,6 +652,6 @@ def bind_advanced_column_events(components, gradio_root, inpaint_engine_state,
     if output_format is not None:
         output_format.input(lambda x: gr.update(output_format=x), inputs=output_format)
 
-    history_link = components['history_link']
+    history_link = components.settings.history_link
     if output_format is not None:
         output_format.change(lambda: update_history_link(output_format.value), outputs=history_link, queue=False, show_progress=False)

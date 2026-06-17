@@ -6,62 +6,59 @@ from modules.ui.generation import (
     trigger_metadata_preview, trigger_metadata_import,
     trigger_compare, trigger_compare_fill
 )
+from modules.ui.types import MetadataTab, CompareTab
 
 
 def create_metadata_tab():
-    components = {}
-
     with gr.Tab(label='Metadata', id='metadata_tab') as metadata_tab:
-        components['metadata_tab'] = metadata_tab
         with gr.Column():
             metadata_input_image = grh.Image(label='For images created by Fooocus', source='upload', type='filepath')
             metadata_json = gr.JSON(label='Metadata')
             metadata_import_button = gr.Button(value='Apply Metadata')
 
-    components['metadata_input_image'] = metadata_input_image
-    components['metadata_json'] = metadata_json
-    components['metadata_import_button'] = metadata_import_button
-
-    return components
+    return MetadataTab(
+        metadata_tab=metadata_tab,
+        metadata_input_image=metadata_input_image,
+        metadata_json=metadata_json,
+        metadata_import_button=metadata_import_button,
+    )
 
 
 def create_compare_tab():
-    components = {}
-
     with gr.Tab(label='Parameter Compare', id='compare_tab') as compare_tab:
-        components['compare_tab'] = compare_tab
         with gr.Row():
             with gr.Column():
                 compare_image_left = grh.Image(label='Base Image (left side)', source='upload', type='filepath')
-                components['compare_image_left'] = compare_image_left
             with gr.Column():
                 compare_image_right = grh.Image(label='Target Image (right side, to import)', source='upload', type='filepath')
-                components['compare_image_right'] = compare_image_right
 
         with gr.Row():
             compare_run_button = gr.Button(value='Compare Parameters', variant='primary')
             compare_fill_diff_button = gr.Button(value='Apply only different parameters')
             compare_fill_all_button = gr.Button(value='Apply all target parameters')
 
-        components['compare_run_button'] = compare_run_button
-        components['compare_fill_diff_button'] = compare_fill_diff_button
-        components['compare_fill_all_button'] = compare_fill_all_button
-
         with gr.Row():
             compare_summary_html = gr.HTML(value='Upload two Fooocus images and click Compare.')
-            components['compare_summary_html'] = compare_summary_html
         with gr.Row():
             compare_diff_json = gr.JSON(label='Parameter Differences')
-            components['compare_diff_json'] = compare_diff_json
 
-    return components
+    return CompareTab(
+        compare_tab=compare_tab,
+        compare_image_left=compare_image_left,
+        compare_image_right=compare_image_right,
+        compare_run_button=compare_run_button,
+        compare_fill_diff_button=compare_fill_diff_button,
+        compare_fill_all_button=compare_fill_all_button,
+        compare_summary_html=compare_summary_html,
+        compare_diff_json=compare_diff_json,
+    )
 
 
-def bind_metadata_events(components, state_is_generating, inpaint_mode,
+def bind_metadata_events(metadata: MetadataTab, state_is_generating, inpaint_mode,
                           load_data_outputs, style_selections):
-    metadata_input_image = components['metadata_input_image']
-    metadata_json = components['metadata_json']
-    metadata_import_button = components['metadata_import_button']
+    metadata_input_image = metadata.metadata_input_image
+    metadata_json = metadata.metadata_json
+    metadata_import_button = metadata.metadata_import_button
 
     metadata_input_image.upload(
         trigger_metadata_preview, inputs=[metadata_input_image],
@@ -77,15 +74,15 @@ def bind_metadata_events(components, state_is_generating, inpaint_mode,
     )
 
 
-def bind_compare_events(components, state_is_generating, inpaint_mode,
+def bind_compare_events(compare: CompareTab, state_is_generating, inpaint_mode,
                          load_data_outputs, style_selections):
-    compare_image_left = components['compare_image_left']
-    compare_image_right = components['compare_image_right']
-    compare_run_button = components['compare_run_button']
-    compare_fill_diff_button = components['compare_fill_diff_button']
-    compare_fill_all_button = components['compare_fill_all_button']
-    compare_summary_html = components['compare_summary_html']
-    compare_diff_json = components['compare_diff_json']
+    compare_image_left = compare.compare_image_left
+    compare_image_right = compare.compare_image_right
+    compare_run_button = compare.compare_run_button
+    compare_fill_diff_button = compare.compare_fill_diff_button
+    compare_fill_all_button = compare.compare_fill_all_button
+    compare_summary_html = compare.compare_summary_html
+    compare_diff_json = compare.compare_diff_json
 
     compare_run_button.click(
         trigger_compare,

@@ -7,25 +7,23 @@ from modules.ui.generation import (
     trigger_show_image_properties, ip_advance_checked,
     inpaint_mode_change
 )
+from modules.ui.types import (
+    ImageInputTabs, ImagePromptComponents, InpaintComponents,
+    DescribeComponents, EnhancePanelComponents
+)
 
 
 def create_image_input_tabs(gradio_root):
-    components = {}
-
     with gr.Tabs(selected=modules.config.default_selected_image_input_tab_id):
         with gr.Tab(label='Upscale or Variation', id='uov_tab') as uov_tab:
-            components['uov_tab'] = uov_tab
             with gr.Row():
                 with gr.Column():
                     uov_input_image = grh.Image(label='Image', source='upload', type='numpy', show_label=False)
-                    components['uov_input_image'] = uov_input_image
                 with gr.Column():
                     uov_method = gr.Radio(label='Upscale or Variation:', choices=flags.uov_list, value=modules.config.default_uov_method)
-                    components['uov_method'] = uov_method
                     gr.HTML('<a href="https://github.com/lllyasviel/Fooocus/discussions/390" target="_blank">\U0001F4D4 Documentation</a>')
 
         with gr.Tab(label='Image Prompt', id='ip_tab') as ip_tab:
-            components['ip_tab'] = ip_tab
             ip_images = []
             ip_types = []
             ip_stops = []
@@ -57,129 +55,128 @@ def create_image_input_tabs(gradio_root):
                         ip_ad_cols.append(ad_col)
 
             ip_advanced = gr.Checkbox(label='Advanced', value=modules.config.default_image_prompt_advanced_checkbox, container=False)
-            components['ip_advanced'] = ip_advanced
-            components['ip_ad_cols'] = ip_ad_cols
-            components['ip_types'] = ip_types
-            components['ip_stops'] = ip_stops
-            components['ip_weights'] = ip_weights
-            components['ip_ctrls'] = ip_ctrls
-            components['ip_images'] = ip_images
             gr.HTML('* \"Image Prompt\" is powered by Fooocus Image Mixture Engine (v1.0.1). <a href="https://github.com/lllyasviel/Fooocus/discussions/557" target="_blank">\U0001F4D4 Documentation</a>')
 
+            ip_comps = ImagePromptComponents(
+                ip_images=ip_images,
+                ip_types=ip_types,
+                ip_stops=ip_stops,
+                ip_weights=ip_weights,
+                ip_ctrls=ip_ctrls,
+                ip_ad_cols=ip_ad_cols,
+                ip_advanced=ip_advanced,
+            )
+
         with gr.Tab(label='Inpaint or Outpaint', id='inpaint_tab') as inpaint_tab:
-            components['inpaint_tab'] = inpaint_tab
             with gr.Row():
                 with gr.Column():
                     inpaint_input_image = grh.Image(label='Image', source='upload', type='numpy', tool='sketch', height=500, brush_color="#FFFFFF", elem_id='inpaint_canvas', show_label=False)
-                    components['inpaint_input_image'] = inpaint_input_image
-
                     inpaint_advanced_masking_checkbox = gr.Checkbox(label='Enable Advanced Masking Features', value=modules.config.default_inpaint_advanced_masking_checkbox)
-                    components['inpaint_advanced_masking_checkbox'] = inpaint_advanced_masking_checkbox
-
                     inpaint_mode = gr.Dropdown(choices=modules.flags.inpaint_options, value=modules.config.default_inpaint_method, label='Method')
-                    components['inpaint_mode'] = inpaint_mode
-
                     inpaint_additional_prompt = gr.Textbox(placeholder="Describe what you want to inpaint.", elem_id='inpaint_additional_prompt', label='Inpaint Additional Prompt', visible=False)
-                    components['inpaint_additional_prompt'] = inpaint_additional_prompt
-
                     outpaint_selections = gr.CheckboxGroup(choices=['Left', 'Right', 'Top', 'Bottom'], value=[], label='Outpaint Direction')
-                    components['outpaint_selections'] = outpaint_selections
-
                     example_inpaint_prompts = gr.Dataset(samples=modules.config.example_inpaint_prompts,
                                                          label='Additional Prompt Quick List',
                                                          components=[inpaint_additional_prompt],
                                                          visible=False)
-                    components['example_inpaint_prompts'] = example_inpaint_prompts
                     gr.HTML('* Powered by Fooocus Inpaint Engine <a href="https://github.com/lllyasviel/Fooocus/discussions/414" target="_blank">\U0001F4D4 Documentation</a>')
                     example_inpaint_prompts.click(lambda x: x[0], inputs=example_inpaint_prompts, outputs=inpaint_additional_prompt, show_progress=False, queue=False)
 
                 with gr.Column(visible=modules.config.default_inpaint_advanced_masking_checkbox) as inpaint_mask_generation_col:
-                    components['inpaint_mask_generation_col'] = inpaint_mask_generation_col
-
                     inpaint_mask_image = grh.Image(label='Mask Upload', source='upload', type='numpy', tool='sketch', height=500, brush_color="#FFFFFF", mask_opacity=1, elem_id='inpaint_mask_canvas')
-                    components['inpaint_mask_image'] = inpaint_mask_image
-
                     invert_mask_checkbox = gr.Checkbox(label='Invert Mask When Generating', value=modules.config.default_invert_mask_checkbox)
-                    components['invert_mask_checkbox'] = invert_mask_checkbox
-
                     inpaint_mask_model = gr.Dropdown(label='Mask generation model',
                                                      choices=flags.inpaint_mask_models,
                                                      value=modules.config.default_inpaint_mask_model)
-                    components['inpaint_mask_model'] = inpaint_mask_model
-
                     inpaint_mask_cloth_category = gr.Dropdown(label='Cloth category',
                                                                  choices=flags.inpaint_mask_cloth_category,
                                                                  value=modules.config.default_inpaint_mask_cloth_category,
                                                                  visible=False)
-                    components['inpaint_mask_cloth_category'] = inpaint_mask_cloth_category
-
                     inpaint_mask_dino_prompt_text = gr.Textbox(label='Detection prompt', value='', visible=False, info='Use singular whenever possible', placeholder='Describe what you want to detect.')
-                    components['inpaint_mask_dino_prompt_text'] = inpaint_mask_dino_prompt_text
-
                     example_inpaint_mask_dino_prompt_text = gr.Dataset(
                         samples=modules.config.example_enhance_detection_prompts,
                         label='Detection Prompt Quick List',
                         components=[inpaint_mask_dino_prompt_text],
                         visible=modules.config.default_inpaint_mask_model == 'sam')
-                    components['example_inpaint_mask_dino_prompt_text'] = example_inpaint_mask_dino_prompt_text
                     example_inpaint_mask_dino_prompt_text.click(lambda x: x[0],
                                                                 inputs=example_inpaint_mask_dino_prompt_text,
                                                                 outputs=inpaint_mask_dino_prompt_text,
                                                                 show_progress=False, queue=False)
 
                     with gr.Accordion("Advanced options", visible=False, open=False) as inpaint_mask_advanced_options:
-                        components['inpaint_mask_advanced_options'] = inpaint_mask_advanced_options
                         inpaint_mask_sam_model = gr.Dropdown(label='SAM model', choices=flags.inpaint_mask_sam_model, value=modules.config.default_inpaint_mask_sam_model)
-                        components['inpaint_mask_sam_model'] = inpaint_mask_sam_model
-
                         inpaint_mask_box_threshold = gr.Slider(label="Box Threshold", minimum=0.0, maximum=1.0, value=0.3, step=0.05)
-                        components['inpaint_mask_box_threshold'] = inpaint_mask_box_threshold
-
                         inpaint_mask_text_threshold = gr.Slider(label="Text Threshold", minimum=0.0, maximum=1.0, value=0.25, step=0.05)
-                        components['inpaint_mask_text_threshold'] = inpaint_mask_text_threshold
-
                         inpaint_mask_sam_max_detections = gr.Slider(label="Maximum number of detections", info="Set to 0 to detect all", minimum=0, maximum=10, value=modules.config.default_sam_max_detections, step=1, interactive=True)
-                        components['inpaint_mask_sam_max_detections'] = inpaint_mask_sam_max_detections
 
                     generate_mask_button = gr.Button(value='Generate mask from image')
-                    components['generate_mask_button'] = generate_mask_button
+
+            inpaint_comps = InpaintComponents(
+                inpaint_input_image=inpaint_input_image,
+                inpaint_advanced_masking_checkbox=inpaint_advanced_masking_checkbox,
+                inpaint_mode=inpaint_mode,
+                inpaint_additional_prompt=inpaint_additional_prompt,
+                outpaint_selections=outpaint_selections,
+                example_inpaint_prompts=example_inpaint_prompts,
+                inpaint_mask_generation_col=inpaint_mask_generation_col,
+                inpaint_mask_image=inpaint_mask_image,
+                invert_mask_checkbox=invert_mask_checkbox,
+                inpaint_mask_model=inpaint_mask_model,
+                inpaint_mask_cloth_category=inpaint_mask_cloth_category,
+                inpaint_mask_dino_prompt_text=inpaint_mask_dino_prompt_text,
+                example_inpaint_mask_dino_prompt_text=example_inpaint_mask_dino_prompt_text,
+                inpaint_mask_advanced_options=inpaint_mask_advanced_options,
+                inpaint_mask_sam_model=inpaint_mask_sam_model,
+                inpaint_mask_box_threshold=inpaint_mask_box_threshold,
+                inpaint_mask_text_threshold=inpaint_mask_text_threshold,
+                inpaint_mask_sam_max_detections=inpaint_mask_sam_max_detections,
+                generate_mask_button=generate_mask_button,
+            )
 
         with gr.Tab(label='Describe', id='describe_tab') as describe_tab:
-            components['describe_tab'] = describe_tab
             with gr.Row():
                 with gr.Column():
                     describe_input_image = grh.Image(label='Image', source='upload', type='numpy', show_label=False)
-                    components['describe_input_image'] = describe_input_image
                 with gr.Column():
                     describe_methods = gr.CheckboxGroup(
                         label='Content Type',
                         choices=flags.describe_types,
                         value=modules.config.default_describe_content_type)
-                    components['describe_methods'] = describe_methods
-
                     describe_apply_styles = gr.Checkbox(label='Apply Styles', value=modules.config.default_describe_apply_prompts_checkbox)
-                    components['describe_apply_styles'] = describe_apply_styles
-
                     describe_btn = gr.Button(value='Describe this Image into Prompt')
-                    components['describe_btn'] = describe_btn
-
                     describe_image_size = gr.Textbox(label='Image Size and Recommended Size', elem_id='describe_image_size', visible=False)
-                    components['describe_image_size'] = describe_image_size
                     gr.HTML('<a href="https://github.com/lllyasviel/Fooocus/discussions/1363" target="_blank">\U0001F4D4 Documentation</a>')
 
+            describe_comps = DescribeComponents(
+                describe_input_image=describe_input_image,
+                describe_methods=describe_methods,
+                describe_apply_styles=describe_apply_styles,
+                describe_btn=describe_btn,
+                describe_image_size=describe_image_size,
+            )
+
         with gr.Tab(label='Enhance', id='enhance_tab') as enhance_tab:
-            components['enhance_tab'] = enhance_tab
             with gr.Row():
                 with gr.Column():
                     enhance_input_image = grh.Image(label='Use with Enhance, skips image generation', source='upload', type='numpy')
-                    components['enhance_input_image'] = enhance_input_image
                     gr.HTML('<a href="https://github.com/lllyasviel/Fooocus/discussions/3281" target="_blank">\U0001F4D4 Documentation</a>')
 
-    return components
+    return ImageInputTabs(
+        uov_tab=uov_tab,
+        uov_input_image=uov_input_image,
+        uov_method=uov_method,
+        ip_tab=ip_tab,
+        ip=ip_comps,
+        inpaint_tab=inpaint_tab,
+        inpaint=inpaint_comps,
+        describe_tab=describe_tab,
+        describe=describe_comps,
+        enhance_tab=enhance_tab,
+        enhance_input_image=enhance_input_image,
+    )
 
 
 def create_enhance_panel(gradio_root, inpaint_engine_state):
-    components = {}
     enhance_ctrls = []
     enhance_inpaint_mode_ctrls = []
     enhance_inpaint_engine_ctrls = []
@@ -191,20 +188,15 @@ def create_enhance_panel(gradio_root, inpaint_engine_state):
                 with gr.Column():
                     enhance_uov_method = gr.Radio(label='Upscale or Variation:', choices=flags.uov_list,
                                                   value=modules.config.default_enhance_uov_method)
-                    components['enhance_uov_method'] = enhance_uov_method
-
                     enhance_uov_processing_order = gr.Radio(label='Order of Processing',
                                                             info='Use before to enhance small details and after to enhance large areas.',
                                                             choices=flags.enhancement_uov_processing_order,
                                                             value=modules.config.default_enhance_uov_processing_order)
-                    components['enhance_uov_processing_order'] = enhance_uov_processing_order
-
                     enhance_uov_prompt_type = gr.Radio(label='Prompt',
                                                        info='Choose which prompt to use for Upscale or Variation.',
                                                        choices=flags.enhancement_uov_prompt_types,
                                                        value=modules.config.default_enhance_uov_prompt_type,
                                                        visible=modules.config.default_enhance_uov_processing_order == flags.enhancement_uov_after)
-                    components['enhance_uov_prompt_type'] = enhance_uov_prompt_type
 
                     enhance_uov_processing_order.change(lambda x: gr.update(visible=x == flags.enhancement_uov_after),
                                                         inputs=enhance_uov_processing_order,
@@ -216,7 +208,6 @@ def create_enhance_panel(gradio_root, inpaint_engine_state):
             with gr.Tab(label=f'#{index + 1}') as enhance_tab_item:
                 enhance_enabled = gr.Checkbox(label='Enable', value=False, elem_classes='min_check',
                                               container=False)
-
                 enhance_mask_dino_prompt_text = gr.Textbox(label='Detection prompt',
                                                            info='Use singular whenever possible',
                                                            placeholder='Describe what you want to detect.',
@@ -338,21 +329,25 @@ def create_enhance_panel(gradio_root, inpaint_engine_state):
                          example_enhance_mask_dino_prompt_text],
                 queue=False, show_progress=False)
 
-    components['enhance_ctrls'] = enhance_ctrls
-    components['enhance_inpaint_mode_ctrls'] = enhance_inpaint_mode_ctrls
-    components['enhance_inpaint_engine_ctrls'] = enhance_inpaint_engine_ctrls
-    components['enhance_inpaint_update_ctrls'] = enhance_inpaint_update_ctrls
+    return EnhancePanelComponents(
+        enhance_ctrls=enhance_ctrls,
+        enhance_inpaint_mode_ctrls=enhance_inpaint_mode_ctrls,
+        enhance_inpaint_engine_ctrls=enhance_inpaint_engine_ctrls,
+        enhance_inpaint_update_ctrls=enhance_inpaint_update_ctrls,
+        enhance_uov_method=enhance_uov_method,
+        enhance_uov_processing_order=enhance_uov_processing_order,
+        enhance_uov_prompt_type=enhance_uov_prompt_type,
+    )
 
-    return components
 
-
-def bind_image_input_events(components, inpaint_engine_state,
+def bind_image_input_events(image_input: ImageInputTabs, inpaint_engine_state,
                             inpaint_additional_prompt, outpaint_selections, example_inpaint_prompts):
-    ip_advanced = components['ip_advanced']
-    ip_ad_cols = components['ip_ad_cols']
-    ip_types = components['ip_types']
-    ip_stops = components['ip_stops']
-    ip_weights = components['ip_weights']
+    ip = image_input.ip
+    ip_advanced = ip.ip_advanced
+    ip_ad_cols = ip.ip_ad_cols
+    ip_types = ip.ip_types
+    ip_stops = ip.ip_stops
+    ip_weights = ip.ip_weights
 
     ip_advanced.change(
         lambda x: ip_advance_checked(x, ip_ad_cols, ip_types, ip_stops, ip_weights),
@@ -361,11 +356,12 @@ def bind_image_input_events(components, inpaint_engine_state,
         queue=False, show_progress=False
     )
 
-    inpaint_mask_model = components['inpaint_mask_model']
-    inpaint_mask_cloth_category = components['inpaint_mask_cloth_category']
-    inpaint_mask_dino_prompt_text = components['inpaint_mask_dino_prompt_text']
-    inpaint_mask_advanced_options = components['inpaint_mask_advanced_options']
-    example_inpaint_mask_dino_prompt_text = components['example_inpaint_mask_dino_prompt_text']
+    inp = image_input.inpaint
+    inpaint_mask_model = inp.inpaint_mask_model
+    inpaint_mask_cloth_category = inp.inpaint_mask_cloth_category
+    inpaint_mask_dino_prompt_text = inp.inpaint_mask_dino_prompt_text
+    inpaint_mask_advanced_options = inp.inpaint_mask_advanced_options
+    example_inpaint_mask_dino_prompt_text = inp.example_inpaint_mask_dino_prompt_text
 
     inpaint_mask_model.change(
         lambda x: [gr.update(visible=x == 'u2net_cloth_seg')] +
@@ -379,18 +375,9 @@ def bind_image_input_events(components, inpaint_engine_state,
                  example_inpaint_mask_dino_prompt_text],
         queue=False, show_progress=False)
 
-    describe_input_image = components['describe_input_image']
-    describe_image_size = components['describe_image_size']
+    desc = image_input.describe
+    describe_input_image = desc.describe_input_image
+    describe_image_size = desc.describe_image_size
 
     describe_input_image.upload(trigger_show_image_properties, inputs=describe_input_image,
                                 outputs=describe_image_size, show_progress=False, queue=False)
-
-    for enhance_inpaint_mode, enhance_disable_initial_latent, enhance_inpaint_engine, \
-        enhance_inpaint_strength, enhance_inpaint_respective_field in components['enhance_inpaint_update_ctrls']:
-        enhance_inpaint_mode.change(
-            inpaint_mode_change, inputs=[enhance_inpaint_mode, inpaint_engine_state],
-            outputs=[
-                inpaint_additional_prompt, outpaint_selections, example_inpaint_prompts,
-                enhance_disable_initial_latent, enhance_inpaint_engine,
-                enhance_inpaint_strength, enhance_inpaint_respective_field
-            ], show_progress=False, queue=False)
