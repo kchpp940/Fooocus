@@ -118,8 +118,18 @@ def log(img, metadata, metadata_parser: MetadataParser | None = None, output_for
         item += f"<tr><td class='label'>Full raw prompt</td><td class='value'>{full_prompt_details}</td></tr>\n"
 
     if task is not None and 'variable_combination' in task and task['variable_combination']:
-        combo_parts = [f"<span style='color:#2563eb;'><b>{k}</b>: {v}</span>" for k, v in task['variable_combination'].items()]
-        combo_html = ' | '.join(combo_parts)
+        param_overrides = task.get('param_overrides', {}) if task else {}
+        param_parts = []
+        text_parts = []
+        for k, v in task['variable_combination'].items():
+            if k.startswith('@') and k.lstrip('@') in param_overrides:
+                info = param_overrides[k.lstrip('@')]
+                display = info.get('display_name', k.lstrip('@'))
+                param_parts.append(f"<span style='color:#f59e0b;'><b>Param {display}</b>: {v}</span>")
+            else:
+                text_parts.append(f"<span style='color:#2563eb;'><b>{k}</b>: {v}</span>")
+        all_parts = param_parts + text_parts
+        combo_html = ' | '.join(all_parts)
         item += f"<tr><td class='label' style='background:#1a3a5c;'>Matrix Combo</td><td class='value' style='background:#1a3a5c;'>{combo_html}</td></tr>\n"
 
     item += "</table>"

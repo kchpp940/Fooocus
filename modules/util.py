@@ -515,6 +515,22 @@ def get_image_size_info(image: np.ndarray, aspect_ratios: list) -> str:
         return f'Error reading image: {e}'
 
 
+SUPPORTED_PARAM_BINDINGS = {
+    'seed': {'type': int, 'display': 'Seed'},
+    'cfg': {'type': float, 'alias': ['cfg_scale'], 'display': 'Guidance Scale'},
+    'cfg_scale': {'type': float, 'display': 'Guidance Scale'},
+    'sampler': {'type': str, 'display': 'Sampler'},
+    'scheduler': {'type': str, 'display': 'Scheduler'},
+    'steps': {'type': int, 'display': 'Steps'},
+    'style': {'type': str, 'is_multi': True, 'alias': ['styles'], 'display': 'Styles'},
+    'styles': {'type': str, 'is_multi': True, 'display': 'Styles'},
+    'width': {'type': int, 'display': 'Width'},
+    'height': {'type': int, 'display': 'Height'},
+    'sharpness': {'type': float, 'display': 'Sharpness'},
+    'refiner_switch': {'type': float, 'display': 'Refiner Switch'},
+}
+
+
 def parse_prompt_matrix_config(matrix_config_text: str) -> list:
     if not matrix_config_text or not matrix_config_text.strip():
         return []
@@ -532,7 +548,10 @@ def parse_prompt_matrix_config(matrix_config_text: str) -> list:
                     elif isinstance(values, list):
                         values = [str(v).strip() for v in values if str(v).strip() != '']
                     if name and len(values) > 0:
-                        result.append({'name': name, 'values': values})
+                        entry = {'name': name, 'values': values}
+                        if item.get('is_param_override') or name.startswith('@'):
+                            _mark_param_binding(entry)
+                        result.append(entry)
             return result
     except json.JSONDecodeError:
         pass
@@ -547,8 +566,63 @@ def parse_prompt_matrix_config(matrix_config_text: str) -> list:
             name = name_part.strip()
             values = [v.strip() for v in values_part.split(',') if v.strip()]
             if name and len(values) > 0:
-                result.append({'name': name, 'values': values})
+                entry = {'name': name, 'values': values}
+                if name.startswith('@'):
+                    _mark_param_binding(entry)
+                result.append(entry)
     return result
+
+
+def _mark_param_binding(entry: dict):
+    raw_name = entry['name']
+    target_name = raw_name[1:].strip()
+    entry['is_param_override'] = True
+    spec = _resolve_param_binding_spec(target_name)
+    entry['param_target'] = spec['canonical']
+    entry['param_spec'] = {'type': spec['type'], 'display': spec['display'],
+                           'is_multi': spec.get('is_multi', False),
+                           'is_lora_weight': spec.get('is_lora_weight', False),
+                           'lora_index': spec.get('lora_index')}
+    if spec.get('type'):
+        typed_values = []
+        for v in entry['values']:
+            try:
+                if spec['type'] == int:
+                    typed_values.append(int(float(v)))
+                elif spec['type'] == float:
+                    typed_values.append(float(v))
+                else:
+                    typed_values.append(v)
+            except (ValueError, TypeError):
+                typed_values.append(v)
+        entry['values'] = typed_values
+
+
+def _resolve_param_binding_spec(target_name: str) -> dict:
+    tn = target_name.lower()
+    for canonical, spec in SUPPORTED_PARAM_BINDINGS.items():
+        aliases = [canonical] + spec.get('alias', [])
+        if tn in aliases:
+            return {'canonical': canonical, 'type': spec.get('type'),
+                    'display': spec.get('display', canonical),
+                    'is_multi': spec.get('is_multi', False)}
+    if tn.startswith('lora_weight_'):
+        try:
+            idx = int(tn.split('_')[-1])
+            return {'canonical': f'lora_weight_{idx}', 'type': float,
+                    'display': f'LoRA {idx} Weight',
+                    'is_lora_weight': True, 'lora_index': idx}
+        except (ValueError, IndexError):
+            pass
+    if tn.startswith('lora_') and '_weight_' in tn:
+        try:
+            idx = int(tn.split('_weight_')[-1])
+            return {'canonical': f'lora_weight_{idx}', 'type': float,
+                    'display': f'LoRA {idx} Weight',
+                    'is_lora_weight': True, 'lora_index': idx}
+        except (ValueError, IndexError):
+            pass
+    return {'canonical': target_name, 'type': None, 'display': target_name}
 
 
 def get_matrix_combinations(matrix_config: list) -> list:
@@ -574,9 +648,33 @@ def apply_prompt_variables(text: str, variables: dict) -> str:
         return text
     result = text
     for name, value in variables.items():
+        if name.startswith('@'):
+            continue
         placeholder = '{' + name + '}'
         result = result.replace(placeholder, str(value))
     return result
+
+
+def extract_param_overrides(matrix_config: list, variables: dict) -> dict:
+    if not matrix_config or not variables:
+        return {}
+    overrides = {}
+    config_by_name = {c['name']: c for c in matrix_config}
+    for var_name, var_value in variables.items():
+        if var_name not in config_by_name:
+            continue
+        cfg = config_by_name[var_name]
+        if not cfg.get('is_param_override'):
+            continue
+        target = cfg.get('param_target', var_name.lstrip('@'))
+        spec = cfg.get('param_spec', {})
+        overrides[target] = {
+            'value': var_value,
+            'spec': spec,
+            'display_name': spec.get('display', target),
+            'raw_name': var_name
+        }
+    return overrides
 
 
 def get_matrix_combination_count(matrix_config: list) -> int:

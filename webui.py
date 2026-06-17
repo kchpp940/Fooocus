@@ -277,15 +277,15 @@ with shared.gradio_root:
                         prompt_matrix = gr.Checkbox(
                             label='Enable Prompt Variable Matrix',
                             value=modules.config.default_prompt_matrix,
-                            info='Use {variable_name} in prompt and negative prompt to define placeholders.',
+                            info='Text vars: {var} in prompt. Param bindings: @seed @cfg @style @sampler @steps @width/@height @sharpness @lora_weight_N.',
                             container=False,
                             elem_classes='min_check'
                         )
                         with gr.Column(visible=modules.config.default_prompt_matrix) as prompt_matrix_panel:
                             prompt_matrix_config = gr.Textbox(
                                 label='Variable Definitions',
-                                placeholder='Example format (one variable per line):\nstyle: cinematic, anime, watercolor, oil painting\nseed: 12345, 67890, 11111\nlora_weight: 0.5, 0.8, 1.0\n\nOr JSON format:\n[{"name": "style", "values": ["cinematic", "anime"]}, {"name": "seed", "values": ["12345", "67890"]}]',
-                                lines=6,
+                                placeholder='Text variables (replace in prompt):\n  subject: cat, dog, rabbit\n  style_desc: cinematic, anime, watercolor\n\nParam binding (@ prefix - changes generation params):\n  @seed: 12345, 67890, 11111\n  @cfg: 3.5, 5.0, 7.5\n  @style: Fooocus V2, Cinematic Default, Sai Anime\n  @sampler: dpmpp_2m_sde_gpu, euler_ancestral\n  @steps: 20, 30, 50\n  @width: 832, 1024, 1280\n  @lora_weight_1: 0.5, 0.8, 1.0\n\nMultiple styles use | separator:\n  @style: Fooocus V2, Fooocus V2|Sai Anime, Cinematic Default|Fooocus V2\n\nJSON format also supported:\n[{"name": "subject", "values": ["cat", "dog"]}, {"name": "@seed", "values": [123, 456], "is_param_override": true}]',
+                                lines=8,
                                 value=''
                             )
                             prompt_matrix_info = gr.HTML(
@@ -298,8 +298,23 @@ with shared.gradio_root:
                                 from modules.util import parse_prompt_matrix_config, get_matrix_combination_count
                                 config = parse_prompt_matrix_config(config_text)
                                 count = get_matrix_combination_count(config)
-                                variables = ', '.join([f"{v['name']}({len(v['values'])})" for v in config])
-                                return f'<div style="color: #2563eb; font-size: 12px;"><strong>Variables:</strong> {variables if variables else "None defined"} | <strong>Total Combinations:</strong> {count}</div>'
+                                text_vars = []
+                                param_vars = []
+                                for v in config:
+                                    label = f"{v['name']}({len(v['values'])})"
+                                    if v.get('is_param_override'):
+                                        disp = v.get('param_spec', {}).get('display', v.get('param_target', v['name']))
+                                        param_vars.append(f"@{disp}({len(v['values'])})")
+                                    else:
+                                        text_vars.append(label)
+                                parts = []
+                                if text_vars:
+                                    parts.append(f"<span style='color:#2563eb;'><b>Text:</b> {', '.join(text_vars)}</span>")
+                                if param_vars:
+                                    parts.append(f"<span style='color:#f59e0b;'><b>Param:</b> {', '.join(param_vars)}</span>")
+                                if not parts:
+                                    parts = ['<span style="color:#888;">None defined</span>']
+                                return f'<div style="font-size: 12px;">{" | ".join(parts)} | <strong style="color:#10b981;">Total: {count}</strong></div>'
 
                             prompt_matrix.change(
                                 lambda x: gr.update(visible=x),
