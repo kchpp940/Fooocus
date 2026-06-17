@@ -1043,7 +1043,7 @@ def update_files():
 
 def downloading_inpaint_models(v):
     assert v in modules.flags.inpaint_engine_versions
-    from modules.model_resource_center import get_resource_def, ResourceType, _get_dir_for_key
+    from modules.model_resource_registry import get_resource_def, ResourceType
 
     head_def = get_resource_def(f"{ResourceType.INPAINT.value}:fooocus_inpaint_head.pth")
     if head_def and head_def.source_url:
@@ -1075,7 +1075,7 @@ def downloading_inpaint_models(v):
 
 
 def downloading_sdxl_lcm_lora():
-    from modules.model_resource_center import get_resource_def, ResourceType
+    from modules.model_resource_registry import get_resource_def, ResourceType
     rdef = get_resource_def(f"{ResourceType.LORA.value}:{modules.flags.PerformanceLoRA.EXTREME_SPEED.value}")
     if rdef and rdef.source_url:
         load_file_from_url(
@@ -1087,7 +1087,7 @@ def downloading_sdxl_lcm_lora():
 
 
 def downloading_sdxl_lightning_lora():
-    from modules.model_resource_center import get_resource_def, ResourceType
+    from modules.model_resource_registry import get_resource_def, ResourceType
     rdef = get_resource_def(f"{ResourceType.LORA.value}:{modules.flags.PerformanceLoRA.LIGHTNING.value}")
     if rdef and rdef.source_url:
         load_file_from_url(
@@ -1099,7 +1099,7 @@ def downloading_sdxl_lightning_lora():
 
 
 def downloading_sdxl_hyper_sd_lora():
-    from modules.model_resource_center import get_resource_def, ResourceType
+    from modules.model_resource_registry import get_resource_def, ResourceType
     rdef = get_resource_def(f"{ResourceType.LORA.value}:{modules.flags.PerformanceLoRA.HYPER_SD.value}")
     if rdef and rdef.source_url:
         load_file_from_url(
@@ -1111,7 +1111,7 @@ def downloading_sdxl_hyper_sd_lora():
 
 
 def downloading_controlnet_canny():
-    from modules.model_resource_center import get_resource_def, ResourceType
+    from modules.model_resource_registry import get_resource_def, ResourceType
     rdef = get_resource_def(f"{ResourceType.CONTROLNET.value}:control-lora-canny-rank128.safetensors")
     if rdef and rdef.source_url:
         load_file_from_url(
@@ -1123,7 +1123,7 @@ def downloading_controlnet_canny():
 
 
 def downloading_controlnet_cpds():
-    from modules.model_resource_center import get_resource_def, ResourceType
+    from modules.model_resource_registry import get_resource_def, ResourceType
     rdef = get_resource_def(f"{ResourceType.CONTROLNET.value}:fooocus_xl_cpds_128.safetensors")
     if rdef and rdef.source_url:
         load_file_from_url(
@@ -1136,7 +1136,7 @@ def downloading_controlnet_cpds():
 
 def downloading_ip_adapters(v):
     assert v in ['ip', 'face']
-    from modules.model_resource_center import get_resource_def, ResourceType
+    from modules.model_resource_registry import get_resource_def, ResourceType
 
     results = []
 
@@ -1182,7 +1182,7 @@ def downloading_ip_adapters(v):
 
 
 def downloading_upscale_model():
-    from modules.model_resource_center import get_resource_def, ResourceType
+    from modules.model_resource_registry import get_resource_def, ResourceType
     rdef = get_resource_def(f"{ResourceType.UPSCALE.value}:fooocus_upscaler_s409985e5.bin")
     if rdef and rdef.source_url:
         load_file_from_url(
@@ -1194,7 +1194,7 @@ def downloading_upscale_model():
 
 
 def downloading_safety_checker_model():
-    from modules.model_resource_center import get_resource_def, ResourceType
+    from modules.model_resource_registry import get_resource_def, ResourceType
     rdef = get_resource_def(f"{ResourceType.SAFETY_CHECKER.value}:stable-diffusion-safety-checker.bin")
     if rdef and rdef.source_url:
         load_file_from_url(
@@ -1218,7 +1218,7 @@ def download_sam_model(sam_model: str) -> str:
 
 
 def downloading_sam_vit_b():
-    from modules.model_resource_center import get_resource_def, ResourceType
+    from modules.model_resource_registry import get_resource_def, ResourceType
     rdef = get_resource_def(f"{ResourceType.SAM.value}:sam_vit_b_01ec64.pth")
     if rdef and rdef.source_url:
         load_file_from_url(
@@ -1230,7 +1230,7 @@ def downloading_sam_vit_b():
 
 
 def downloading_sam_vit_l():
-    from modules.model_resource_center import get_resource_def, ResourceType
+    from modules.model_resource_registry import get_resource_def, ResourceType
     rdef = get_resource_def(f"{ResourceType.SAM.value}:sam_vit_l_0b3195.pth")
     if rdef and rdef.source_url:
         load_file_from_url(
@@ -1242,7 +1242,7 @@ def downloading_sam_vit_l():
 
 
 def downloading_sam_vit_h():
-    from modules.model_resource_center import get_resource_def, ResourceType
+    from modules.model_resource_registry import get_resource_def, ResourceType
     rdef = get_resource_def(f"{ResourceType.SAM.value}:sam_vit_h_4b8939.pth")
     if rdef and rdef.source_url:
         load_file_from_url(
