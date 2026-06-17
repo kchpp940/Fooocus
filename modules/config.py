@@ -8,7 +8,6 @@ import tempfile
 import modules.flags
 import modules.sdxl_styles
 
-from modules.model_loader import load_file_from_url
 from modules.extra_utils import makedirs_with_log, get_files_from_folder, try_eval_env_var
 from modules.flags import OutputFormat, Performance, MetadataScheme
 
@@ -422,6 +421,35 @@ path_fooocus_expansion = get_dir_or_set_default('path_fooocus_expansion', '../mo
 path_wildcards = get_dir_or_set_default('path_wildcards', '../wildcards/')
 path_safety_checker = get_dir_or_set_default('path_safety_checker', '../models/safety_checker/')
 path_sam = get_dir_or_set_default('path_sam', '../models/sam/')
+
+_resource_service_initialized = False
+
+
+def init_resource_service():
+    global _resource_service_initialized
+    if _resource_service_initialized:
+        return
+    _resource_service_initialized = True
+    from modules import resource_service
+    from modules.resource_registry import ResourceCategory
+    paths_map = {
+        ResourceCategory.CHECKPOINT: paths_checkpoints if isinstance(paths_checkpoints, list) else [paths_checkpoints],
+        ResourceCategory.LORA: paths_loras if isinstance(paths_loras, list) else [paths_loras],
+        ResourceCategory.VAE: [path_vae] if isinstance(path_vae, str) else path_vae,
+        ResourceCategory.VAE_APPROX: [path_vae_approx] if isinstance(path_vae_approx, str) else path_vae_approx,
+        ResourceCategory.EMBEDDING: [path_embeddings] if isinstance(path_embeddings, str) else path_embeddings,
+        ResourceCategory.INPAINT: [path_inpaint] if isinstance(path_inpaint, str) else path_inpaint,
+        ResourceCategory.CONTROLNET: [path_controlnet] if isinstance(path_controlnet, str) else path_controlnet,
+        ResourceCategory.CLIP_VISION: [path_clip_vision] if isinstance(path_clip_vision, str) else path_clip_vision,
+        ResourceCategory.UPSCALE_MODEL: [path_upscale_models] if isinstance(path_upscale_models, str) else path_upscale_models,
+        ResourceCategory.FOOOCUS_EXPANSION: [path_fooocus_expansion] if isinstance(path_fooocus_expansion, str) else path_fooocus_expansion,
+        ResourceCategory.SAFETY_CHECKER: [path_safety_checker] if isinstance(path_safety_checker, str) else path_safety_checker,
+        ResourceCategory.SAM: [path_sam] if isinstance(path_sam, str) else path_sam,
+        ResourceCategory.WILDCARD: [path_wildcards] if isinstance(path_wildcards, str) else path_wildcards,
+    }
+    resource_service.initialize(paths_map)
+
+
 path_outputs = get_path_output()
 
 
@@ -1033,141 +1061,76 @@ def get_model_filenames(folder_paths, extensions=None, name_filter=None):
 
 def update_files():
     global model_filenames, lora_filenames, vae_filenames, wildcard_filenames, available_presets
-    model_filenames = get_model_filenames(paths_checkpoints)
-    lora_filenames = get_model_filenames(paths_loras)
-    vae_filenames = get_model_filenames(path_vae)
-    wildcard_filenames = get_files_from_folder(path_wildcards, ['.txt'])
+    from modules import resource_service
+    from modules.resource_registry import ResourceCategory
+    resource_service.refresh_all_files()
+    model_filenames = resource_service.get_filenames(ResourceCategory.CHECKPOINT)
+    lora_filenames = resource_service.get_filenames(ResourceCategory.LORA)
+    vae_filenames = resource_service.get_filenames(ResourceCategory.VAE)
+    wildcard_filenames = resource_service.get_filenames(ResourceCategory.WILDCARD)
     available_presets = get_presets()
     return
 
 
 def downloading_inpaint_models(v):
-    assert v in modules.flags.inpaint_engine_versions
-    from modules.model_resource_center import download_resource_sync
-
-    head_key = f"{ResourceType.INPAINT.value}:fooocus_inpaint_head.pth"
-    head_result = download_resource_sync(head_key, target_path=path_inpaint, source="config")
-    head_file = head_result if head_result else os.path.join(path_inpaint, 'fooocus_inpaint_head.pth')
-
-    patch_file = None
-
-    patch_filename_map = {
-        'v1': 'inpaint.fooocus.patch',
-        'v2.5': 'inpaint_v25.fooocus.patch',
-        'v2.6': 'inpaint_v26.fooocus.patch',
-    }
-    patch_filename = patch_filename_map.get(v, 'inpaint_v26.fooocus.patch')
-    patch_key = f"{ResourceType.INPAINT.value}:{patch_filename}"
-    patch_result = download_resource_sync(patch_key, target_path=path_inpaint, source="config")
-    patch_file = patch_result if patch_result else os.path.join(path_inpaint, patch_filename)
-
-    return head_file, patch_file
+    from modules import resource_service
+    return resource_service.download_inpaint_models(v)
 
 
 def downloading_sdxl_lcm_lora():
-    from modules.model_resource_center import download_resource_sync
-    key = f"{ResourceType.LORA.value}:{modules.flags.PerformanceLoRA.EXTREME_SPEED.value}"
-    result = download_resource_sync(key, target_path=paths_loras[0], source="config")
-    return modules.flags.PerformanceLoRA.EXTREME_SPEED.value
+    from modules import resource_service
+    return resource_service.download_performance_lora("EXTREME_SPEED")
 
 
 def downloading_sdxl_lightning_lora():
-    from modules.model_resource_center import download_resource_sync
-    key = f"{ResourceType.LORA.value}:{modules.flags.PerformanceLoRA.LIGHTNING.value}"
-    result = download_resource_sync(key, target_path=paths_loras[0], source="config")
-    return modules.flags.PerformanceLoRA.LIGHTNING.value
+    from modules import resource_service
+    return resource_service.download_performance_lora("LIGHTNING")
 
 
 def downloading_sdxl_hyper_sd_lora():
-    from modules.model_resource_center import download_resource_sync
-    key = f"{ResourceType.LORA.value}:{modules.flags.PerformanceLoRA.HYPER_SD.value}"
-    result = download_resource_sync(key, target_path=paths_loras[0], source="config")
-    return modules.flags.PerformanceLoRA.HYPER_SD.value
+    from modules import resource_service
+    return resource_service.download_performance_lora("HYPER_SD")
 
 
 def downloading_controlnet_canny():
-    from modules.model_resource_center import download_resource_sync
-    key = f"{ResourceType.CONTROLNET.value}:control-lora-canny-rank128.safetensors"
-    result = download_resource_sync(key, target_path=path_controlnet, source="config")
-    return result if result else os.path.join(path_controlnet, 'control-lora-canny-rank128.safetensors')
+    from modules import resource_service
+    return resource_service.download_controlnet_canny()
 
 
 def downloading_controlnet_cpds():
-    from modules.model_resource_center import download_resource_sync
-    key = f"{ResourceType.CONTROLNET.value}:fooocus_xl_cpds_128.safetensors"
-    result = download_resource_sync(key, target_path=path_controlnet, source="config")
-    return result if result else os.path.join(path_controlnet, 'fooocus_xl_cpds_128.safetensors')
+    from modules import resource_service
+    return resource_service.download_controlnet_cpds()
 
 
 def downloading_ip_adapters(v):
-    assert v in ['ip', 'face']
-    from modules.model_resource_center import download_resource_sync
-
-    results = []
-
-    clip_key = f"{ResourceType.CLIP_VISION.value}:clip_vision_vit_h.safetensors"
-    clip_result = download_resource_sync(clip_key, target_path=path_clip_vision, source="config")
-    results.append(clip_result if clip_result else os.path.join(path_clip_vision, 'clip_vision_vit_h.safetensors'))
-
-    neg_key = f"{ResourceType.CONTROLNET.value}:fooocus_ip_negative.safetensors"
-    neg_result = download_resource_sync(neg_key, target_path=path_controlnet, source="config")
-    results.append(neg_result if neg_result else os.path.join(path_controlnet, 'fooocus_ip_negative.safetensors'))
-
-    if v == 'ip':
-        ip_key = f"{ResourceType.CONTROLNET.value}:ip-adapter-plus_sdxl_vit-h.bin"
-        ip_result = download_resource_sync(ip_key, target_path=path_controlnet, source="config")
-        results.append(ip_result if ip_result else os.path.join(path_controlnet, 'ip-adapter-plus_sdxl_vit-h.bin'))
-
-    if v == 'face':
-        face_key = f"{ResourceType.CONTROLNET.value}:ip-adapter-plus-face_sdxl_vit-h.bin"
-        face_result = download_resource_sync(face_key, target_path=path_controlnet, source="config")
-        results.append(face_result if face_result else os.path.join(path_controlnet, 'ip-adapter-plus-face_sdxl_vit-h.bin'))
-
-    return results
+    from modules import resource_service
+    return resource_service.download_ip_adapters(v)
 
 
 def downloading_upscale_model():
-    from modules.model_resource_center import download_resource_sync
-    key = f"{ResourceType.UPSCALE.value}:fooocus_upscaler_s409985e5.bin"
-    result = download_resource_sync(key, target_path=path_upscale_models, source="config")
-    return result if result else os.path.join(path_upscale_models, 'fooocus_upscaler_s409985e5.bin')
-
+    from modules import resource_service
+    return resource_service.download_upscale_model()
 
 def downloading_safety_checker_model():
-    from modules.model_resource_center import download_resource_sync
-    key = f"{ResourceType.SAFETY_CHECKER.value}:stable-diffusion-safety-checker.bin"
-    result = download_resource_sync(key, target_path=path_safety_checker, source="config")
-    return result if result else os.path.join(path_safety_checker, 'stable-diffusion-safety-checker.bin')
+    from modules import resource_service
+    return resource_service.download_safety_checker_model()
 
 
 def download_sam_model(sam_model: str) -> str:
-    match sam_model:
-        case 'vit_b':
-            return downloading_sam_vit_b()
-        case 'vit_l':
-            return downloading_sam_vit_l()
-        case 'vit_h':
-            return downloading_sam_vit_h()
-        case _:
-            raise ValueError(f"sam model {sam_model} does not exist.")
+    from modules import resource_service
+    return resource_service.download_sam_model(sam_model)
 
 
 def downloading_sam_vit_b():
-    from modules.model_resource_center import download_resource_sync
-    key = f"{ResourceType.SAM.value}:sam_vit_b_01ec64.pth"
-    result = download_resource_sync(key, target_path=path_sam, source="config")
-    return result if result else os.path.join(path_sam, 'sam_vit_b_01ec64.pth')
+    from modules import resource_service
+    return resource_service.download_sam_model("vit_b")
 
 
 def downloading_sam_vit_l():
-    from modules.model_resource_center import download_resource_sync
-    key = f"{ResourceType.SAM.value}:sam_vit_l_0b3195.pth"
-    result = download_resource_sync(key, target_path=path_sam, source="config")
-    return result if result else os.path.join(path_sam, 'sam_vit_l_0b3195.pth')
+    from modules import resource_service
+    return resource_service.download_sam_model("vit_l")
 
 
 def downloading_sam_vit_h():
-    from modules.model_resource_center import download_resource_sync
-    key = f"{ResourceType.SAM.value}:sam_vit_h_4b8939.pth"
-    result = download_resource_sync(key, target_path=path_sam, source="config")
-    return result if result else os.path.join(path_sam, 'sam_vit_h_4b8939.pth')
+    from modules import resource_service
+    return resource_service.download_sam_model("vit_h")

@@ -58,6 +58,14 @@ def prepare_environment():
     return
 
 
+vae_approx_filenames = [
+    ('xlvaeapp.pth', 'https://huggingface.co/lllyasviel/misc/resolve/main/xlvaeapp.pth'),
+    ('vaeapp_sd15.pth', 'https://huggingface.co/lllyasviel/misc/resolve/main/vaeapp_sd15.pt'),
+    ('xl-to-v1_interposer-v4.0.safetensors',
+     'https://huggingface.co/mashb1t/misc/resolve/main/xl-to-v1_interposer-v4.0.safetensors')
+]
+
+
 def ini_args():
     from args_manager import args
     return args
@@ -92,47 +100,25 @@ if config.temp_path_cleanup_on_launch:
 
 
 def download_models(default_model, previous_default_models, checkpoint_downloads, embeddings_downloads, lora_downloads, vae_downloads):
-    from modules.util import get_file_from_folder_list
-    from modules.model_resource_center import download_resource_sync
-
-    for resource_key, url, model_dir in get_startup_download_list():
-        download_resource_sync(resource_key, target_path=model_dir, source="startup")
-
-    if args.disable_preset_download:
-        print('Skipped model download.')
-        return default_model, checkpoint_downloads
-
-    if not args.always_download_new_model:
-        if not os.path.isfile(get_file_from_folder_list(default_model, config.paths_checkpoints)):
-            for alternative_model_name in previous_default_models:
-                if os.path.isfile(get_file_from_folder_list(alternative_model_name, config.paths_checkpoints)):
-                    print(f'You do not have [{default_model}] but you have [{alternative_model_name}].')
-                    print(f'Fooocus will use [{alternative_model_name}] to avoid downloading new models, '
-                          f'but you are not using the latest models.')
-                    print('Use --always-download-new-model to avoid fallback and always get new models.')
-                    checkpoint_downloads = {}
-                    default_model = alternative_model_name
-                    break
-
-    for file_name, url in checkpoint_downloads.items():
-        model_dir = os.path.dirname(get_file_from_folder_list(file_name, config.paths_checkpoints))
-        download_resource_sync(f"checkpoint:{file_name}", target_path=model_dir, source="startup")
-    for file_name, url in embeddings_downloads.items():
-        download_resource_sync(f"embedding:{file_name}", target_path=config.path_embeddings, source="startup")
-    for file_name, url in lora_downloads.items():
-        model_dir = os.path.dirname(get_file_from_folder_list(file_name, config.paths_loras))
-        download_resource_sync(f"lora:{file_name}", target_path=model_dir, source="startup")
-    for file_name, url in vae_downloads.items():
-        download_resource_sync(f"vae:{file_name}", target_path=config.path_vae, source="startup")
-
-    return default_model, checkpoint_downloads
+    from modules import resource_service
+    return resource_service.download_preset_models(
+        default_model=default_model,
+        previous_default_models=previous_default_models,
+        checkpoint_downloads=checkpoint_downloads,
+        embeddings_downloads=embeddings_downloads,
+        lora_downloads=lora_downloads,
+        vae_downloads=vae_downloads,
+        disable_preset_download=args.disable_preset_download,
+        always_download_new_model=args.always_download_new_model,
+    )
 
 
+config.init_resource_service()
 config.default_base_model_name, config.checkpoint_downloads = download_models(
     config.default_base_model_name, config.previous_default_models, config.checkpoint_downloads,
     config.embeddings_downloads, config.lora_downloads, config.vae_downloads)
 
 config.update_files()
-init_cache(config.model_filenames, config.paths_checkpoints, config.lora_filenames, config.paths_loras)
+init_cache()
 
 from webui import *
