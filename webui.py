@@ -497,6 +497,10 @@ with shared.gradio_root:
                                 results['note'] = ('Fields were merged: private_log entries filled only when embedded metadata '
                                                    'is missing, empty, or failed to parse (default values are preserved).')
 
+                            log_diag = parsed.get_log_diagnostics()
+                            if log_diag is not None:
+                                results['log_match_diagnostics'] = log_diag.to_display_dict()
+
                             return results
 
                         metadata_input_image.upload(trigger_metadata_preview, inputs=metadata_input_image,
@@ -543,8 +547,44 @@ with shared.gradio_root:
                                 display = str(src).replace('_', ' ')
                                 return f'<span style="font-size:10px;color:white;background:{color};padding:1px 6px;border-radius:3px;">{display}</span>'
 
+                            def render_diag_box(label, parsed):
+                                diag = parsed.get_log_diagnostics()
+                                if diag is None:
+                                    return f'<div style="background:#f0f0f0;padding:6px 10px;border-radius:4px;"><b>{label}</b>: (no diagnostics)</div>'
+                                status_color = '#d4edda' if diag.available else ('#fff3cd' if diag.log_found else '#f8d7da')
+                                status_text = 'MATCHED' if diag.available else ('UNAVAILABLE' if diag.log_found else 'NO LOG')
+                                parts = [
+                                    f'<div style="background:{status_color};padding:6px 10px;border-radius:4px;border:1px solid #ccc;">',
+                                    f'<b>{label}</b> — <span style="font-family:monospace;">{status_text}</span>'
+                                ]
+                                if diag.log_found:
+                                    parts.append(f' | log.html: found, entries scanned: <b>{diag.candidate_count}</b>')
+                                else:
+                                    parts.append(f' | log.html: <b>not found</b> next to image')
+                                if diag.matched_by and diag.matched_by != 'none':
+                                    parts.append(f' | matched_by: <code>{diag.matched_by}</code>')
+                                if diag.matched_entry_id:
+                                    parts.append(f' | entry: <code>{diag.matched_entry_id}</code>')
+                                if diag.filled_field_count:
+                                    parts.append(f' | filled: <b>{diag.filled_field_count}</b> fields')
+                                if diag.note:
+                                    parts.append(f'<br/><small style="color:#555;">ℹ {diag.note}</small>')
+                                if diag.rejected_reasons:
+                                    parts.append(f'<br/><details><summary>Rejected candidates ({len(diag.rejected_reasons)})</summary><ul style="margin:4px 0;">')
+                                    for r in diag.rejected_reasons[:10]:
+                                        parts.append(f'<li style="font-size:11px;color:#666;">{r}</li>')
+                                    if len(diag.rejected_reasons) > 10:
+                                        parts.append(f'<li style="font-size:11px;color:#666;">… and {len(diag.rejected_reasons) - 10} more</li>')
+                                    parts.append('</ul></details>')
+                                parts.append('</div>')
+                                return ''.join(parts)
+
                             summary_lines = [
                                 f'<h3 style="color:#444;">Difference Summary</h3>',
+                                f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">',
+                                render_diag_box('BASE (left)', base_parsed),
+                                render_diag_box('TARGET (right)', target_parsed),
+                                '</div>',
                                 f'<p>Total compared fields: <b>{diff.same_count + diff.diff_count}</b> | '
                                 f'Same: <b style="color:green;">{diff.same_count}</b> | '
                                 f'Different: <b style="color:red;">{diff.diff_count}</b></p>',
@@ -594,6 +634,8 @@ with shared.gradio_root:
                                     'same': diff.same_count,
                                     'different': diff.diff_count
                                 },
+                                'base_log_diagnostics': base_parsed.get_log_diagnostics().to_display_dict() if base_parsed.get_log_diagnostics() else None,
+                                'target_log_diagnostics': target_parsed.get_log_diagnostics().to_display_dict() if target_parsed.get_log_diagnostics() else None,
                                 'differences': [
                                     {
                                         'field': item.label,

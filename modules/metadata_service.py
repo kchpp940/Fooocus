@@ -34,6 +34,32 @@ class MetadataSource:
 
 
 @dataclass
+class LogMatchDiagnostics:
+    available: bool = False
+    log_found: bool = False
+    matched_by: str = "none"
+    candidate_count: int = 0
+    matched_entry_id: str = ""
+    matched_image_src: str = ""
+    rejected_reasons: list = field(default_factory=list)
+    filled_field_count: int = 0
+    note: str = ""
+
+    def to_display_dict(self) -> dict:
+        return {
+            "available": self.available,
+            "log_found": self.log_found,
+            "matched_by": self.matched_by,
+            "candidate_count": self.candidate_count,
+            "matched_entry_id": self.matched_entry_id,
+            "matched_image_src": self.matched_image_src,
+            "rejected_reasons": self.rejected_reasons,
+            "filled_field_count": self.filled_field_count,
+            "note": self.note,
+        }
+
+
+@dataclass
 class FieldResult:
     key: str
     label: str
@@ -50,6 +76,7 @@ class ParsedMetadata:
     source: str = MetadataSource.UNKNOWN
     scheme: Optional[MetadataScheme] = None
     raw: Any = None
+    diagnostics: dict = field(default_factory=dict)
 
     def get(self, key: str, default=None):
         if key in self.fields and self.fields[key].valid:
@@ -76,6 +103,12 @@ class ParsedMetadata:
 
     def errors(self) -> dict:
         return {k: f.error for k, f in self.fields.items() if not f.valid}
+
+    def get_log_diagnostics(self) -> Optional[LogMatchDiagnostics]:
+        return self.diagnostics.get("log_match")
+
+    def set_log_diagnostics(self, diag: LogMatchDiagnostics) -> None:
+        self.diagnostics["log_match"] = diag
 
 
 @dataclass
@@ -777,108 +810,179 @@ class MetadataService:
             parsed = ParsedMetadata(source=MetadataSource.UNKNOWN, scheme=None, raw=None)
 
         log_path = image_path_obj.parent / "log.html"
+        diag = LogMatchDiagnostics(log_found=log_path.exists())
 
         if log_path.exists():
-            log_parsed = self.parse_from_log_html(
+            log_parsed, diag = self.parse_from_log_html(
                 str(log_path),
                 image_filename=image_path_obj.name,
                 image_absolute_dir=str(image_path_obj.parent.resolve())
             )
             if log_parsed is not None:
+                before_sources = {k: f.source for k, f in parsed.fields.items()}
                 parsed = self.merge_metadata(parsed, log_parsed)
+                filled = 0
+                for k, f in parsed.fields.items():
+                    if f.source == MetadataSource.PRIVATE_LOG and before_sources.get(k) != MetadataSource.PRIVATE_LOG:
+                        filled += 1
+                diag.filled_field_count = filled
+                diag.available = True
 
+        parsed.set_log_diagnostics(diag)
         return parsed
 
     def parse_from_pil_with_log(self, pil_image, optional_filepath: str | None = None) -> ParsedMetadata:
         parsed = self.parse_from_image(pil_image)
+        diag = LogMatchDiagnostics(log_found=False)
 
         if optional_filepath:
             image_path_obj = Path(optional_filepath).resolve()
             log_path = image_path_obj.parent / "log.html"
+            diag.log_found = log_path.exists()
             if log_path.exists():
-                log_parsed = self.parse_from_log_html(
+                log_parsed, diag = self.parse_from_log_html(
                     str(log_path),
                     image_filename=image_path_obj.name,
                     image_absolute_dir=str(image_path_obj.parent.resolve())
                 )
                 if log_parsed is not None:
+                    before_sources = {k: f.source for k, f in parsed.fields.items()}
                     parsed = self.merge_metadata(parsed, log_parsed)
+                    filled = 0
+                    for k, f in parsed.fields.items():
+                        if f.source == MetadataSource.PRIVATE_LOG and before_sources.get(k) != MetadataSource.PRIVATE_LOG:
+                            filled += 1
+                    diag.filled_field_count = filled
+                    diag.available = True
 
+        parsed.set_log_diagnostics(diag)
         return parsed
 
     def parse_from_log_html(self, log_html_path: str, image_filename: str | None = None,
-                            image_absolute_dir: str | None = None) -> Optional[ParsedMetadata]:
+                            image_absolute_dir: str | None = None) -> tuple[Optional[ParsedMetadata], LogMatchDiagnostics]:
         log_path = Path(log_html_path).resolve()
+        diag = LogMatchDiagnostics(log_found=log_path.exists())
+
         if not log_path.exists():
-            return None
+            diag.note = "log.html not found next to the image file."
+            return None, diag
 
         try:
             html_content = log_path.read_text(encoding='utf-8')
-        except Exception:
-            return None
+        except Exception as e:
+            diag.note = f"Failed to read log.html: {e}"
+            return None, diag
 
         log_dir = log_path.parent.resolve()
 
         all_entries = self._extract_all_log_entries(html_content)
+        diag.candidate_count = len(all_entries)
+
         if len(all_entries) == 0:
-            return None
+            diag.note = "log.html found but no image entries were parsed."
+            return None, diag
 
         selected_raw = None
+        selected_entry_id = ""
+        selected_src = ""
+        matched_by = "none"
 
         if image_filename is not None:
             expected_id = Path(image_filename).name.replace('.', '_')
             expected_basename = Path(image_filename).name
 
-            candidates = []
+            id_only_candidates = []
+            src_and_id_candidates = []
+            rejected = []
 
             for entry_id, entry_data in all_entries.items():
-                matches = False
-
-                if entry_id == expected_id:
-                    matches = True
-
                 entry_src = entry_data.get("__image_src__", "")
-                if entry_src:
-                    entry_basename = Path(entry_src).name
-                    if entry_basename == expected_basename:
-                        if not matches:
-                            matches = True
+                id_match = (entry_id == expected_id)
+                src_basename_match = bool(entry_src) and Path(entry_src).name == expected_basename
+                path_match = False
+
+                if src_basename_match and image_absolute_dir:
+                    try:
+                        entry_path = (log_dir / entry_src).resolve()
+                        expected_path = (Path(image_absolute_dir) / expected_basename).resolve()
+                        path_match = (str(entry_path) == str(expected_path))
+                    except Exception:
+                        path_match = False
+
+                if id_match and not src_basename_match and entry_src:
+                    rejected.append(f"entry id='{entry_id}' matches div_id, but image src '{entry_src}' basename ≠ '{expected_basename}' — rejected (possible copy).")
+                    continue
+
+                if id_match and src_basename_match and image_absolute_dir and not path_match:
+                    rejected.append(f"entry id='{entry_id}' matches basename, but resolved path differs: log suggests '{log_dir / entry_src}' vs image's '{image_absolute_dir}/{expected_basename}' — rejected.")
+                    continue
+
+                if id_match and src_basename_match:
+                    src_and_id_candidates.append((entry_id, entry_data, "id_and_src_basename"))
+                    continue
+
+                if id_match and not entry_src:
+                    id_only_candidates.append((entry_id, entry_data, "id_only_no_src"))
+                    continue
+
+                if (not id_match) and src_basename_match:
+                    if image_absolute_dir:
                         try:
                             entry_path = (log_dir / entry_src).resolve()
-                            if image_absolute_dir:
-                                expected_path = (Path(image_absolute_dir) / expected_basename).resolve()
-                                if str(entry_path) != str(expected_path):
-                                    matches = False
+                            expected_path = (Path(image_absolute_dir) / expected_basename).resolve()
+                            if str(entry_path) == str(expected_path):
+                                src_and_id_candidates.append((entry_id, entry_data, "src_basename_and_full_path"))
+                                continue
                         except Exception:
                             pass
-                    else:
-                        if entry_id == expected_id:
-                            matches = False
+                    rejected.append(f"entry id='{entry_id}' has basename match '{entry_src}' but no id match — ignored (needs div_id alignment).")
+                    continue
 
-                if matches:
-                    candidates.append(entry_data)
+            diag.rejected_reasons = rejected
 
-            if len(candidates) == 1:
-                selected_raw = candidates[0]
-            elif len(candidates) > 1:
-                for entry_data in candidates:
+            final_candidates = src_and_id_candidates if src_and_id_candidates else id_only_candidates
+
+            if len(final_candidates) == 1:
+                selected_entry_id, selected_raw, matched_by = final_candidates[0]
+                selected_src = selected_raw.get("__image_src__", "")
+            elif len(final_candidates) > 1:
+                for entry_id, entry_data, reason in final_candidates:
                     entry_src = entry_data.get("__image_src__", "")
                     if entry_src and Path(entry_src).name == expected_basename:
+                        selected_entry_id = entry_id
                         selected_raw = entry_data
+                        selected_src = entry_src
+                        matched_by = reason + "_deduped_by_basename"
                         break
                 if selected_raw is None:
-                    selected_raw = candidates[0]
+                    selected_entry_id, selected_raw, matched_by = final_candidates[0]
+                    selected_src = selected_raw.get("__image_src__", "")
+                    matched_by = matched_by + "_first_among_multiple"
+                diag.rejected_reasons.insert(0, f"Multiple candidates ({len(final_candidates)}); picked id='{selected_entry_id}' matched_by={matched_by}.")
+            else:
+                diag.note = f"No log entry matched image '{image_filename}'. " \
+                            f"Checked {len(all_entries)} entries. {len(rejected)} candidates were rejected."
         else:
             for entry_id, entry_data in all_entries.items():
+                selected_entry_id = entry_id
                 selected_raw = entry_data
+                selected_src = entry_data.get("__image_src__", "")
+                matched_by = "first_entry_no_image_specified"
                 break
 
+        diag.matched_by = matched_by
+        diag.matched_entry_id = selected_entry_id
+        diag.matched_image_src = selected_src
+
         if selected_raw is None:
-            return None
+            diag.available = False
+            return None, diag
 
         clean_raw = {k: v for k, v in selected_raw.items() if not k.startswith("__")}
-
-        return self.parse_raw(clean_raw, source=MetadataSource.PRIVATE_LOG)
+        parsed_log = self.parse_raw(clean_raw, source=MetadataSource.PRIVATE_LOG)
+        diag.available = True
+        diag.note = diag.note or f"Matched via {matched_by}."
+        return parsed_log, diag
 
     def _extract_all_log_entries(self, html_content: str) -> dict:
         result = {}
