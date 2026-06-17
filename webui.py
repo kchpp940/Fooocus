@@ -23,7 +23,7 @@ from modules.private_logger import get_current_html_path
 from modules.ui_gradio_extensions import reload_javascript
 from modules.auth import auth_enabled, check_auth
 from modules.util import is_json
-from modules.metadata_service import get_metadata_service, MetadataSource
+from modules.metadata_service import get_metadata_service, MetadataSource, MetadataResult, MetadataDiff
 
 
 def build_preset_data_from_ui(*args):
@@ -458,32 +458,94 @@ with shared.gradio_root:
                                 gr.HTML('<a href="https://github.com/lllyasviel/Fooocus/discussions/3281" target="_blank">\U0001F4D4 Documentation</a>')
 
                     with gr.Tab(label='Metadata', id='metadata_tab') as metadata_tab:
-                        with gr.Column():
-                            metadata_input_image = grh.Image(label='For images created by Fooocus', source='upload', type='pil')
-                            metadata_image_path = gr.Textbox(label='Image Path (for private log lookup)', value='', placeholder='Optional: path to the image file for private log fallback')
-                            metadata_json = gr.JSON(label='Metadata')
-                            metadata_import_button = gr.Button(value='Apply Metadata')
-                            state_metadata_result = gr.State(value=None)
+                        with gr.Tabs():
+                            with gr.Tab(label='Preview & Import'):
+                                with gr.Column():
+                                    metadata_input_image = grh.Image(label='For images created by Fooocus', source='upload', type='pil')
+                                    metadata_image_path = gr.Textbox(label='Image Path (for private log lookup)', value='', placeholder='Optional: path to the image file for private log fallback')
+                                    metadata_json = gr.JSON(label='Metadata')
+                                    metadata_import_button = gr.Button(value='Apply All Metadata', variant='primary')
+                                    state_metadata_result = gr.State(value=None)
+                                    state_metadata_full = gr.State(value=None)
 
-                        def parse_metadata(file, image_path):
-                            service = get_metadata_service()
-                            if file is not None:
-                                if image_path and image_path.strip():
-                                    metadata = service.parse_from_image_with_private_log(
-                                        image_path.strip(), image_obj=file
-                                    )
-                                else:
-                                    metadata = service.parse_from_image(file)
-                            else:
-                                metadata = modules.metadata_service.MetadataResult()
-                            return metadata.to_dict(), metadata.to_simple_dict()
+                                def parse_metadata(file, image_path):
+                                    service = get_metadata_service()
+                                    if file is not None:
+                                        if image_path and image_path.strip():
+                                            metadata = service.parse_from_image_with_private_log(
+                                                image_path.strip(), image_obj=file
+                                            )
+                                        else:
+                                            metadata = service.parse_from_image(file)
+                                    else:
+                                        metadata = modules.metadata_service.MetadataResult()
+                                    return metadata.to_dict(), metadata.to_simple_dict(), metadata
 
-                        metadata_input_image.upload(parse_metadata, inputs=[metadata_input_image, metadata_image_path],
-                                                    outputs=[metadata_json, state_metadata_result],
-                                                    queue=False, show_progress=True)
-                        metadata_image_path.change(parse_metadata, inputs=[metadata_input_image, metadata_image_path],
-                                                   outputs=[metadata_json, state_metadata_result],
-                                                   queue=False, show_progress=True)
+                                metadata_input_image.upload(parse_metadata, inputs=[metadata_input_image, metadata_image_path],
+                                                            outputs=[metadata_json, state_metadata_result, state_metadata_full],
+                                                            queue=False, show_progress=True)
+                                metadata_image_path.change(parse_metadata, inputs=[metadata_input_image, metadata_image_path],
+                                                           outputs=[metadata_json, state_metadata_result, state_metadata_full],
+                                                           queue=False, show_progress=True)
+
+                            with gr.Tab(label='Compare Parameters'):
+                                with gr.Column():
+                                    compare_summary = gr.Markdown(value='Upload an image in the "Preview & Import" tab first.')
+                                    compare_show_unchanged = gr.Checkbox(label='Show unchanged parameters', value=False)
+                                    compare_html = gr.HTML(value='')
+                                    with gr.Row():
+                                        compare_button = gr.Button(value='Compare with Current Settings', variant='secondary')
+                                        apply_diff_button = gr.Button(value='Apply Changed Parameters Only', variant='primary')
+                                    state_compare_diff = gr.State(value=None)
+                                    state_current_ui_params = gr.State(value=None)
+
+                                def do_compare(metadata_full, show_unchanged, *ui_params):
+                                    service = get_metadata_service()
+
+                                    if metadata_full is None or not metadata_full.fields:
+                                        return ('### No metadata loaded.\nUpload an image in the "Preview & Import" tab first.',
+                                                '', None, list(ui_params))
+
+                                    current_metadata = service.build_metadata_from_ui_params(list(ui_params))
+                                    diff = service.diff(current_metadata, metadata_full)
+
+                                    summary = f'### Diff Summary: {diff.summary()}'
+                                    html = diff.to_html(show_unchanged=show_unchanged)
+
+                                    return (summary, html, diff, list(ui_params))
+
+                                def apply_diff(diff, is_generating):
+                                    service = get_metadata_service()
+                                    if diff is None or not diff.has_differences:
+                                        print('No differences to apply.')
+                                        return [gr.update()] * len(load_data_outputs)
+                                    return service.build_load_parameters_from_diff(diff, is_generating, inpaint_mode)
+
+                                current_inputs = load_data_outputs[1:]
+
+                                compare_button.click(
+                                    do_compare,
+                                    inputs=[state_metadata_full, compare_show_unchanged] + current_inputs,
+                                    outputs=[compare_summary, compare_html, state_compare_diff, state_current_ui_params],
+                                    queue=False,
+                                    show_progress=True
+                                )
+
+                                compare_show_unchanged.change(
+                                    do_compare,
+                                    inputs=[state_metadata_full, compare_show_unchanged] + current_inputs,
+                                    outputs=[compare_summary, compare_html, state_compare_diff, state_current_ui_params],
+                                    queue=False,
+                                    show_progress=False
+                                )
+
+                                apply_diff_button.click(
+                                    apply_diff,
+                                    inputs=[state_compare_diff, state_is_generating],
+                                    outputs=load_data_outputs,
+                                    queue=False,
+                                    show_progress=True
+                                ).then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)
 
             with gr.Row(visible=modules.config.default_enhance_checkbox) as enhance_input_panel:
                 with gr.Tabs():

@@ -122,6 +122,83 @@ class MetadataDiff:
     def has_differences(self) -> bool:
         return bool(self.added or self.removed or self.changed)
 
+    def to_simple_dict(self) -> dict:
+        return {
+            'added': {k: v.value for k, v in self.added.items()},
+            'removed': {k: v.value for k, v in self.removed.items()},
+            'changed': {k: {'old': v[0].value, 'new': v[1].value} for k, v in self.changed.items()},
+            'unchanged': {k: v.value for k, v in self.unchanged.items()},
+        }
+
+    def to_html(self, show_unchanged: bool = False) -> str:
+        html_parts = []
+
+        if self.changed:
+            html_parts.append('<h3>Changed Parameters</h3>')
+            html_parts.append('<table class="metadata"><tr><th>Parameter</th><th>Old Value</th><th>New Value</th><th>Source</th></tr>')
+            for key, (old_field, new_field) in sorted(self.changed.items()):
+                label = key.replace('_', ' ').title()
+                html_parts.append(
+                    f'<tr><td class="label">{label}</td>'
+                    f'<td class="value">{old_field.value}</td>'
+                    f'<td class="value" style="color: #4CAF50;"><b>{new_field.value}</b></td>'
+                    f'<td class="value">{new_field.source}</td></tr>'
+                )
+            html_parts.append('</table>')
+
+        if self.added:
+            html_parts.append('<h3>New Parameters</h3>')
+            html_parts.append('<table class="metadata"><tr><th>Parameter</th><th>Value</th><th>Source</th></tr>')
+            for key, field in sorted(self.added.items()):
+                label = key.replace('_', ' ').title()
+                html_parts.append(
+                    f'<tr><td class="label">{label}</td>'
+                    f'<td class="value" style="color: #2196F3;"><b>{field.value}</b></td>'
+                    f'<td class="value">{field.source}</td></tr>'
+                )
+            html_parts.append('</table>')
+
+        if self.removed:
+            html_parts.append('<h3>Removed Parameters</h3>')
+            html_parts.append('<table class="metadata"><tr><th>Parameter</th><th>Old Value</th><th>Source</th></tr>')
+            for key, field in sorted(self.removed.items()):
+                label = key.replace('_', ' ').title()
+                html_parts.append(
+                    f'<tr><td class="label">{label}</td>'
+                    f'<td class="value" style="color: #f44336;"><b>{field.value}</b></td>'
+                    f'<td class="value">{field.source}</td></tr>'
+                )
+            html_parts.append('</table>')
+
+        if show_unchanged and self.unchanged:
+            html_parts.append('<h3>Unchanged Parameters</h3>')
+            html_parts.append('<table class="metadata"><tr><th>Parameter</th><th>Value</th><th>Source</th></tr>')
+            for key, field in sorted(self.unchanged.items()):
+                label = key.replace('_', ' ').title()
+                html_parts.append(
+                    f'<tr><td class="label">{label}</td>'
+                    f'<td class="value">{field.value}</td>'
+                    f'<td class="value">{field.source}</td></tr>'
+                )
+            html_parts.append('</table>')
+
+        if not html_parts:
+            html_parts.append('<p style="color: #4CAF50;">No differences found.</p>')
+
+        return '\n'.join(html_parts)
+
+    def summary(self) -> str:
+        parts = []
+        if self.changed:
+            parts.append(f'{len(self.changed)} changed')
+        if self.added:
+            parts.append(f'{len(self.added)} added')
+        if self.removed:
+            parts.append(f'{len(self.removed)} removed')
+        if self.unchanged:
+            parts.append(f'{len(self.unchanged)} unchanged')
+        return ', '.join(parts) if parts else 'No differences'
+
 
 class MetadataParserBase(ABC):
     @abstractmethod
@@ -954,6 +1031,132 @@ class MetadataService:
             results.append(True)
             results.append('None')
             results.append(1)
+
+    def build_metadata_from_ui_params(self, ui_params: list) -> MetadataResult:
+        import gradio as gr
+        result = MetadataResult(source='current_ui', scheme=MetadataScheme.FOOOCUS)
+
+        try:
+            idx = 0
+            result.set_field('__has_data__', str(len(ui_params) > idx), source='current_ui')
+            idx += 1
+            result.set_field('image_number', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            result.set_field('prompt', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            result.set_field('negative_prompt', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            result.set_field('styles', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            result.set_field('performance', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+
+            steps_val = ui_params[idx]
+            if isinstance(steps_val, int) and steps_val == -1:
+                if result.has('performance') and result.get('performance') in Steps:
+                    steps_val = Steps[result.get('performance')]
+            result.set_field('steps', str(steps_val), source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+
+            result.set_field('overwrite_switch', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+
+            aspect_ratio = ui_params[idx]
+            idx += 1
+            overwrite_width = ui_params[idx]
+            idx += 1
+            overwrite_height = ui_params[idx]
+            idx += 1
+
+            if isinstance(overwrite_width, int) and overwrite_width > 0 and isinstance(overwrite_height, int) and overwrite_height > 0:
+                result.set_field('resolution', str((overwrite_width, overwrite_height)), source='current_ui',
+                                raw_value=(overwrite_width, overwrite_height))
+            else:
+                try:
+                    if '×' in aspect_ratio:
+                        ratio_str = aspect_ratio.split('×')[0]
+                        width, height = ratio_str.split('*')
+                        result.set_field('resolution', str((int(width), int(height))), source='current_ui',
+                                        raw_value=aspect_ratio)
+                except Exception:
+                    pass
+
+            result.set_field('guidance_scale', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            result.set_field('sharpness', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            result.set_field('adm_guidance', str((ui_params[idx], ui_params[idx + 1], ui_params[idx + 2])),
+                            source='current_ui',
+                            raw_value=(ui_params[idx], ui_params[idx + 1], ui_params[idx + 2]))
+            idx += 3
+            result.set_field('refiner_swap_method', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            result.set_field('adaptive_cfg', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            result.set_field('clip_skip', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            result.set_field('base_model', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            result.set_field('refiner_model', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            result.set_field('refiner_switch', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            result.set_field('sampler', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            result.set_field('scheduler', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            result.set_field('vae', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            result.set_field('seed_random', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            result.set_field('seed', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            result.set_field('inpaint_engine_version', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            idx += 1
+            result.set_field('inpaint_method', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
+            idx += 1
+            for _ in range(modules.config.default_enhance_tabs):
+                idx += 1
+            idx += 1
+            idx += 1
+
+            freeu_enabled = ui_params[idx]
+            idx += 1
+            if freeu_enabled:
+                b1, b2, s1, s2 = ui_params[idx], ui_params[idx + 1], ui_params[idx + 2], ui_params[idx + 3]
+                result.set_field('freeu', str((b1, b2, s1, s2)), source='current_ui',
+                                raw_value=(freeu_enabled, b1, b2, s1, s2))
+            idx += 4
+
+            for i in range(modules.config.default_max_lora_number):
+                enabled = ui_params[idx]
+                name = ui_params[idx + 1]
+                weight = ui_params[idx + 2]
+                idx += 3
+                if name != 'None':
+                    result.set_field(f'lora_combined_{i + 1}', f'{enabled} : {name} : {weight}',
+                                    source='current_ui',
+                                    raw_value=(enabled, name, weight))
+
+        except Exception as e:
+            result.set_field('_parse_error', str(e), valid=False, error=str(e))
+
+        return result
+
+    def build_load_parameters_from_diff(self, diff: MetadataDiff, is_generating: bool, inpaint_mode: str) -> list:
+        merged_metadata = MetadataResult(source='diff_merge')
+
+        for field in diff.added.values():
+            merged_metadata.fields[field.key] = field
+        for key, (_, new_field) in diff.changed.items():
+            merged_metadata.fields[key] = new_field
+
+        return self.build_load_parameters(merged_metadata, is_generating, inpaint_mode)
+
+    def build_load_parameters_from_dict(self, metadata_dict: dict, is_generating: bool, inpaint_mode: str) -> list:
+        metadata = self.parse(metadata_dict, MetadataScheme.FOOOCUS)
+        return self.build_load_parameters(metadata, is_generating, inpaint_mode)
 
 
 def get_metadata_service() -> MetadataService:
