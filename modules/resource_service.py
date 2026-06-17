@@ -693,7 +693,126 @@ class ResourceService:
         filepath = self.find_filepath_by_name(resource_type, filename)
         if not filepath or not os.path.isfile(filepath):
             return None
-        return self.get_hash(resource_type, filename, force_recompute=True)
+        hash_val = self.get_hash(filepath, force_recompute=True)
+        self.scan_type(resource_type, force=True)
+        self._notify_observers()
+        return hash_val
+
+    def rehash_path(
+        self,
+        resource_type: ResourceType,
+        filepath: str,
+    ) -> Optional[str]:
+        filepath = os.path.abspath(filepath)
+        if not os.path.isfile(filepath):
+            return None
+        hash_val = self.get_hash(filepath, force_recompute=True)
+        self.scan_type(resource_type, force=True)
+        self._notify_observers()
+        return hash_val
+
+    def download_to_path(
+        self,
+        resource_type: ResourceType,
+        filename: str,
+        target_dir: str,
+        url: Optional[str] = None,
+        on_progress: Optional[Callable[[DownloadState], None]] = None,
+    ) -> Optional[bool]:
+        target_dir = os.path.abspath(target_dir)
+        os.makedirs(target_dir, exist_ok=True)
+
+        definitions = get_resources_by_type(resource_type)
+        matched_def = None
+        for d in definitions:
+            if d.name == filename:
+                matched_def = d
+                break
+
+        if matched_def is not None:
+            resource_id = f"path_{matched_def.resource_id}_{target_dir}"
+            return self._download_to_target_dir(matched_def, resource_id, target_dir, on_progress)
+
+        if url:
+            definition = ResourceDefinition(
+                resource_id=f"manual_{resource_type.value}_{filename}_{target_dir}",
+                resource_type=resource_type,
+                name=filename,
+                urls=[url],
+            )
+            return self._download_to_target_dir(definition, definition.resource_id, target_dir, on_progress)
+
+        print(f"[ResourceService] No registered resource and no URL provided: {filename}")
+        return None
+
+    def _download_to_target_dir(
+        self,
+        definition: ResourceDefinition,
+        resource_id: str,
+        target_dir: str,
+        on_progress: Optional[Callable[[DownloadState], None]] = None,
+    ) -> bool:
+        lock = self._get_download_lock(resource_id)
+        if not lock.acquire(blocking=False):
+            return False
+
+        try:
+            state = self.get_download_state(resource_id)
+            state.status = "downloading"
+            state.progress = 0.0
+            state.started_at = time.time()
+            state.error = None
+
+            if on_progress:
+                on_progress(state)
+
+            target_path = os.path.join(target_dir, definition.name)
+            if os.path.isfile(target_path):
+                self.scan_type(definition.resource_type, force=True)
+                state.status = "completed"
+                state.progress = 100.0
+                state.completed_at = time.time()
+                if on_progress:
+                    on_progress(state)
+                self._notify_observers()
+                return True
+
+            for url in definition.urls:
+                try:
+                    state.current_url = url
+                    if on_progress:
+                        on_progress(state)
+
+                    print(f"[ResourceService] Downloading {definition.name} to {target_dir} from {url}")
+                    downloaded_path = load_file_from_url(
+                        url=url,
+                        model_dir=target_dir,
+                        file_name=definition.name,
+                        progress=True,
+                    )
+
+                    if os.path.isfile(downloaded_path):
+                        self.scan_type(definition.resource_type, force=True)
+                        state.status = "completed"
+                        state.progress = 100.0
+                        state.completed_at = time.time()
+                        if on_progress:
+                            on_progress(state)
+                        self._notify_observers()
+                        return True
+
+                except Exception as e:
+                    print(f"[ResourceService] Download failed from {url}: {e}")
+                    state.error = str(e)
+                    continue
+
+            state.status = "failed"
+            if on_progress:
+                on_progress(state)
+            return False
+
+        finally:
+            lock.release()
 
     def get_all_download_states(self) -> Dict[str, DownloadState]:
         return dict(self._download_states)
