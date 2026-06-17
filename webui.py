@@ -215,7 +215,7 @@ def format_resource_center_html(selected_filter: str = "all") -> str:
 
     sorted_resources = sorted(
         all_resources.values(),
-        key=lambda r: (r.resource_type.value, r.name.lower())
+        key=lambda r: (r.def_.resource_type.value, r.def_.name.lower())
     )
 
     row_idx = 0
@@ -249,12 +249,33 @@ def format_resource_center_html(selected_filter: str = "all") -> str:
                 </div>
             '''
 
-        hash_display = "-"
-        hash_class = ""
-        if rd["current_hash"]:
-            hash_trusted_style = "color: #059669;" if rd["hash_trusted"] else "color: #6b7280;"
-            trusted_badge = "✓" if rd["hash_trusted"] else "?"
-            hash_display = f'<code style="font-family: monospace; font-size: 11px; {hash_trusted_style} background: #f3f4f6; padding: 1px 6px; border-radius: 4px;">{rd["current_hash"]}</code> <span style="font-size: 10px; {hash_trusted_style}">{trusted_badge}</span>'
+        hash_display = '<span style="color: #9ca3af; font-size: 12px;">— 未计算</span>'
+        if rd["hash_status"] == "verified":
+            hash_display = f'''
+                <div>
+                    <code style="font-family: monospace; font-size: 11px; color: #059669; background: #ecfdf5; padding: 1px 6px; border-radius: 4px;">{rd["current_hash"]}</code>
+                    <span style="font-size: 11px; color: #059669; margin-left: 4px; font-weight: 500;">✓ 可信</span>
+                </div>
+                <div style="font-size: 10px; color: #6b7280; margin-top: 2px;">与预期 hash 匹配</div>
+            '''
+        elif rd["hash_status"] == "mismatch":
+            hash_display = f'''
+                <div>
+                    <code style="font-family: monospace; font-size: 11px; color: #dc2626; background: #fef2f2; padding: 1px 6px; border-radius: 4px;">{rd["current_hash"]}</code>
+                    <span style="font-size: 11px; color: #dc2626; margin-left: 4px; font-weight: 500;">✗ 不匹配</span>
+                </div>
+                <div style="font-size: 10px; color: #dc2626; margin-top: 2px;">文件可能被篡改或版本错误</div>
+            '''
+        elif rd["hash_status"] == "computed_unverified":
+            source_label = "内置来源" if rd["is_builtin"] else "未知来源"
+            badge_color = "#f59e0b" if rd["is_builtin"] else "#6b7280"
+            badge_bg = "#fffbeb" if rd["is_builtin"] else "#f3f4f6"
+            hash_display = f'''
+                <div>
+                    <code style="font-family: monospace; font-size: 11px; color: {badge_color}; background: {badge_bg}; padding: 1px 6px; border-radius: 4px;">{rd["current_hash"]}</code>
+                </div>
+                <div style="font-size: 10px; color: {badge_color}; margin-top: 2px;">⚠ {source_label}，未验证</div>
+            '''
 
         error_html = ""
         if rd["error_message"]:

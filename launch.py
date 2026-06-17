@@ -59,14 +59,6 @@ def prepare_environment():
     return
 
 
-vae_approx_filenames = [
-    ('xlvaeapp.pth', 'https://huggingface.co/lllyasviel/misc/resolve/main/xlvaeapp.pth'),
-    ('vaeapp_sd15.pth', 'https://huggingface.co/lllyasviel/misc/resolve/main/vaeapp_sd15.pt'),
-    ('xl-to-v1_interposer-v4.0.safetensors',
-     'https://huggingface.co/mashb1t/misc/resolve/main/xl-to-v1_interposer-v4.0.safetensors')
-]
-
-
 def ini_args():
     from args_manager import args
     return args
@@ -102,15 +94,10 @@ if config.temp_path_cleanup_on_launch:
 
 def download_models(default_model, previous_default_models, checkpoint_downloads, embeddings_downloads, lora_downloads, vae_downloads):
     from modules.util import get_file_from_folder_list
+    from modules.model_resource_center import get_startup_download_list
 
-    for file_name, url in vae_approx_filenames:
-        load_file_from_url(url=url, model_dir=config.path_vae_approx, file_name=file_name)
-
-    load_file_from_url(
-        url='https://huggingface.co/lllyasviel/misc/resolve/main/fooocus_expansion.bin',
-        model_dir=config.path_fooocus_expansion,
-        file_name='pytorch_model.bin'
-    )
+    for file_name, url, model_dir in get_startup_download_list():
+        load_file_from_url(url=url, model_dir=model_dir, file_name=file_name)
 
     if args.disable_preset_download:
         print('Skipped model download.')
