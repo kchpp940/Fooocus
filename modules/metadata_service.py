@@ -1252,6 +1252,130 @@ class MetadataService:
         metadata = self.parse(metadata_dict, MetadataScheme.FOOOCUS)
         return self.build_load_parameters(metadata, is_generating, inpaint_mode)
 
+    @staticmethod
+    def build_expected_schema_layout(default_enhance_tabs: int = None,
+                                     default_max_lora_number: int = None,
+                                     default_max_image_number: int = None) -> list:
+        if default_enhance_tabs is None:
+            default_enhance_tabs = modules.config.default_enhance_tabs
+        if default_max_lora_number is None:
+            default_max_lora_number = modules.config.default_max_lora_number
+        if default_max_image_number is None:
+            default_max_image_number = modules.config.default_max_image_number
+
+        schema = get_metadata_schema()
+        layout = []
+
+        layout.append({
+            'slot': 'advanced_checkbox',
+            'type': 'fixed_control',
+            'description': 'advanced_checkbox (has_data marker)',
+            'ui_count': 1,
+            'schema_key': '__has_data__',
+        })
+
+        for field_schema in schema:
+            layout.append({
+                'slot': f'schema_field[{field_schema.key}]',
+                'type': 'schema_field',
+                'description': f'{field_schema.label} ({field_schema.key})',
+                'ui_count': field_schema.ui_count,
+                'schema_key': field_schema.key,
+            })
+
+        layout.append({
+            'slot': 'generate_button',
+            'type': 'fixed_control',
+            'description': 'generate_button (visible control)',
+            'ui_count': 1,
+            'schema_key': None,
+        })
+        layout.append({
+            'slot': 'load_parameter_button',
+            'type': 'fixed_control',
+            'description': 'load_parameter_button (visible control)',
+            'ui_count': 1,
+            'schema_key': None,
+        })
+
+        layout.append({
+            'slot': 'freeu_ctrls',
+            'type': 'variable_group',
+            'description': 'freeu (enabled + 4 sliders)',
+            'ui_count': 5,
+            'schema_key': 'freeu',
+        })
+
+        for i in range(default_max_lora_number):
+            layout.append({
+                'slot': f'lora_ctrls[{i}]',
+                'type': 'variable_group',
+                'description': f'LoRA {i + 1} (enabled + model + weight)',
+                'ui_count': 3,
+                'schema_key': f'lora_combined_{i + 1}',
+            })
+
+        return layout
+
+    def validate_schema_against_load_outputs(self,
+                                              load_outputs_list: list,
+                                              default_enhance_tabs: int,
+                                              default_max_lora_number: int,
+                                              default_max_image_number: int,
+                                              control_names: dict = None) -> tuple[bool, str]:
+        expected = self.build_expected_schema_layout(
+            default_enhance_tabs=default_enhance_tabs,
+            default_max_lora_number=default_max_lora_number,
+            default_max_image_number=default_max_image_number,
+        )
+
+        expected_total = sum(item['ui_count'] for item in expected)
+        actual_total = len(load_outputs_list)
+
+        messages = []
+        passed = True
+
+        messages.append(f'[Metadata Schema Validation]')
+        messages.append(f'  Expected total UI controls: {expected_total}')
+        messages.append(f'  Actual load_data_outputs length: {actual_total}')
+
+        if expected_total != actual_total:
+            passed = False
+            messages.append(f'  ❌ LENGTH MISMATCH! Difference: {actual_total - expected_total:+d}')
+            messages.append(f'     Expected layout breakdown:')
+            offset = 0
+            for item in expected:
+                messages.append(f'       [{offset:03d}-{offset + item["ui_count"] - 1:03d}] '
+                              f'{item["description"]} (count={item["ui_count"]})')
+                offset += item['ui_count']
+
+            messages.append(f'     Actual controls:')
+            for i, ctrl in enumerate(load_outputs_list):
+                name = control_names.get(id(ctrl), repr(ctrl)) if control_names else f'control[{i}]'
+                messages.append(f'       [{i:03d}] {name}')
+
+        offset_expected = 0
+        offset_actual = 0
+        for i, item in enumerate(expected):
+            end_expected = offset_expected + item['ui_count'] - 1
+
+            if control_names and item['schema_key']:
+                actual_ctrls = load_outputs_list[offset_actual:offset_actual + item['ui_count']]
+                messages.append(f'  Slot [{offset_expected:03d}-{end_expected:03d}] {item["description"]}:')
+                for j, ctrl in enumerate(actual_ctrls):
+                    ctrl_name = control_names.get(id(ctrl), '?')
+                    messages.append(f'    → [{offset_actual + j:03d}] {ctrl_name}')
+
+            offset_expected += item['ui_count']
+            offset_actual += item['ui_count']
+
+        if passed:
+            messages.append('  ✅ Schema validation PASSED - all fields aligned')
+        else:
+            messages.append('  ❌ Schema validation FAILED - please sync METADATA_SCHEMA with load_data_outputs')
+
+        return passed, '\n'.join(messages)
+
 
 def get_metadata_service() -> MetadataService:
     return MetadataService.get_instance()

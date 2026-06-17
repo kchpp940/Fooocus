@@ -1105,6 +1105,76 @@ with shared.gradio_root:
                              inpaint_mode] + enhance_inpaint_mode_ctrls + [generate_button,
                              load_parameter_button] + freeu_ctrls + lora_ctrls
 
+        try:
+            service = get_metadata_service()
+            control_names = {}
+            named_controls = {
+                'advanced_checkbox': advanced_checkbox,
+                'image_number': image_number,
+                'prompt': prompt,
+                'negative_prompt': negative_prompt,
+                'style_selections': style_selections,
+                'performance_selection': performance_selection,
+                'overwrite_step': overwrite_step,
+                'overwrite_switch': overwrite_switch,
+                'aspect_ratios_selection': aspect_ratios_selection,
+                'overwrite_width': overwrite_width,
+                'overwrite_height': overwrite_height,
+                'guidance_scale': guidance_scale,
+                'sharpness': sharpness,
+                'adm_scaler_positive': adm_scaler_positive,
+                'adm_scaler_negative': adm_scaler_negative,
+                'adm_scaler_end': adm_scaler_end,
+                'refiner_swap_method': refiner_swap_method,
+                'adaptive_cfg': adaptive_cfg,
+                'clip_skip': clip_skip,
+                'base_model': base_model,
+                'refiner_model': refiner_model,
+                'refiner_switch': refiner_switch,
+                'sampler_name': sampler_name,
+                'scheduler_name': scheduler_name,
+                'vae_name': vae_name,
+                'seed_random': seed_random,
+                'image_seed': image_seed,
+                'inpaint_engine': inpaint_engine,
+                'inpaint_engine_state': inpaint_engine_state,
+                'inpaint_mode': inpaint_mode,
+                'generate_button': generate_button,
+                'load_parameter_button': load_parameter_button,
+            }
+            for name, ctrl in named_controls.items():
+                control_names[id(ctrl)] = name
+            for i, ctrl in enumerate(enhance_inpaint_mode_ctrls):
+                control_names[id(ctrl)] = f'enhance_inpaint_mode_ctrls[{i}]'
+            for i, ctrl in enumerate(freeu_ctrls):
+                control_names[id(ctrl)] = f'freeu_ctrls[{i}] (freeu_{["enabled","b1","b2","s1","s2"][i]})'
+            for i in range(0, len(lora_ctrls), 3):
+                idx = i // 3
+                if i < len(lora_ctrls):
+                    control_names[id(lora_ctrls[i])] = f'lora_ctrls[{idx}].enabled'
+                if i + 1 < len(lora_ctrls):
+                    control_names[id(lora_ctrls[i + 1])] = f'lora_ctrls[{idx}].model'
+                if i + 2 < len(lora_ctrls):
+                    control_names[id(lora_ctrls[i + 2])] = f'lora_ctrls[{idx}].weight'
+
+            validation_passed, validation_msg = service.validate_schema_against_load_outputs(
+                load_outputs_list=load_data_outputs,
+                default_enhance_tabs=modules.config.default_enhance_tabs,
+                default_max_lora_number=modules.config.default_max_lora_number,
+                default_max_image_number=modules.config.default_max_image_number,
+                control_names=control_names,
+            )
+            print(validation_msg)
+            if not validation_passed:
+                import sys
+                print('\n⚠️⚠️⚠️  CRITICAL WARNING: Metadata schema does not match load_data_outputs!  ⚠️⚠️⚠️')
+                print('Metadata tab display, parameter comparison, and parameter loading will be MISALIGNED.')
+                print('Please fix modules.metadata_service.METADATA_SCHEMA to match the UI controls.\n')
+                if args_manager.args.preset or getattr(args_manager.args, 'always_gpu', False):
+                    pass
+        except Exception as schema_validation_error:
+            print(f'[Metadata Schema Validation] Skipped due to error: {schema_validation_error}')
+
         if not args_manager.args.disable_preset_selection:
             def preset_selection_change(preset, is_generating, inpaint_mode):
                 service = get_metadata_service()
