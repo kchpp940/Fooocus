@@ -1003,6 +1003,38 @@ with shared.gradio_root:
                         freeu_s2 = gr.Slider(label='S2', minimum=0, maximum=4, step=0.01, value=0.95)
                         freeu_ctrls = [freeu_enabled, freeu_b1, freeu_b2, freeu_s1, freeu_s2]
 
+                    with gr.Tab(label='Resource Center'):
+                        gr.Markdown('### Resource Center')
+                        gr.Markdown('Unified resource status, download progress, hash verification and multi-directory match info powered by `ResourceService`.')
+                        with gr.Row():
+                            resource_type_selector = gr.Dropdown(
+                                label='Resource Type',
+                                choices=[rt.value for rt in ResourceType],
+                                value=ResourceType.CHECKPOINT.value,
+                                scale=2
+                            )
+                            resource_center_refresh = gr.Button('🔄 Refresh', variant='secondary', scale=1)
+                        resource_center_html = gr.HTML(value='')
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                resource_operation = gr.Radio(
+                                    label='Operation',
+                                    choices=['Download', 'Rehash', 'Scan'],
+                                    value='Download'
+                                )
+                            with gr.Column(scale=2):
+                                resource_name_input = gr.Textbox(
+                                    label='Resource Name (filename)',
+                                    placeholder='e.g. sdxl_lightning_4step_lora.safetensors'
+                                )
+                                resource_url_input = gr.Textbox(
+                                    label='Download URL (optional, for custom downloads)',
+                                    placeholder='https://...',
+                                    visible=True
+                                )
+                                resource_execute_btn = gr.Button('Execute', variant='primary')
+                        resource_operation_result = gr.Textbox(label='Result', interactive=False, visible=False)
+
                 def dev_mode_checked(r):
                     return gr.update(visible=r)
 
@@ -1026,6 +1058,137 @@ with shared.gradio_root:
                     refresh_files_output += [preset_selection]
                 refresh_files.click(refresh_files_clicked, [], refresh_files_output + lora_ctrls,
                                     queue=False, show_progress=False)
+
+                def render_resource_center(resource_type_value):
+                    from modules.resource_service import ResourceType
+                    try:
+                        resource_type = ResourceType(resource_type_value)
+                    except ValueError:
+                        return '<div style="color: red;">Invalid resource type</div>'
+                    status = resource_service.get_resource_status(resource_type)
+                    directories = resource_service.get_directories_for_type(resource_type)
+                    html_parts = []
+                    html_parts.append(f'<div style="margin-bottom: 12px;"><strong>Directories (priority order):</strong><ol style="margin: 4px 0; padding-left: 20px;">')
+                    for i, d in enumerate(directories):
+                        priority_label = ' (highest priority)' if i == 0 else ''
+                        html_parts.append(f'<li><code style="font-size: 11px;">{d}</code> <small>(index={i}{priority_label})</small></li>')
+                    html_parts.append('</ol></div>')
+                    total = len(status)
+                    available = sum(1 for s in status.values() if s.get('is_downloaded'))
+                    html_parts.append(f'<div style="margin-bottom: 12px;"><strong>Summary:</strong> {available}/{total} available</div>')
+                    html_parts.append('<table style="width: 100%; border-collapse: collapse; font-size: 12px;">')
+                    html_parts.append('<thead><tr style="background: #f0f0f0;">')
+                    html_parts.append('<th style="text-align: left; padding: 6px; border: 1px solid #ddd;">Name</th>')
+                    html_parts.append('<th style="text-align: left; padding: 6px; border: 1px solid #ddd;">Status</th>')
+                    html_parts.append('<th style="text-align: left; padding: 6px; border: 1px solid #ddd;">Size</th>')
+                    html_parts.append('<th style="text-align: left; padding: 6px; border: 1px solid #ddd;">Hash</th>')
+                    html_parts.append('<th style="text-align: left; padding: 6px; border: 1px solid #ddd;">All Matches (directory index order)</th>')
+                    html_parts.append('</tr></thead><tbody>')
+                    for name, info in status.items():
+                        is_downloaded = info.get('is_downloaded', False)
+                        download_status = info.get('download_status', 'idle')
+                        download_progress = info.get('download_progress', 0)
+                        download_error = info.get('download_error', None)
+                        size = info.get('size', None)
+                        if isinstance(size, int) and size > 0:
+                            size_str = f'{size / (1024*1024):.1f} MB'
+                        else:
+                            size_str = 'N/A'
+                        hash_val = info.get('hash', None)
+                        hash_truncated = hash_val[:10] + '...' if hash_val and len(hash_val) > 10 else (hash_val or 'N/A')
+                        all_matches = info.get('all_matches', [])
+                        if download_status == 'downloading':
+                            status_label = f'<span style="color: #f59e0b;">⬇ Downloading {download_progress:.1f}%</span>'
+                        elif download_status == 'failed':
+                            err = download_error or 'download failed'
+                            status_label = f'<span style="color: #ef4444;">❌ Failed: {err}</span>'
+                        elif is_downloaded:
+                            status_label = '<span style="color: #10b981;">✅ Available</span>'
+                        else:
+                            status_label = '<span style="color: #9ca3af;">⭕ Not downloaded</span>'
+                        matches_html = ''
+                        if all_matches:
+                            matches_html = '<ul style="margin: 0; padding-left: 16px; font-size: 11px;">'
+                            sorted_matches = sorted(all_matches, key=lambda m: m.get('directory_index', 999))
+                            for m in sorted_matches:
+                                primary = m.get('is_primary', False)
+                                dir_idx = m.get('directory_index', -1)
+                                m_path = m.get('path', '')
+                                m_size = m.get('size', None)
+                                size_info = ''
+                                if isinstance(m_size, int) and m_size > 0:
+                                    size_info = f' ({m_size / (1024*1024):.1f} MB)'
+                                if primary:
+                                    matches_html += f'<li style="color: #059669;"><strong>★ Primary</strong> (idx={dir_idx}): <code>{m_path}</code>{size_info} <small>&larr; will be loaded by get_file_from_folder_list()</small></li>'
+                                else:
+                                    matches_html += f'<li style="color: #6b7280;">(idx={dir_idx}): <code>{m_path}</code>{size_info}</li>'
+                            matches_html += '</ul>'
+                        else:
+                            matches_html = '<span style="color: #9ca3af; font-size: 11px;">no matches</span>'
+                        html_parts.append('<tr>')
+                        html_parts.append(f'<td style="padding: 6px; border: 1px solid #ddd; font-family: monospace; font-size: 11px;">{name}</td>')
+                        html_parts.append(f'<td style="padding: 6px; border: 1px solid #ddd;">{status_label}</td>')
+                        html_parts.append(f'<td style="padding: 6px; border: 1px solid #ddd;">{size_str}</td>')
+                        html_parts.append(f'<td style="padding: 6px; border: 1px solid #ddd; font-family: monospace; font-size: 10px;">{hash_truncated}</td>')
+                        html_parts.append(f'<td style="padding: 6px; border: 1px solid #ddd;">{matches_html}</td>')
+                        html_parts.append('</tr>')
+                    html_parts.append('</tbody></table>')
+                    return ''.join(html_parts)
+
+                def resource_center_refresh_clicked(resource_type_value):
+                    from modules.resource_service import ResourceType
+                    try:
+                        resource_type = ResourceType(resource_type_value)
+                    except ValueError:
+                        return '<div style="color: red;">Invalid resource type</div>'
+                    resource_service.scan_type(resource_type, force=True)
+                    modules.config.update_files()
+                    return render_resource_center(resource_type_value)
+
+                def resource_type_changed(resource_type_value):
+                    return render_resource_center(resource_type_value)
+
+                def execute_resource_operation(operation, resource_type_value, resource_name, resource_url):
+                    from modules.resource_service import ResourceType
+                    if not resource_name:
+                        return gr.update(value='Please enter a resource name', visible=True)
+                    try:
+                        resource_type = ResourceType(resource_type_value)
+                    except ValueError:
+                        return gr.update(value='Invalid resource type', visible=True)
+                    try:
+                        if operation == 'Download':
+                            url = resource_url if resource_url.strip() else None
+                            result = resource_service.download_by_name(resource_type, resource_name, url=url)
+                            if result is None:
+                                msg = f'No registered resource named "{resource_name}" in {resource_type_value}. Please provide a download URL.'
+                            elif result is True:
+                                msg = f'Download started for {resource_name}'
+                            else:
+                                msg = f'Download may already be in progress for {resource_name}'
+                        elif operation == 'Rehash':
+                            hash_val = resource_service.rehash_by_name(resource_type, resource_name)
+                            if hash_val:
+                                msg = f'Rehash completed for {resource_name}: {hash_val}'
+                            else:
+                                msg = f'File not found: {resource_name}'
+                        elif operation == 'Scan':
+                            resource_service.scan_type(resource_type, force=True)
+                            modules.config.update_files()
+                            msg = f'Scan completed for {resource_type_value}'
+                        else:
+                            msg = f'Unknown operation: {operation}'
+                        return gr.update(value=msg, visible=True)
+                    except Exception as e:
+                        return gr.update(value=f'Error: {str(e)}', visible=True)
+
+                resource_type_selector.change(resource_type_changed, inputs=[resource_type_selector], outputs=[resource_center_html])
+                resource_center_refresh.click(resource_center_refresh_clicked, inputs=[resource_type_selector], outputs=[resource_center_html])
+                resource_execute_btn.click(
+                    execute_resource_operation,
+                    inputs=[resource_operation, resource_type_selector, resource_name_input, resource_url_input],
+                    outputs=[resource_operation_result]
+                ).then(resource_center_refresh_clicked, inputs=[resource_type_selector], outputs=[resource_center_html])
 
         state_is_generating = gr.State(False)
 

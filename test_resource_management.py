@@ -322,7 +322,42 @@ def test_architecture_integrity():
     else:
         print("  ⚠️  webui.py may not be consuming synced config globals")
 
-    print("\n8. Checking all modified files for syntax:")
+    print("\n8. Checking webui.py Resource Center tab uses ResourceService directly:")
+    has_resource_center = all(kw in webui_source for kw in [
+        "Resource Center",
+        "get_resource_status",
+        "resource_service.get_directories_for_type",
+        "download_by_name",
+        "rehash_by_name",
+        "all_matches",
+        "is_primary",
+        "directory_index",
+    ])
+    if has_resource_center:
+        print("  ✓ Resource Center tab in dev tools consumes ResourceService runtime state directly")
+        print("  ✓ Displays all_matches with directory_index priority and is_primary flag")
+        print("  ✓ Supports Download / Rehash / Scan operations")
+    else:
+        print("  ⚠️  Resource Center may not be fully integrated with ResourceService")
+
+    print("\n9. Checking resource_service has convenience APIs for WebUI:")
+    service_source = read_file('modules/resource_service.py')
+    has_convenience_apis = all(kw in service_source for kw in [
+        "def download_by_name",
+        "def rehash_by_name",
+        "def get_resource_status",
+        "all_matches",
+        "is_primary",
+        "directory_index",
+    ])
+    if has_convenience_apis:
+        print("  ✓ download_by_name() - WebUI can download by type + filename")
+        print("  ✓ rehash_by_name() - WebUI can rehash by type + filename")
+        print("  ✓ get_resource_status() - returns rich status with all_matches, is_primary, directory_index")
+    else:
+        print("  ⚠️  Some convenience APIs may be missing")
+
+    print("\n10. Checking all modified files for syntax:")
     files_to_check = [
         'modules/resource_registry.py',
         'modules/resource_service.py',

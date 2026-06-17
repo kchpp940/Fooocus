@@ -661,6 +661,40 @@ class ResourceService:
             if not self.is_downloaded(resource.resource_id):
                 self.download(resource.resource_id)
 
+    def download_by_name(
+        self,
+        resource_type: ResourceType,
+        filename: str,
+        url: Optional[str] = None,
+        on_progress: Optional[Callable[[DownloadState], None]] = None,
+    ) -> Optional[bool]:
+        definitions = get_resources_by_type(resource_type)
+        for d in definitions:
+            if d.name == filename:
+                return self.download(d.resource_id, on_progress)
+
+        if url:
+            definition = ResourceDefinition(
+                resource_id=f"manual_{resource_type.value}_{filename}",
+                resource_type=resource_type,
+                name=filename,
+                urls=[url],
+            )
+            return self.download_by_definition(definition, on_progress)
+
+        print(f"[ResourceService] No registered resource and no URL provided: {filename}")
+        return None
+
+    def rehash_by_name(
+        self,
+        resource_type: ResourceType,
+        filename: str,
+    ) -> Optional[str]:
+        filepath = self.find_filepath_by_name(resource_type, filename)
+        if not filepath or not os.path.isfile(filepath):
+            return None
+        return self.get_hash(resource_type, filename, force_recompute=True)
+
     def get_all_download_states(self) -> Dict[str, DownloadState]:
         return dict(self._download_states)
 
@@ -696,6 +730,7 @@ class ResourceService:
                 "directory_path": instance.directory_path if instance else None,
                 "is_primary_path": instance.is_primary if instance else None,
                 "hash": instance.hash if instance else None,
+                "size": instance.size if instance else None,
                 "description": definition.description if definition else None,
                 "urls": definition.urls if definition else [],
             }
