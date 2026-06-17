@@ -20,7 +20,6 @@ import fooocus_version
 
 from build_launcher import build_launcher
 from modules.launch_util import is_installed, run, python, run_pip, requirements_met, delete_folder_content
-from modules.model_loader import load_file_from_url
 
 REINSTALL_ALL = False
 TRY_INSTALL_XFORMERS = False
@@ -94,10 +93,10 @@ if config.temp_path_cleanup_on_launch:
 
 def download_models(default_model, previous_default_models, checkpoint_downloads, embeddings_downloads, lora_downloads, vae_downloads):
     from modules.util import get_file_from_folder_list
-    from modules.model_resource_center import get_startup_download_list
+    from modules.model_resource_center import download_resource_sync
 
-    for file_name, url, model_dir in get_startup_download_list():
-        load_file_from_url(url=url, model_dir=model_dir, file_name=file_name)
+    for resource_key, url, model_dir in get_startup_download_list():
+        download_resource_sync(resource_key, target_path=model_dir, source="startup")
 
     if args.disable_preset_download:
         print('Skipped model download.')
@@ -117,14 +116,14 @@ def download_models(default_model, previous_default_models, checkpoint_downloads
 
     for file_name, url in checkpoint_downloads.items():
         model_dir = os.path.dirname(get_file_from_folder_list(file_name, config.paths_checkpoints))
-        load_file_from_url(url=url, model_dir=model_dir, file_name=file_name)
+        download_resource_sync(f"checkpoint:{file_name}", target_path=model_dir, source="startup")
     for file_name, url in embeddings_downloads.items():
-        load_file_from_url(url=url, model_dir=config.path_embeddings, file_name=file_name)
+        download_resource_sync(f"embedding:{file_name}", target_path=config.path_embeddings, source="startup")
     for file_name, url in lora_downloads.items():
         model_dir = os.path.dirname(get_file_from_folder_list(file_name, config.paths_loras))
-        load_file_from_url(url=url, model_dir=model_dir, file_name=file_name)
+        download_resource_sync(f"lora:{file_name}", target_path=model_dir, source="startup")
     for file_name, url in vae_downloads.items():
-        load_file_from_url(url=url, model_dir=config.path_vae, file_name=file_name)
+        download_resource_sync(f"vae:{file_name}", target_path=config.path_vae, source="startup")
 
     return default_model, checkpoint_downloads
 

@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import threading
 from enum import Enum
@@ -37,6 +38,15 @@ class ResourceStatus(Enum):
 
 
 @dataclass
+class PathDownloadState:
+    download_status: DownloadStatus = DownloadStatus.IDLE
+    download_progress: float = 0.0
+    download_speed: float = 0.0
+    error_message: str = ""
+    source: str = ""
+
+
+@dataclass
 class PathMatch:
     full_path: str = ""
     directory: str = ""
@@ -47,6 +57,7 @@ class PathMatch:
     hash_status: HashStatus = HashStatus.NOT_COMPUTED
     last_checked: float = 0.0
     is_primary: bool = False
+    dl: PathDownloadState = field(default_factory=PathDownloadState)
 
 
 @dataclass
@@ -76,6 +87,10 @@ class ResourceRuntime:
     def has_duplicates(self) -> bool:
         return len(self.existing_matches) > 1
 
+    @property
+    def downloading_matches(self) -> List[PathMatch]:
+        return [m for m in self.all_matches if m.dl.download_status == DownloadStatus.DOWNLOADING]
+
 
 @dataclass
 class ResourceInfo:
@@ -90,8 +105,12 @@ class ResourceInfo:
     def status(self) -> ResourceStatus:
         if self.rt.download_status == DownloadStatus.DOWNLOADING:
             return ResourceStatus.DOWNLOADING
-        if self.rt.download_status == DownloadStatus.FAILED:
-            return ResourceStatus.DOWNLOAD_FAILED
+        for m in self.rt.all_matches:
+            if m.dl.download_status == DownloadStatus.DOWNLOADING:
+                return ResourceStatus.DOWNLOADING
+        for m in self.rt.all_matches:
+            if m.dl.download_status == DownloadStatus.FAILED:
+                return ResourceStatus.DOWNLOAD_FAILED
         primary = self.rt.primary
         if not primary or not primary.exists:
             return ResourceStatus.MISSING
@@ -163,6 +182,11 @@ class ResourceInfo:
                     "current_hash": m.current_hash,
                     "hash_status": m.hash_status.value,
                     "last_checked": m.last_checked,
+                    "dl_status": m.dl.download_status.value,
+                    "dl_progress": m.dl.download_progress,
+                    "dl_speed": m.dl.download_speed,
+                    "dl_error": m.dl.error_message,
+                    "dl_source": m.dl.source,
                 }
                 for m in self.rt.all_matches
             ],
@@ -201,41 +225,72 @@ def format_speed(speed_bytes: float) -> str:
 
 class DownloadProgressTracker:
     def __init__(self):
-        self._downloads: Dict[str, ResourceRuntime] = {}
+        self._downloads: Dict[Tuple[str, str], PathDownloadState] = {}
         self._lock = threading.Lock()
         self._listeners: List[Callable] = []
 
-    def start(self, key: str, target_path: str = ""):
+    def start(self, resource_key: str, target_path: str, source: str = ""):
+        key = (resource_key, os.path.abspath(target_path))
         with self._lock:
-            if key not in self._downloads:
-                self._downloads[key] = ResourceRuntime()
-            rt = self._downloads[key]
-            rt.download_status = DownloadStatus.DOWNLOADING
-            rt.download_progress = 0.0
-            rt.download_speed = 0.0
-            rt.error_message = ""
-            rt.download_target_path = target_path
+            state = PathDownloadState(
+                download_status=DownloadStatus.DOWNLOADING,
+                download_progress=0.0,
+                download_speed=0.0,
+                error_message="",
+                source=source,
+            )
+            self._downloads[key] = state
         self._notify()
 
-    def update(self, key: str, progress: float, speed: float = 0.0):
+    def update(self, resource_key: str, target_path: str, progress: float, speed: float = 0.0):
+        key = (resource_key, os.path.abspath(target_path))
         with self._lock:
             if key in self._downloads:
                 self._downloads[key].download_progress = progress
                 self._downloads[key].download_speed = speed
         self._notify()
 
-    def finish(self, key: str, success: bool, error: str = ""):
+    def finish(self, resource_key: str, target_path: str, success: bool, error: str = ""):
+        key = (resource_key, os.path.abspath(target_path))
         with self._lock:
             if key in self._downloads:
-                rt = self._downloads[key]
-                rt.download_status = DownloadStatus.SUCCESS if success else DownloadStatus.FAILED
-                rt.error_message = error
-                rt.download_progress = 1.0 if success else rt.download_progress
+                state = self._downloads[key]
+                state.download_status = DownloadStatus.SUCCESS if success else DownloadStatus.FAILED
+                state.error_message = error
+                state.download_progress = 1.0 if success else state.download_progress
         self._notify()
 
-    def get(self, key: str) -> Optional[ResourceRuntime]:
+    def get(self, resource_key: str, target_path: str) -> Optional[PathDownloadState]:
+        key = (resource_key, os.path.abspath(target_path))
         with self._lock:
             return self._downloads.get(key)
+
+    def get_by_resource(self, resource_key: str) -> Dict[str, PathDownloadState]:
+        result = {}
+        with self._lock:
+            for (rk, tp), state in self._downloads.items():
+                if rk == resource_key:
+                    result[tp] = state
+        return result
+
+    def get_all_downloading(self) -> Dict[Tuple[str, str], PathDownloadState]:
+        result = {}
+        with self._lock:
+            for key, state in self._downloads.items():
+                if state.download_status == DownloadStatus.DOWNLOADING:
+                    result[key] = state
+        return result
+
+    def cleanup_finished(self, max_age: float = 300.0):
+        now = time.time()
+        to_remove = []
+        with self._lock:
+            for key, state in self._downloads.items():
+                if state.download_status in (DownloadStatus.SUCCESS, DownloadStatus.FAILED):
+                    to_remove.append(key)
+        for key in to_remove:
+            with self._lock:
+                del self._downloads[key]
 
     def add_listener(self, callback: Callable):
         self._listeners.append(callback)
@@ -321,20 +376,33 @@ def _update_runtime(info: ResourceInfo):
             match.is_primary = True
             break
 
-    dl_rt = download_tracker.get(info.key)
-    if dl_rt:
-        if dl_rt.download_status == DownloadStatus.DOWNLOADING:
-            rt.download_status = DownloadStatus.DOWNLOADING
-            rt.download_progress = dl_rt.download_progress
-            rt.download_speed = dl_rt.download_speed
-            rt.download_target_path = dl_rt.download_target_path
-        elif dl_rt.download_status == DownloadStatus.FAILED:
-            rt.download_status = DownloadStatus.FAILED
-            rt.error_message = dl_rt.error_message
-            rt.download_target_path = dl_rt.download_target_path
-        elif dl_rt.download_status == DownloadStatus.SUCCESS:
-            rt.download_status = DownloadStatus.IDLE
-            rt.download_target_path = ""
+    path_states = download_tracker.get_by_resource(info.key)
+    rt.download_status = DownloadStatus.IDLE
+    rt.download_progress = 0.0
+    rt.download_speed = 0.0
+    rt.download_target_path = ""
+    rt.error_message = ""
+
+    for match in rt.all_matches:
+        abs_fp = os.path.abspath(match.full_path)
+        if abs_fp in path_states:
+            state = path_states[abs_fp]
+            match.dl = state
+            if state.download_status == DownloadStatus.DOWNLOADING:
+                if rt.download_status != DownloadStatus.DOWNLOADING:
+                    rt.download_status = DownloadStatus.DOWNLOADING
+                    rt.download_progress = state.download_progress
+                    rt.download_speed = state.download_speed
+                    rt.download_target_path = match.full_path
+                elif state.download_progress > rt.download_progress:
+                    rt.download_progress = state.download_progress
+                    rt.download_speed = state.download_speed
+                    rt.download_target_path = match.full_path
+            elif state.download_status == DownloadStatus.FAILED:
+                if rt.download_status == DownloadStatus.IDLE:
+                    rt.download_status = DownloadStatus.FAILED
+                    rt.error_message = state.error_message
+                    rt.download_target_path = match.full_path
 
 
 def _scan_directory_extra(rtype: ResourceType) -> List[ResourceInfo]:
@@ -440,32 +508,12 @@ def get_resources_summary() -> dict:
     return summary
 
 
-def download_resource(resource_key: str, target_path: Optional[str] = None, force: bool = False) -> bool:
-    rdef = get_resource_def(resource_key)
-    if not rdef:
-        all_res = get_all_resources()
-        if resource_key in all_res:
-            info = all_res[resource_key]
-            rdef = info.def_
-        else:
-            return False
-
-    if not rdef.source_url:
-        return False
-
+def _resolve_download_target(rdef: ResourceDef, target_path: Optional[str] = None) -> Tuple[str, str]:
     import modules.config as cfg
-
-    if not force:
-        rt = ResourceRuntime()
-        info = ResourceInfo(def_=rdef, rt=rt)
-        _update_runtime(info)
-        if info.status in (ResourceStatus.EXISTS, ResourceStatus.HASH_VERIFIED):
-            if not target_path or target_path == info.primary_path:
-                return True
 
     dirs = resolve_all_dirs_for_def(rdef, cfg)
     if not dirs:
-        return False
+        return "", ""
 
     model_dir = dirs[0]
     if target_path:
@@ -481,14 +529,43 @@ def download_resource(resource_key: str, target_path: Optional[str] = None, forc
                 break
 
     if not model_dir:
-        return False
+        return "", ""
 
     target_full_path = os.path.join(model_dir, rdef.filename)
-    download_tracker.start(resource_key, target_full_path)
+    return model_dir, target_full_path
+
+
+def download_resource(resource_key: str, target_path: Optional[str] = None, force: bool = False,
+                      source: str = "webui") -> bool:
+    rdef = get_resource_def(resource_key)
+    if not rdef:
+        all_res = get_all_resources()
+        if resource_key in all_res:
+            info = all_res[resource_key]
+            rdef = info.def_
+        else:
+            return False
+
+    if not rdef.source_url:
+        return False
+
+    if not force:
+        rt = ResourceRuntime()
+        info = ResourceInfo(def_=rdef, rt=rt)
+        _update_runtime(info)
+        if info.status in (ResourceStatus.EXISTS, ResourceStatus.HASH_VERIFIED):
+            if not target_path or target_path == info.primary_path:
+                return True
+
+    model_dir, target_full_path = _resolve_download_target(rdef, target_path)
+    if not model_dir:
+        return False
+
+    download_tracker.start(resource_key, target_full_path, source=source)
 
     def progress_cb(downloaded: int, total: int, speed: float):
         progress = downloaded / total if total > 0 else 0
-        download_tracker.update(resource_key, progress, speed)
+        download_tracker.update(resource_key, target_full_path, progress, speed)
 
     def run_download():
         from modules.model_loader import load_file_from_url
@@ -509,15 +586,69 @@ def download_resource(resource_key: str, target_path: Optional[str] = None, forc
                     save_cache_to_file()
                 except Exception:
                     pass
-                download_tracker.finish(resource_key, True)
+                download_tracker.finish(resource_key, target_full_path, True)
             else:
-                download_tracker.finish(resource_key, False, "Download returned empty path")
+                download_tracker.finish(resource_key, target_full_path, False, "Download returned empty path")
         except Exception as e:
-            download_tracker.finish(resource_key, False, str(e))
+            download_tracker.finish(resource_key, target_full_path, False, str(e))
 
     thread = threading.Thread(target=run_download, daemon=True)
     thread.start()
     return True
+
+
+def download_resource_sync(resource_key: str, target_path: Optional[str] = None, force: bool = False,
+                           source: str = "startup") -> Optional[str]:
+    rdef = get_resource_def(resource_key)
+    if not rdef:
+        all_res = get_all_resources()
+        if resource_key in all_res:
+            rdef = all_res[resource_key].def_
+        else:
+            return None
+
+    if not rdef.source_url:
+        return None
+
+    model_dir, target_full_path = _resolve_download_target(rdef, target_path)
+    if not model_dir:
+        return None
+
+    if os.path.isfile(target_full_path) and not force:
+        return target_full_path
+
+    download_tracker.start(resource_key, target_full_path, source=source)
+
+    def progress_cb(downloaded: int, total: int, speed: float):
+        progress = downloaded / total if total > 0 else 0
+        download_tracker.update(resource_key, target_full_path, progress, speed)
+
+    try:
+        from modules.model_loader import load_file_from_url
+        from modules.hash_cache import sha256_from_cache, save_cache_to_file
+
+        result_path = load_file_from_url(
+            url=rdef.source_url,
+            model_dir=model_dir,
+            file_name=rdef.filename,
+            progress=True,
+            progress_callback=progress_cb,
+        )
+        if result_path and os.path.exists(result_path):
+            try:
+                abs_p = os.path.abspath(result_path)
+                sha256_from_cache(abs_p)
+                save_cache_to_file()
+            except Exception:
+                pass
+            download_tracker.finish(resource_key, target_full_path, True)
+            return result_path
+        else:
+            download_tracker.finish(resource_key, target_full_path, False, "Download returned empty path")
+            return None
+    except Exception as e:
+        download_tracker.finish(resource_key, target_full_path, False, str(e))
+        return None
 
 
 def rehash_resource(resource_key: str, target_path: Optional[str] = None) -> bool:
@@ -581,6 +712,16 @@ def get_startup_download_list() -> List[Tuple[str, str, str]]:
                 if d and os.path.isdir(d):
                     model_dir = d
                     break
-            result.append((rdef.filename, rdef.source_url, model_dir))
+            result.append((rdef.key, rdef.source_url, model_dir))
 
     return result
+
+
+def parse_action_payload(payload: str) -> Tuple[str, Optional[str]]:
+    if not payload:
+        return "", None
+    try:
+        data = json.loads(payload)
+        return data.get("key", ""), data.get("target_path") or None
+    except (json.JSONDecodeError, TypeError):
+        return payload, None

@@ -318,6 +318,11 @@ def format_resource_center_html(selected_filter: str = "all") -> str:
             size_human = match.get("file_size_human", "0 B")
             m_hash = match.get("current_hash", None)
             m_hash_status = match.get("hash_status", "not_computed")
+            dl_status = match.get("dl_status", "idle")
+            dl_progress = match.get("dl_progress", 0.0)
+            dl_speed = match.get("dl_speed", 0.0)
+            dl_source = match.get("dl_source", "")
+            dl_error = match.get("dl_error", "")
 
             path_display = full_path
             if len(path_display) > 50:
@@ -334,6 +339,25 @@ def format_resource_center_html(selected_filter: str = "all") -> str:
             primary_badge = ' <span style="font-size: 10px; background: #dbeafe; color: #1e40af; padding: 1px 5px; border-radius: 8px; margin-left: 4px;">★ 优先加载</span>' if is_primary else ''
             priority_label = f'<span style="font-size: 10px; color: #6b7280;">#{dir_priority}</span>'
 
+            dl_badge = ""
+            dl_progress_html = ""
+            if dl_status == "downloading":
+                source_label = {"startup": "🚀启动", "config": "⚙️按需", "webui": "🌐手动"}.get(dl_source, "⬇️")
+                dl_badge = f' <span style="font-size: 10px; background: #dbeafe; color: #1e40af; padding: 1px 5px; border-radius: 8px;">{source_label}下载中</span>'
+                pct = round(dl_progress * 100, 1)
+                speed_str = _format_speed(dl_speed)
+                dl_progress_html = f'''
+                    <div style="margin-top: 3px;">
+                        <div style="height: 4px; background: #e5e7eb; border-radius: 2px; overflow: hidden; width: 100px;">
+                            <div style="height: 100%; background: #2563eb; width: {pct}%; border-radius: 2px; transition: width 0.3s;"></div>
+                        </div>
+                        <div style="font-size: 10px; color: #6b7280; margin-top: 1px;">{pct}% · {speed_str}</div>
+                    </div>
+                '''
+            elif dl_status == "failed":
+                err_short = (dl_error[:40] + "...") if len(dl_error) > 40 else dl_error
+                dl_badge = f' <span style="font-size: 10px; background: #fee2e2; color: #991b1b; padding: 1px 5px; border-radius: 8px;" title="{dl_error}">✗下载失败</span>'
+
             paths_html_parts.append(f'''
                 <div style="padding: 6px 8px; margin: 2px 0; border-radius: 6px; background: {'#f0fdf4' if is_primary else '#f9fafb'}; border-left: 3px solid {'#22c55e' if is_primary else '#d1d5db'};">
                     <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;">
@@ -348,20 +372,47 @@ def format_resource_center_html(selected_filter: str = "all") -> str:
                         {priority_label}
                         {hash_badge}
                         {primary_badge}
+                        {dl_badge}
                     </div>
+                    {dl_progress_html}
                 </div>
             ''')
 
         for match in possible_matches:
             dir_priority = match.get("dir_priority", -1)
             full_path = match.get("full_path", "")
+            dl_status = match.get("dl_status", "idle")
+            dl_progress = match.get("dl_progress", 0.0)
+            dl_speed = match.get("dl_speed", 0.0)
+            dl_source = match.get("dl_source", "")
+            dl_error = match.get("dl_error", "")
+
             path_display = full_path
             if len(path_display) > 50:
                 path_display = "..." + path_display[-47:]
+
+            dl_badge = ""
+            dl_progress_html = ""
+            if dl_status == "downloading":
+                source_label = {"startup": "🚀启动", "config": "⚙️按需", "webui": "🌐手动"}.get(dl_source, "⬇️")
+                dl_badge = f' <span style="font-size: 10px; background: #dbeafe; color: #1e40af; padding: 1px 5px; border-radius: 8px;">{source_label}下载中</span>'
+                pct = round(dl_progress * 100, 1)
+                speed_str = _format_speed(dl_speed)
+                dl_progress_html = f'''
+                    <div style="margin-top: 3px;">
+                        <div style="height: 4px; background: #e5e7eb; border-radius: 2px; overflow: hidden; width: 100px;">
+                            <div style="height: 100%; background: #2563eb; width: {pct}%; border-radius: 2px; transition: width 0.3s;"></div>
+                        </div>
+                        <div style="font-size: 10px; color: #6b7280; margin-top: 1px;">{pct}% · {speed_str}</div>
+                    </div>
+                '''
+
             paths_html_parts.append(f'''
-                <div style="padding: 4px 8px; margin: 2px 0; border-radius: 6px; background: #fafafa; border-left: 3px solid #e5e7eb; opacity: 0.6;">
-                    <code style="font-family: monospace; font-size: 11px; color: #9ca3af; text-decoration: line-through; word-break: break-all;">{path_display}</code>
+                <div style="padding: 4px 8px; margin: 2px 0; border-radius: 6px; background: {'#eff6ff' if dl_status == 'downloading' else '#fafafa'}; border-left: 3px solid {'#2563eb' if dl_status == 'downloading' else '#e5e7eb'}; {'opacity: 0.6;' if dl_status == 'idle' else ''}">
+                    <code style="font-family: monospace; font-size: 11px; color: {'#374151' if dl_status == 'downloading' else '#9ca3af'}; {'text-decoration: line-through;' if dl_status == 'idle' else ''} word-break: break-all;">{path_display}</code>
                     <span style="font-size: 10px; color: #9ca3af; margin-left: 4px;">(不存在)</span>
+                    {dl_badge}
+                    {dl_progress_html}
                 </div>
             ''')
 
@@ -1266,29 +1317,21 @@ with shared.gradio_root:
                     show_progress=False
                 )
 
-                def _trigger_download(resource_key, filter_val):
+                def _trigger_download(payload, filter_val):
+                    resource_key, target_path = mrc.parse_action_payload(payload)
                     if not resource_key:
                         return format_resource_center_html(filter_val), "❌ 无效的资源标识"
-                    target_path = None
-                    if "|" in resource_key:
-                        parts = resource_key.split("|", 1)
-                        resource_key = parts[0]
-                        target_path = parts[1] if parts[1] else None
-                    ok = mrc.download_resource(resource_key, target_path=target_path, force=False)
+                    ok = mrc.download_resource(resource_key, target_path=target_path, force=False, source="webui")
                     if target_path:
                         msg = f"✅ 已开始下载到 {os.path.basename(target_path)}" if ok else "⚠️ 无法启动下载（可能没有下载链接或已存在）"
                     else:
                         msg = "✅ 已开始下载" if ok else "⚠️ 无法启动下载（可能没有下载链接或已存在）"
                     return format_resource_center_html(filter_val), msg
 
-                def _trigger_rehash(resource_key, filter_val):
+                def _trigger_rehash(payload, filter_val):
+                    resource_key, target_path = mrc.parse_action_payload(payload)
                     if not resource_key:
                         return format_resource_center_html(filter_val), "❌ 无效的资源标识"
-                    target_path = None
-                    if "|" in resource_key:
-                        parts = resource_key.split("|", 1)
-                        resource_key = parts[0]
-                        target_path = parts[1] if parts[1] else None
                     ok = mrc.rehash_resource(resource_key, target_path=target_path)
                     if target_path:
                         msg = f"✅ 已开始校验 {os.path.basename(target_path)} 的 Hash" if ok else "⚠️ 无法启动校验（文件可能不存在）"
@@ -1340,10 +1383,9 @@ with shared.gradio_root:
                         if (targetSel) {
                             targetPath = targetSel.value || '';
                         }
-                        const payload = targetPath ? key + '|' + targetPath : key;
-                        el.querySelector('textarea') ? el.querySelector('textarea').value = payload : null;
-                        const ev = new Event('input', { bubbles: true });
+                        const payload = JSON.stringify({key: key, target_path: targetPath});
                         (el.querySelector('textarea') || el.querySelector('input')).value = payload;
+                        const ev = new Event('input', { bubbles: true });
                         (el.querySelector('textarea') || el.querySelector('input')).dispatchEvent(ev);
                     }
                 }
@@ -1356,7 +1398,7 @@ with shared.gradio_root:
                         if (targetSel) {
                             targetPath = targetSel.value || '';
                         }
-                        const payload = targetPath ? key + '|' + targetPath : key;
+                        const payload = JSON.stringify({key: key, target_path: targetPath});
                         (el.querySelector('textarea') || el.querySelector('input')).value = payload;
                         const ev = new Event('input', { bubbles: true });
                         (el.querySelector('textarea') || el.querySelector('input')).dispatchEvent(ev);
