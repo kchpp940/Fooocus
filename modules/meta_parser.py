@@ -15,9 +15,12 @@ from modules.hash_cache import sha256_from_cache
 from modules.util import quote, unquote, extract_styles_from_prompt, is_json, get_file_from_folder_list
 from modules.metadata_service import (
     MetadataService,
-    MetadataResult,
     MetadataSource,
-    get_metadata_service,
+    ParsedMetadata,
+    FieldResult,
+    MetadataDiff,
+    DiffItem,
+    get_metadata_service
 )
 
 re_param_code = r'\s*(\w[\w \-/]+):\s*("(?:\\.|[^\\"])+"|[^,]*)(?:,|$)'
@@ -27,19 +30,7 @@ re_imagesize = re.compile(r"^(\d+)x(\d+)$")
 
 def load_parameter_button_click(raw_metadata: dict | str, is_generating: bool, inpaint_mode: str):
     service = get_metadata_service()
-
-    if isinstance(raw_metadata, str):
-        try:
-            raw_metadata = json.loads(raw_metadata)
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-    if isinstance(raw_metadata, dict):
-        metadata = service.parse_from_dict(raw_metadata, MetadataScheme.FOOOCUS)
-    else:
-        metadata = MetadataResult()
-
-    return service.build_load_parameters(metadata, is_generating, inpaint_mode)
+    return service.load_parameters(raw_metadata, is_generating, inpaint_mode)
 
 
 def get_str(key: str, fallback: str | None, source_dict: dict, results: list, default=None) -> str | None:
@@ -216,10 +207,8 @@ def get_lora(key: str, fallback: str | None, source_dict: dict, results: list, p
 
 
 def parse_meta_from_preset(preset_content):
-    assert isinstance(preset_content, dict)
     service = get_metadata_service()
-    metadata = service.parse_from_preset(preset_content)
-    return metadata.to_simple_dict()
+    return service.parse_from_preset(preset_content)
 
 
 class MetadataParser(ABC):
@@ -235,6 +224,7 @@ class MetadataParser(ABC):
         self.refiner_model_hash: str = ''
         self.loras: list = []
         self.vae_name: str = ''
+        self._service = get_metadata_service()
 
     @abstractmethod
     def get_scheme(self) -> MetadataScheme:
@@ -309,31 +299,41 @@ class A1111MetadataParser(MetadataParser):
     }
 
     def to_json(self, metadata: str) -> dict:
-        service = get_metadata_service()
-        result = service.parse_from_dict(metadata, MetadataScheme.A1111)
-        return result.to_simple_dict()
+        parsed = self._service.parse_raw(metadata, scheme=MetadataScheme.A1111)
+        return parsed.to_dict()
 
     def to_string(self, metadata: list) -> str:
+        task_data = self._build_task_data(metadata)
+        return self._service.build_output_metadata(task_data, MetadataScheme.A1111)
+
+    def _build_task_data(self, metadata: list) -> dict:
         data = {k: v for _, k, v in metadata}
-        service = get_metadata_service()
+        task_data = {}
 
-        extra_data = {
-            'full_prompt': self.full_prompt,
-            'full_negative_prompt': self.full_negative_prompt,
-            'steps': self.steps,
-            'base_model_name': self.base_model_name,
-            'base_model_hash': self.base_model_hash,
-            'refiner_model_name': self.refiner_model_name,
-            'refiner_model_hash': self.refiner_model_hash,
-            'vae_name': self.vae_name,
-            'loras': self.loras,
-        }
-
-        metadata_result = MetadataResult(scheme=MetadataScheme.A1111)
         for k, v in data.items():
-            metadata_result.set_field(k, v)
+            task_data[k] = v
 
-        return service.serialize_metadata(metadata_result, MetadataScheme.A1111, extra_data)
+        task_data['full_prompt'] = self.full_prompt if isinstance(self.full_prompt, list) else [self.full_prompt]
+        task_data['full_negative_prompt'] = self.full_negative_prompt if isinstance(self.full_negative_prompt, list) else [self.full_negative_prompt]
+        task_data['raw_prompt'] = self.raw_prompt
+        task_data['raw_negative_prompt'] = self.raw_negative_prompt
+        task_data['steps'] = self.steps
+        task_data['base_model'] = self.base_model_name
+        task_data['base_model_hash'] = self.base_model_hash
+        task_data['refiner_model'] = self.refiner_model_name
+        task_data['refiner_model_hash'] = self.refiner_model_hash
+        task_data['vae'] = self.vae_name
+        task_data['loras'] = self.loras
+
+        return task_data
+
+    @staticmethod
+    def add_extension_to_filename(data, filenames, key):
+        for filename in filenames:
+            path = Path(filename)
+            if data[key] == path.stem:
+                data[key] = filename
+                break
 
 
 class FooocusMetadataParser(MetadataParser):
@@ -341,31 +341,54 @@ class FooocusMetadataParser(MetadataParser):
         return MetadataScheme.FOOOCUS
 
     def to_json(self, metadata: dict) -> dict:
-        service = get_metadata_service()
-        result = service.parse_from_dict(metadata, MetadataScheme.FOOOCUS)
-        return result.to_simple_dict()
+        parsed = self._service.parse_raw(metadata, scheme=MetadataScheme.FOOOCUS)
+        return parsed.to_dict()
 
     def to_string(self, metadata: list) -> str:
-        data = {k: v for _, k, v in metadata}
-        service = get_metadata_service()
+        task_data = self._build_task_data(metadata)
+        return self._service.build_output_metadata(task_data, MetadataScheme.FOOOCUS)
 
-        extra_data = {
-            'full_prompt': self.full_prompt,
-            'full_negative_prompt': self.full_negative_prompt,
-            'steps': self.steps,
-            'base_model_name': self.base_model_name,
-            'base_model_hash': self.base_model_hash,
-            'refiner_model_name': self.refiner_model_name,
-            'refiner_model_hash': self.refiner_model_hash,
-            'vae_name': self.vae_name,
-            'loras': self.loras,
-        }
+    def _build_task_data(self, metadata: list) -> dict:
+        processed_metadata = []
+        for li, (label, key, value) in enumerate(metadata):
+            if key.startswith('lora_combined_'):
+                name, weight = value.split(' : ')
+                name = Path(name).stem
+                value = f'{name} : {weight}'
+                processed_metadata.append((label, key, value))
+            else:
+                processed_metadata.append((label, key, value))
 
-        metadata_result = MetadataResult(scheme=MetadataScheme.FOOOCUS)
+        data = {k: v for _, k, v in processed_metadata}
+        task_data = {}
+
         for k, v in data.items():
-            metadata_result.set_field(k, v)
+            task_data[k] = v
 
-        return service.serialize_metadata(metadata_result, MetadataScheme.FOOOCUS, extra_data)
+        task_data['full_prompt'] = self.full_prompt if isinstance(self.full_prompt, list) else [self.full_prompt]
+        task_data['full_negative_prompt'] = self.full_negative_prompt if isinstance(self.full_negative_prompt, list) else [self.full_negative_prompt]
+        task_data['steps'] = self.steps
+        task_data['base_model'] = self.base_model_name
+        task_data['base_model_hash'] = self.base_model_hash
+        task_data['refiner_model'] = self.refiner_model_name
+        task_data['refiner_model_hash'] = self.refiner_model_hash
+        task_data['vae'] = self.vae_name
+        task_data['loras'] = self.loras
+
+        return task_data
+
+    @staticmethod
+    def replace_value_with_filename(key, value, filenames):
+        for filename in filenames:
+            path = Path(filename)
+            if key.startswith('lora_combined_'):
+                name, weight = value.split(' : ')
+                if name == path.stem:
+                    return f'{filename} : {weight}'
+            elif value == path.stem:
+                return filename
+
+        return None
 
 
 def get_metadata_parser(metadata_scheme: MetadataScheme) -> MetadataParser:
@@ -380,8 +403,8 @@ def get_metadata_parser(metadata_scheme: MetadataScheme) -> MetadataParser:
 
 def read_info_from_image(file) -> tuple[str | None, MetadataScheme | None]:
     service = get_metadata_service()
-    parameters, scheme = service.read_from_image(file)
-    return parameters, scheme
+    raw, scheme = service._read_info_from_image(file)
+    return raw, scheme
 
 
 def get_exif(metadata: str | None, metadata_scheme: str):

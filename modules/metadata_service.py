@@ -5,12 +5,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+import gradio as gr
 from PIL import Image
 
 import fooocus_version
 import modules.config
 import modules.sdxl_styles
-from modules.flags import MetadataScheme, Performance, Steps
+from modules.flags import MetadataScheme, Performance, Steps, OutputFormat
 from modules.flags import SAMPLERS, CIVITAI_NO_KARRAS
 from modules.hash_cache import sha256_from_cache
 from modules.util import quote, unquote, extract_styles_from_prompt, is_json, get_file_from_folder_list
@@ -21,788 +22,612 @@ re_imagesize = re.compile(r"^(\d+)x(\d+)$")
 
 
 class MetadataSource:
-    EMBEDDED = 'embedded'
-    PRIVATE_LOG = 'private_log'
-    PRESET = 'preset'
-    CURRENT_UI = 'current_ui'
-    UNKNOWN = 'unknown'
+    EMBEDDED = "embedded"
+    PRIVATE_LOG = "private_log"
+    PRESET = "preset"
+    UNKNOWN = "unknown"
 
 
 @dataclass
-class FieldSchema:
+class FieldResult:
     key: str
     label: str
-    ui_count: int = 1
-    parse_from_metadata: Any = None
-    parse_from_ui: Any = None
-    build_from_metadata: Any = None
-    fallback_key: Optional[str] = None
-
-
-METADATA_SCHEMA = None
-
-
-def get_metadata_schema():
-    global METADATA_SCHEMA
-    if METADATA_SCHEMA is not None:
-        return METADATA_SCHEMA
-
-    import gradio as gr
-    from modules.flags import inpaint_engine_versions, inpaint_options
-
-    def _str_getter(key, fallback=None, cast_type=None):
-        def _fn(metadata, results, default=None):
-            try:
-                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-                assert isinstance(h, str) or (cast_type is not None and h is not None)
-                if cast_type is not None:
-                    h = cast_type(h)
-                results.append(h)
-                return h
-            except Exception:
-                results.append(gr.update())
-                return None
-        return _fn
-
-    def _list_getter(key, fallback=None):
-        def _fn(metadata, results, default=None):
-            try:
-                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-                h = eval(h)
-                assert isinstance(h, list)
-                results.append(h)
-            except Exception:
-                results.append(gr.update())
-        return _fn
-
-    def _number_getter(key, fallback=None, cast_type=float):
-        def _fn(metadata, results, default=None):
-            try:
-                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-                assert h is not None
-                h = cast_type(h)
-                results.append(h)
-            except Exception:
-                results.append(gr.update())
-        return _fn
-
-    def _image_number_getter(key, fallback=None):
-        def _fn(metadata, results, default=None):
-            try:
-                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-                assert h is not None
-                h = int(h)
-                h = min(h, modules.config.default_max_image_number)
-                results.append(h)
-            except Exception:
-                results.append(1)
-        return _fn
-
-    def _steps_getter(key, fallback=None):
-        def _fn(metadata, results, default=None):
-            try:
-                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-                assert h is not None
-                h = int(h)
-                performance_name = metadata.get('performance', '').replace(' ', '_').replace('-', '_').casefold()
-                performance_candidates = [k for k in Steps.keys() if k.casefold() == performance_name and Steps[k] == h]
-                if len(performance_candidates) == 0:
-                    results.append(h)
-                    return
-                results.append(-1)
-            except Exception:
-                results.append(-1)
-        return _fn
-
-    def _resolution_getter(key, fallback=None):
-        def _fn(metadata, results, default=None):
-            try:
-                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-                width, height = eval(h)
-                formatted = modules.config.add_ratio(f'{width}*{height}')
-                if formatted in modules.config.available_aspect_ratios_labels:
-                    results.append(formatted)
-                    results.append(-1)
-                    results.append(-1)
-                else:
-                    results.append(gr.update())
-                    results.append(int(width))
-                    results.append(int(height))
-            except Exception:
-                results.append(gr.update())
-                results.append(gr.update())
-                results.append(gr.update())
-        return _fn
-
-    def _seed_getter(key, fallback=None):
-        def _fn(metadata, results, default=None):
-            try:
-                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-                assert h is not None
-                h = int(h)
-                results.append(False)
-                results.append(h)
-            except Exception:
-                results.append(gr.update())
-                results.append(gr.update())
-        return _fn
-
-    def _inpaint_engine_getter(key, fallback=None):
-        def _fn(metadata, results, default=None, inpaint_mode=None):
-            try:
-                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-                assert isinstance(h, str) and h in inpaint_engine_versions
-                if inpaint_mode != modules.flags.inpaint_option_detail:
-                    results.append(h)
-                else:
-                    results.append(gr.update())
-                results.append(h)
-                return h
-            except Exception:
-                results.append(gr.update())
-                results.append('empty')
-                return None
-        return _fn
-
-    def _inpaint_method_getter(key, fallback=None):
-        def _fn(metadata, results, default=None):
-            try:
-                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-                assert isinstance(h, str) and h in inpaint_options
-                results.append(h)
-                for i in range(modules.config.default_enhance_tabs):
-                    results.append(h)
-                return h
-            except Exception:
-                results.append(gr.update())
-                for i in range(modules.config.default_enhance_tabs):
-                    results.append(gr.update())
-        return _fn
-
-    def _adm_guidance_getter(key, fallback=None):
-        def _fn(metadata, results, default=None):
-            try:
-                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-                p, n, e = eval(h)
-                results.append(float(p))
-                results.append(float(n))
-                results.append(float(e))
-            except Exception:
-                results.append(gr.update())
-                results.append(gr.update())
-                results.append(gr.update())
-        return _fn
-
-    def _freeu_getter(key, fallback=None):
-        def _fn(metadata, results, default=None):
-            try:
-                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-                b1, b2, s1, s2 = eval(h)
-                results.append(True)
-                results.append(float(b1))
-                results.append(float(b2))
-                results.append(float(s1))
-                results.append(float(s2))
-            except Exception:
-                results.append(False)
-                results.append(gr.update())
-                results.append(gr.update())
-                results.append(gr.update())
-                results.append(gr.update())
-        return _fn
-
-    def _lora_getter(key, fallback=None):
-        def _fn(metadata, results, default=None, performance_filename=None):
-            try:
-                raw_value = metadata.get(key, metadata.get(fallback) if fallback else None)
-                split_data = raw_value.split(' : ')
-                enabled = True
-                name = split_data[0]
-                weight = split_data[1]
-
-                if len(split_data) == 3:
-                    enabled = split_data[0] == 'True'
-                    name = split_data[1]
-                    weight = split_data[2]
-
-                if name == performance_filename:
-                    raise Exception('performance LoRA')
-
-                weight = float(weight)
-                results.append(enabled)
-                results.append(name)
-                results.append(weight)
-            except Exception:
-                results.append(True)
-                results.append('None')
-                results.append(1)
-        return _fn
-
-    METADATA_SCHEMA = [
-        FieldSchema('image_number', 'Image Number', ui_count=1,
-                   build_from_metadata=_image_number_getter('image_number', 'Image Number')),
-        FieldSchema('prompt', 'Prompt', ui_count=1,
-                   build_from_metadata=_str_getter('prompt', 'Prompt')),
-        FieldSchema('negative_prompt', 'Negative Prompt', ui_count=1,
-                   build_from_metadata=_str_getter('negative_prompt', 'Negative Prompt')),
-        FieldSchema('styles', 'Styles', ui_count=1,
-                   build_from_metadata=_list_getter('styles', 'Styles')),
-        FieldSchema('performance', 'Performance', ui_count=1,
-                   build_from_metadata=_str_getter('performance', 'Performance')),
-        FieldSchema('steps', 'Steps', ui_count=1,
-                   build_from_metadata=_steps_getter('steps', 'Steps')),
-        FieldSchema('overwrite_switch', 'Overwrite Switch', ui_count=1,
-                   build_from_metadata=_number_getter('overwrite_switch', 'Overwrite Switch')),
-        FieldSchema('resolution', 'Resolution', ui_count=3,
-                   build_from_metadata=_resolution_getter('resolution', 'Resolution')),
-        FieldSchema('guidance_scale', 'Guidance Scale', ui_count=1,
-                   build_from_metadata=_number_getter('guidance_scale', 'Guidance Scale')),
-        FieldSchema('sharpness', 'Sharpness', ui_count=1,
-                   build_from_metadata=_number_getter('sharpness', 'Sharpness')),
-        FieldSchema('adm_guidance', 'ADM Guidance', ui_count=3,
-                   build_from_metadata=_adm_guidance_getter('adm_guidance', 'ADM Guidance')),
-        FieldSchema('refiner_swap_method', 'Refiner Swap Method', ui_count=1,
-                   build_from_metadata=_str_getter('refiner_swap_method', 'Refiner Swap Method')),
-        FieldSchema('adaptive_cfg', 'CFG Mimicking from TSNR', ui_count=1,
-                   build_from_metadata=_number_getter('adaptive_cfg', 'CFG Mimicking from TSNR')),
-        FieldSchema('clip_skip', 'CLIP Skip', ui_count=1,
-                   build_from_metadata=_number_getter('clip_skip', 'CLIP Skip', cast_type=int)),
-        FieldSchema('base_model', 'Base Model', ui_count=1,
-                   build_from_metadata=_str_getter('base_model', 'Base Model')),
-        FieldSchema('refiner_model', 'Refiner Model', ui_count=1,
-                   build_from_metadata=_str_getter('refiner_model', 'Refiner Model')),
-        FieldSchema('refiner_switch', 'Refiner Switch', ui_count=1,
-                   build_from_metadata=_number_getter('refiner_switch', 'Refiner Switch')),
-        FieldSchema('sampler', 'Sampler', ui_count=1,
-                   build_from_metadata=_str_getter('sampler', 'Sampler')),
-        FieldSchema('scheduler', 'Scheduler', ui_count=1,
-                   build_from_metadata=_str_getter('scheduler', 'Scheduler')),
-        FieldSchema('vae', 'VAE', ui_count=1,
-                   build_from_metadata=_str_getter('vae', 'VAE')),
-        FieldSchema('seed_random', 'Seed Random', ui_count=2,
-                   build_from_metadata=_seed_getter('seed', 'Seed')),
-        FieldSchema('inpaint_engine_version', 'Inpaint Engine Version', ui_count=2,
-                   build_from_metadata=_inpaint_engine_getter('inpaint_engine_version', 'Inpaint Engine Version')),
-        FieldSchema('inpaint_method', 'Inpaint Mode', ui_count=1 + modules.config.default_enhance_tabs,
-                   build_from_metadata=_inpaint_method_getter('inpaint_method', 'Inpaint Mode')),
-        FieldSchema('freeu', 'FreeU', ui_count=5,
-                   build_from_metadata=_freeu_getter('freeu', 'FreeU')),
-    ]
-
-    return METADATA_SCHEMA
-
-
-@dataclass
-class MetadataField:
-    key: str
     value: Any = None
-    source: str = MetadataSource.UNKNOWN
     valid: bool = True
-    error: Optional[str] = None
+    error: str = ""
+    source: str = MetadataSource.UNKNOWN
     raw_value: Any = None
 
+
+@dataclass
+class ParsedMetadata:
+    fields: dict = field(default_factory=dict)
+    source: str = MetadataSource.UNKNOWN
+    scheme: Optional[MetadataScheme] = None
+    raw: Any = None
+
+    def get(self, key: str, default=None):
+        if key in self.fields and self.fields[key].valid:
+            return self.fields[key].value
+        return default
+
+    def get_field(self, key: str) -> Optional[FieldResult]:
+        return self.fields.get(key)
+
     def to_dict(self) -> dict:
-        return {
-            'key': self.key,
-            'value': self.value,
-            'source': self.source,
-            'valid': self.valid,
-            'error': self.error,
-        }
+        return {k: f.value for k, f in self.fields.items() if f.valid}
+
+    def to_display_dict(self) -> dict:
+        result = {}
+        for k, f in self.fields.items():
+            if f.valid:
+                result[f.label] = f.value
+            else:
+                result[f.label] = f"<error: {f.error}>"
+        return result
+
+    def has_errors(self) -> bool:
+        return any(not f.valid for f in self.fields.values())
+
+    def errors(self) -> dict:
+        return {k: f.error for k, f in self.fields.items() if not f.valid}
 
 
 @dataclass
-class MetadataResult:
-    fields: dict = field(default_factory=dict)
-    scheme: Optional[MetadataScheme] = None
-    source: str = MetadataSource.UNKNOWN
-    raw_metadata: Any = None
-
-    def get(self, key: str, default: Any = None) -> Any:
-        field = self.fields.get(key)
-        if field and field.valid:
-            return field.value
-        return default
-
-    def set_field(self, key: str, value: Any, source: str = None, valid: bool = True, error: str = None, raw_value: Any = None):
-        if source is None:
-            source = self.source
-        self.fields[key] = MetadataField(
-            key=key,
-            value=value,
-            source=source,
-            valid=valid,
-            error=error,
-            raw_value=raw_value if raw_value is not None else value
-        )
-
-    def has(self, key: str) -> bool:
-        field = self.fields.get(key)
-        return field is not None and field.valid
-
-    def to_dict(self) -> dict:
-        return {
-            'scheme': self.scheme.value if self.scheme else None,
-            'source': self.source,
-            'fields': {k: v.to_dict() for k, v in self.fields.items()},
-        }
-
-    def to_simple_dict(self) -> dict:
-        return {k: v.value for k, v in self.fields.items() if v.valid}
-
-    def merge(self, other: 'MetadataResult', only_missing: bool = True) -> 'MetadataResult':
-        for key, field in other.fields.items():
-            if only_missing:
-                if key not in self.fields or not self.fields[key].valid:
-                    self.fields[key] = field
-            else:
-                self.fields[key] = field
-        return self
-
-    def to_labeled_list(self) -> list:
-        labeled = []
-        for key, field in self.fields.items():
-            if field.valid:
-                label = key.replace('_', ' ').title()
-                labeled.append((label, key, field.value))
-        return labeled
+class DiffItem:
+    key: str
+    label: str
+    left_value: Any = None
+    right_value: Any = None
+    same: bool = False
 
 
 @dataclass
 class MetadataDiff:
-    added: dict = field(default_factory=dict)
-    removed: dict = field(default_factory=dict)
-    changed: dict = field(default_factory=dict)
-    unchanged: dict = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        return {
-            'added': {k: v.to_dict() for k, v in self.added.items()},
-            'removed': {k: v.to_dict() for k, v in self.removed.items()},
-            'changed': {k: {'old': v[0].to_dict(), 'new': v[1].to_dict()} for k, v in self.changed.items()},
-            'unchanged': {k: v.to_dict() for k, v in self.unchanged.items()},
-        }
-
-    @property
-    def has_differences(self) -> bool:
-        return bool(self.added or self.removed or self.changed)
-
-    def to_simple_dict(self) -> dict:
-        return {
-            'added': {k: v.value for k, v in self.added.items()},
-            'removed': {k: v.value for k, v in self.removed.items()},
-            'changed': {k: {'old': v[0].value, 'new': v[1].value} for k, v in self.changed.items()},
-            'unchanged': {k: v.value for k, v in self.unchanged.items()},
-        }
-
-    def to_html(self, show_unchanged: bool = False) -> str:
-        html_parts = []
-
-        if self.changed:
-            html_parts.append('<h3>Changed Parameters</h3>')
-            html_parts.append('<table class="metadata"><tr><th>Parameter</th><th>Old Value</th><th>New Value</th><th>Source</th></tr>')
-            for key, (old_field, new_field) in sorted(self.changed.items()):
-                label = key.replace('_', ' ').title()
-                html_parts.append(
-                    f'<tr><td class="label">{label}</td>'
-                    f'<td class="value">{old_field.value}</td>'
-                    f'<td class="value" style="color: #4CAF50;"><b>{new_field.value}</b></td>'
-                    f'<td class="value">{new_field.source}</td></tr>'
-                )
-            html_parts.append('</table>')
-
-        if self.added:
-            html_parts.append('<h3>New Parameters</h3>')
-            html_parts.append('<table class="metadata"><tr><th>Parameter</th><th>Value</th><th>Source</th></tr>')
-            for key, field in sorted(self.added.items()):
-                label = key.replace('_', ' ').title()
-                html_parts.append(
-                    f'<tr><td class="label">{label}</td>'
-                    f'<td class="value" style="color: #2196F3;"><b>{field.value}</b></td>'
-                    f'<td class="value">{field.source}</td></tr>'
-                )
-            html_parts.append('</table>')
-
-        if self.removed:
-            html_parts.append('<h3>Removed Parameters</h3>')
-            html_parts.append('<table class="metadata"><tr><th>Parameter</th><th>Old Value</th><th>Source</th></tr>')
-            for key, field in sorted(self.removed.items()):
-                label = key.replace('_', ' ').title()
-                html_parts.append(
-                    f'<tr><td class="label">{label}</td>'
-                    f'<td class="value" style="color: #f44336;"><b>{field.value}</b></td>'
-                    f'<td class="value">{field.source}</td></tr>'
-                )
-            html_parts.append('</table>')
-
-        if show_unchanged and self.unchanged:
-            html_parts.append('<h3>Unchanged Parameters</h3>')
-            html_parts.append('<table class="metadata"><tr><th>Parameter</th><th>Value</th><th>Source</th></tr>')
-            for key, field in sorted(self.unchanged.items()):
-                label = key.replace('_', ' ').title()
-                html_parts.append(
-                    f'<tr><td class="label">{label}</td>'
-                    f'<td class="value">{field.value}</td>'
-                    f'<td class="value">{field.source}</td></tr>'
-                )
-            html_parts.append('</table>')
-
-        if not html_parts:
-            html_parts.append('<p style="color: #4CAF50;">No differences found.</p>')
-
-        return '\n'.join(html_parts)
-
-    def summary(self) -> str:
-        parts = []
-        if self.changed:
-            parts.append(f'{len(self.changed)} changed')
-        if self.added:
-            parts.append(f'{len(self.added)} added')
-        if self.removed:
-            parts.append(f'{len(self.removed)} removed')
-        if self.unchanged:
-            parts.append(f'{len(self.unchanged)} unchanged')
-        return ', '.join(parts) if parts else 'No differences'
-
-
-class MetadataParserBase(ABC):
-    @abstractmethod
-    def get_scheme(self) -> MetadataScheme:
-        raise NotImplementedError
-
-    @abstractmethod
-    def parse(self, raw_metadata: Any) -> MetadataResult:
-        raise NotImplementedError
-
-    @abstractmethod
-    def serialize(self, metadata: MetadataResult, extra_data: dict = None) -> str:
-        raise NotImplementedError
-
-
-class A1111MetadataParser(MetadataParserBase):
-    fooocus_to_a1111 = {
-        'raw_prompt': 'Raw prompt',
-        'raw_negative_prompt': 'Raw negative prompt',
-        'negative_prompt': 'Negative prompt',
-        'styles': 'Styles',
-        'performance': 'Performance',
-        'steps': 'Steps',
-        'sampler': 'Sampler',
-        'scheduler': 'Scheduler',
-        'vae': 'VAE',
-        'guidance_scale': 'CFG scale',
-        'seed': 'Seed',
-        'resolution': 'Size',
-        'sharpness': 'Sharpness',
-        'adm_guidance': 'ADM Guidance',
-        'refiner_swap_method': 'Refiner Swap Method',
-        'adaptive_cfg': 'Adaptive CFG',
-        'clip_skip': 'Clip skip',
-        'overwrite_switch': 'Overwrite Switch',
-        'freeu': 'FreeU',
-        'base_model': 'Model',
-        'base_model_hash': 'Model hash',
-        'refiner_model': 'Refiner',
-        'refiner_model_hash': 'Refiner hash',
-        'lora_hashes': 'Lora hashes',
-        'lora_weights': 'Lora weights',
-        'created_by': 'User',
-        'version': 'Version'
-    }
-
-    a1111_to_fooocus = {v: k for k, v in fooocus_to_a1111.items()}
-
-    def get_scheme(self) -> MetadataScheme:
-        return MetadataScheme.A1111
-
-    def parse(self, raw_metadata: str) -> MetadataResult:
-        result = MetadataResult(scheme=MetadataScheme.A1111)
-
-        if not raw_metadata or not isinstance(raw_metadata, str):
-            return result
-
-        try:
-            metadata_prompt = ''
-            metadata_negative_prompt = ''
-            done_with_prompt = False
-
-            *lines, lastline = raw_metadata.strip().split("\n")
-            if len(re_param.findall(lastline)) < 3:
-                lines.append(lastline)
-                lastline = ''
-
-            for line in lines:
-                line = line.strip()
-                if line.startswith(f"{self.fooocus_to_a1111['negative_prompt']}:"):
-                    done_with_prompt = True
-                    line = line[len(f"{self.fooocus_to_a1111['negative_prompt']}:"):].strip()
-                if done_with_prompt:
-                    metadata_negative_prompt += ('' if metadata_negative_prompt == '' else "\n") + line
-                else:
-                    metadata_prompt += ('' if metadata_prompt == '' else "\n") + line
-
-            found_styles, prompt, negative_prompt = extract_styles_from_prompt(metadata_prompt, metadata_negative_prompt)
-
-            result.set_field('prompt', prompt)
-            result.set_field('negative_prompt', negative_prompt)
-
-            for k, v in re_param.findall(lastline):
-                try:
-                    fooocus_key = self.a1111_to_fooocus.get(k, k)
-
-                    if v != '' and v[0] == '"' and v[-1] == '"':
-                        v = unquote(v)
-
-                    m = re_imagesize.match(v)
-                    if m is not None:
-                        result.set_field('resolution', str((m.group(1), m.group(2))), raw_value=v)
-                    else:
-                        result.set_field(fooocus_key, v, raw_value=v)
-                except Exception as e:
-                    result.set_field(k, None, valid=False, error=str(e), raw_value=v)
-
-            if result.has('raw_prompt'):
-                result.set_field('prompt', result.get('raw_prompt'))
-                raw_prompt = result.get('raw_prompt').replace("\n", ', ')
-                if metadata_prompt != raw_prompt and modules.sdxl_styles.fooocus_expansion not in found_styles:
-                    found_styles.append(modules.sdxl_styles.fooocus_expansion)
-
-            if result.has('raw_negative_prompt'):
-                result.set_field('negative_prompt', result.get('raw_negative_prompt'))
-
-            result.set_field('styles', str(found_styles))
-
-            if result.has('steps') and not result.has('performance'):
-                try:
-                    perf = Performance.by_steps(result.get('steps')).value
-                    result.set_field('performance', perf)
-                except (ValueError, KeyError):
-                    pass
-
-            if result.has('sampler'):
-                sampler_value = result.get('sampler').replace(' Karras', '')
-                for k, v in SAMPLERS.items():
-                    if v == sampler_value:
-                        result.set_field('sampler', k)
-                        break
-
-            for key in ['base_model', 'refiner_model', 'vae']:
-                if result.has(key):
-                    filenames = modules.config.vae_filenames if key == 'vae' else modules.config.model_filenames
-                    self._add_extension_to_filename(result, key, filenames)
-
-            lora_data = ''
-            if result.has('lora_weights') and result.get('lora_weights') != '':
-                lora_data = result.get('lora_weights')
-            elif result.has('lora_hashes') and result.get('lora_hashes') != '':
-                hashes = result.get('lora_hashes')
-                if hashes.split(', ')[0].count(':') == 2:
-                    lora_data = hashes
-
-            if lora_data != '':
-                for li, lora in enumerate(lora_data.split(', ')):
-                    try:
-                        lora_split = lora.split(': ')
-                        lora_name = lora_split[0]
-                        lora_weight = lora_split[2] if len(lora_split) == 3 else lora_split[1]
-                        for filename in modules.config.lora_filenames:
-                            path = Path(filename)
-                            if lora_name == path.stem:
-                                result.set_field(f'lora_combined_{li + 1}', f'{filename} : {lora_weight}')
-                                break
-                    except Exception as e:
-                        result.set_field(f'lora_combined_{li + 1}', None, valid=False, error=str(e), raw_value=lora)
-
-        except Exception as e:
-            result.raw_metadata = raw_metadata
-            result.set_field('_parse_error', str(e), valid=False, error=str(e))
-
-        return result
-
-    def serialize(self, metadata: MetadataResult, extra_data: dict = None) -> str:
-        data = metadata.to_simple_dict()
-        if extra_data:
-            data.update(extra_data)
-
-        width, height = eval(data.get('resolution', '(1024, 1024)'))
-
-        sampler = data.get('sampler', '')
-        scheduler = data.get('scheduler', '')
-
-        if sampler in SAMPLERS and SAMPLERS[sampler] != '':
-            sampler = SAMPLERS[sampler]
-            if sampler not in CIVITAI_NO_KARRAS and scheduler == 'karras':
-                sampler += f' Karras'
-
-        generation_params = {
-            self.fooocus_to_a1111['steps']: data.get('steps', 30),
-            self.fooocus_to_a1111['sampler']: sampler,
-            self.fooocus_to_a1111['seed']: data.get('seed', 0),
-            self.fooocus_to_a1111['resolution']: f'{width}x{height}',
-            self.fooocus_to_a1111['guidance_scale']: data.get('guidance_scale', 7.0),
-            self.fooocus_to_a1111['sharpness']: data.get('sharpness', 2.0),
-            self.fooocus_to_a1111['adm_guidance']: data.get('adm_guidance', ''),
-            self.fooocus_to_a1111['base_model']: Path(data.get('base_model', '')).stem,
-            self.fooocus_to_a1111['base_model_hash']: data.get('base_model_hash', ''),
-            self.fooocus_to_a1111['performance']: data.get('performance', ''),
-            self.fooocus_to_a1111['scheduler']: scheduler,
-            self.fooocus_to_a1111['vae']: Path(data.get('vae', '')).stem,
-            self.fooocus_to_a1111['raw_prompt']: data.get('raw_prompt', ''),
-            self.fooocus_to_a1111['raw_negative_prompt']: data.get('raw_negative_prompt', ''),
-        }
-
-        if data.get('refiner_model') and data['refiner_model'] not in ['', 'None']:
-            generation_params[self.fooocus_to_a1111['refiner_model']] = Path(data['refiner_model']).stem
-            generation_params[self.fooocus_to_a1111['refiner_model_hash']] = data.get('refiner_model_hash', '')
-
-        for key in ['adaptive_cfg', 'clip_skip', 'overwrite_switch', 'refiner_swap_method', 'freeu']:
-            if key in data:
-                generation_params[self.fooocus_to_a1111[key]] = data[key]
-
-        loras = data.get('loras', [])
-        if len(loras) > 0:
-            lora_hashes = []
-            lora_weights = []
-            for lora_name, lora_weight, lora_hash in loras:
-                lora_hashes.append(f'{lora_name}: {lora_hash}')
-                lora_weights.append(f'{lora_name}: {lora_weight}')
-            generation_params[self.fooocus_to_a1111['lora_hashes']] = ', '.join(lora_hashes)
-            generation_params[self.fooocus_to_a1111['lora_weights']] = ', '.join(lora_weights)
-
-        generation_params[self.fooocus_to_a1111['version']] = data.get('version', fooocus_version.version)
-
-        if modules.config.metadata_created_by != '':
-            generation_params[self.fooocus_to_a1111['created_by']] = modules.config.metadata_created_by
-
-        generation_params_text = ", ".join(
-            [k if k == v else f'{k}: {quote(v)}' for k, v in generation_params.items() if v is not None])
-
-        full_prompt = data.get('full_prompt', [])
-        full_negative_prompt = data.get('full_negative_prompt', [])
-        positive_prompt_resolved = ', '.join(full_prompt) if isinstance(full_prompt, list) else str(full_prompt)
-        negative_prompt_resolved = ', '.join(full_negative_prompt) if isinstance(full_negative_prompt, list) else str(full_negative_prompt)
-        negative_prompt_text = f"\nNegative prompt: {negative_prompt_resolved}" if negative_prompt_resolved else ""
-
-        return f"{positive_prompt_resolved}{negative_prompt_text}\n{generation_params_text}".strip()
-
-    @staticmethod
-    def _add_extension_to_filename(result: MetadataResult, key: str, filenames: list):
-        value = result.get(key)
-        for filename in filenames:
-            path = Path(filename)
-            if value == path.stem:
-                result.set_field(key, filename)
-                break
-
-
-class FooocusMetadataParser(MetadataParserBase):
-    def get_scheme(self) -> MetadataScheme:
-        return MetadataScheme.FOOOCUS
-
-    def parse(self, raw_metadata: dict) -> MetadataResult:
-        result = MetadataResult(scheme=MetadataScheme.FOOOCUS)
-        result.raw_metadata = raw_metadata
-
-        if not raw_metadata or not isinstance(raw_metadata, dict):
-            return result
-
-        for key, value in raw_metadata.items():
-            try:
-                if value in ['', 'None']:
-                    result.set_field(key, None, valid=False, error='empty value', raw_value=value)
-                    continue
-
-                processed_value = value
-                if key in ['base_model', 'refiner_model']:
-                    processed_value = self._replace_value_with_filename(key, value, modules.config.model_filenames)
-                elif key.startswith('lora_combined_'):
-                    processed_value = self._replace_value_with_filename(key, value, modules.config.lora_filenames)
-                elif key == 'vae':
-                    processed_value = self._replace_value_with_filename(key, value, modules.config.vae_filenames)
-
-                if processed_value is None:
-                    result.set_field(key, None, valid=False, error='could not resolve filename', raw_value=value)
-                else:
-                    result.set_field(key, processed_value, raw_value=value)
-            except Exception as e:
-                result.set_field(key, None, valid=False, error=str(e), raw_value=value)
-
-        return result
-
-    def serialize(self, metadata: MetadataResult, extra_data: dict = None) -> str:
-        data = metadata.to_simple_dict()
-        if extra_data:
-            data.update(extra_data)
-
-        res = {}
-        for key, value in data.items():
-            if key.startswith('lora_combined_'):
-                try:
-                    name, weight = value.split(' : ')
-                    name = Path(name).stem
-                    res[key] = f'{name} : {weight}'
-                except Exception:
-                    res[key] = value
-            else:
-                res[key] = value
-
-        res['full_prompt'] = data.get('full_prompt', [])
-        res['full_negative_prompt'] = data.get('full_negative_prompt', [])
-        res['steps'] = data.get('steps', 30)
-        res['base_model'] = data.get('base_model_name', Path(data.get('base_model', '')).stem)
-        res['base_model_hash'] = data.get('base_model_hash', '')
-
-        refiner_model = data.get('refiner_model', '')
-        if refiner_model not in ['', 'None']:
-            res['refiner_model'] = data.get('refiner_model_name', Path(refiner_model).stem)
-            res['refiner_model_hash'] = data.get('refiner_model_hash', '')
-
-        res['vae'] = data.get('vae_name', Path(data.get('vae', '')).stem)
-        res['loras'] = data.get('loras', [])
-
-        if modules.config.metadata_created_by != '':
-            res['created_by'] = modules.config.metadata_created_by
-
-        return json.dumps(dict(sorted(res.items())))
-
-    @staticmethod
-    def _replace_value_with_filename(key: str, value: str, filenames: list) -> Optional[str]:
-        for filename in filenames:
-            path = Path(filename)
-            if key.startswith('lora_combined_'):
-                try:
-                    name, weight = value.split(' : ')
-                    if name == path.stem:
-                        return f'{filename} : {weight}'
-                except Exception:
-                    continue
-            elif value == path.stem:
-                return filename
-        return None
+    items: list = field(default_factory=list)
+    same_count: int = 0
+    diff_count: int = 0
+
+    def to_display_list(self) -> list:
+        return [
+            {
+                "label": item.label,
+                "left": item.left_value,
+                "right": item.right_value,
+                "same": item.same
+            }
+            for item in self.items
+        ]
 
 
 class MetadataService:
     _instance = None
 
-    def __init__(self):
-        self._parsers = {
-            MetadataScheme.FOOOCUS: FooocusMetadataParser(),
-            MetadataScheme.A1111: A1111MetadataParser(),
-        }
-
-    @classmethod
-    def get_instance(cls) -> 'MetadataService':
+    def __new__(cls):
         if cls._instance is None:
-            cls._instance = cls()
+            cls._instance = super().__new__(cls)
         return cls._instance
 
-    def get_parser(self, scheme: MetadataScheme) -> MetadataParserBase:
-        parser = self._parsers.get(scheme)
-        if parser is None:
-            raise ValueError(f"No parser found for scheme: {scheme}")
-        return parser
+    def __init__(self):
+        if hasattr(self, '_initialized'):
+            return
+        self._initialized = True
+        self._field_definitions = self._build_field_definitions()
 
-    def read_from_image(self, image: Image.Image) -> tuple[Any, Optional[MetadataScheme]]:
+    def _build_field_definitions(self) -> dict:
+        return {
+            "image_number": {
+                "label": "Image Number",
+                "type": "int",
+                "fallbacks": ["Image Number"],
+                "default": 1,
+                "validator": lambda v: isinstance(v, int) and 1 <= v <= modules.config.default_max_image_number,
+                "transform": lambda v: min(int(v), modules.config.default_max_image_number)
+            },
+            "prompt": {
+                "label": "Prompt",
+                "type": "str",
+                "fallbacks": ["Prompt", "Raw prompt", "raw_prompt"],
+                "default": "",
+                "validator": lambda v: isinstance(v, str)
+            },
+            "negative_prompt": {
+                "label": "Negative Prompt",
+                "type": "str",
+                "fallbacks": ["Negative Prompt", "Negative prompt", "Raw negative prompt", "raw_negative_prompt"],
+                "default": "",
+                "validator": lambda v: isinstance(v, str)
+            },
+            "styles": {
+                "label": "Styles",
+                "type": "list",
+                "fallbacks": ["Styles"],
+                "default": [],
+                "validator": lambda v: isinstance(v, list),
+                "transform": lambda v: self._safe_eval_list(v)
+            },
+            "performance": {
+                "label": "Performance",
+                "type": "str",
+                "fallbacks": ["Performance"],
+                "default": Performance.SPEED.value,
+                "validator": lambda v: isinstance(v, str) and v in Performance.values()
+            },
+            "steps": {
+                "label": "Steps",
+                "type": "int",
+                "fallbacks": ["Steps"],
+                "default": Steps.SPEED.value,
+                "validator": lambda v: isinstance(v, int) and v > 0,
+                "transform": lambda v: int(v)
+            },
+            "overwrite_switch": {
+                "label": "Overwrite Switch",
+                "type": "int",
+                "fallbacks": ["Overwrite Switch"],
+                "default": -1,
+                "validator": lambda v: isinstance(v, int),
+                "transform": lambda v: int(v)
+            },
+            "resolution": {
+                "label": "Resolution",
+                "type": "tuple",
+                "fallbacks": ["Resolution", "Size"],
+                "default": (1024, 1024),
+                "validator": lambda v: isinstance(v, (tuple, list)) and len(v) == 2,
+                "transform": lambda v: self._safe_eval_resolution(v)
+            },
+            "guidance_scale": {
+                "label": "Guidance Scale",
+                "type": "float",
+                "fallbacks": ["CFG scale", "Guidance Scale"],
+                "default": 7.0,
+                "validator": lambda v: isinstance(v, (int, float)),
+                "transform": lambda v: float(v)
+            },
+            "sharpness": {
+                "label": "Sharpness",
+                "type": "float",
+                "fallbacks": ["Sharpness"],
+                "default": 2.0,
+                "validator": lambda v: isinstance(v, (int, float)),
+                "transform": lambda v: float(v)
+            },
+            "adm_guidance": {
+                "label": "ADM Guidance",
+                "type": "tuple",
+                "fallbacks": ["ADM Guidance"],
+                "default": (1.5, 0.8, 0.3),
+                "validator": lambda v: isinstance(v, (tuple, list)) and len(v) == 3,
+                "transform": lambda v: self._safe_eval_tuple(v, 3)
+            },
+            "refiner_swap_method": {
+                "label": "Refiner Swap Method",
+                "type": "str",
+                "fallbacks": ["Refiner Swap Method"],
+                "default": "joint",
+                "validator": lambda v: isinstance(v, str)
+            },
+            "adaptive_cfg": {
+                "label": "CFG Mimicking from TSNR",
+                "type": "float",
+                "fallbacks": ["Adaptive CFG", "adaptive_cfg"],
+                "default": 7.0,
+                "validator": lambda v: isinstance(v, (int, float)),
+                "transform": lambda v: float(v)
+            },
+            "clip_skip": {
+                "label": "CLIP Skip",
+                "type": "int",
+                "fallbacks": ["Clip skip", "CLIP Skip"],
+                "default": 2,
+                "validator": lambda v: isinstance(v, int) and 1 <= v <= 12,
+                "transform": lambda v: int(v)
+            },
+            "base_model": {
+                "label": "Base Model",
+                "type": "str",
+                "fallbacks": ["Base Model", "Model"],
+                "default": "None",
+                "validator": lambda v: isinstance(v, str)
+            },
+            "base_model_hash": {
+                "label": "Base Model Hash",
+                "type": "str",
+                "fallbacks": ["Model hash", "base_model_hash"],
+                "default": "",
+                "validator": lambda v: isinstance(v, str)
+            },
+            "refiner_model": {
+                "label": "Refiner Model",
+                "type": "str",
+                "fallbacks": ["Refiner Model", "Refiner"],
+                "default": "None",
+                "validator": lambda v: isinstance(v, str)
+            },
+            "refiner_model_hash": {
+                "label": "Refiner Model Hash",
+                "type": "str",
+                "fallbacks": ["Refiner hash", "refiner_model_hash"],
+                "default": "",
+                "validator": lambda v: isinstance(v, str)
+            },
+            "refiner_switch": {
+                "label": "Refiner Switch",
+                "type": "float",
+                "fallbacks": ["Refiner Switch"],
+                "default": 0.8,
+                "validator": lambda v: isinstance(v, (int, float)),
+                "transform": lambda v: float(v)
+            },
+            "sampler": {
+                "label": "Sampler",
+                "type": "str",
+                "fallbacks": ["Sampler"],
+                "default": "dpmpp_2m_sde_gpu",
+                "validator": lambda v: isinstance(v, str) and v in SAMPLERS
+            },
+            "scheduler": {
+                "label": "Scheduler",
+                "type": "str",
+                "fallbacks": ["Scheduler"],
+                "default": "karras",
+                "validator": lambda v: isinstance(v, str)
+            },
+            "vae": {
+                "label": "VAE",
+                "type": "str",
+                "fallbacks": ["VAE"],
+                "default": "Default (model)",
+                "validator": lambda v: isinstance(v, str)
+            },
+            "seed": {
+                "label": "Seed",
+                "type": "int",
+                "fallbacks": ["Seed"],
+                "default": 0,
+                "validator": lambda v: isinstance(v, int),
+                "transform": lambda v: int(v)
+            },
+            "inpaint_engine_version": {
+                "label": "Inpaint Engine Version",
+                "type": "str",
+                "fallbacks": ["Inpaint Engine Version"],
+                "default": "v2.6",
+                "validator": lambda v: isinstance(v, str) and v in modules.flags.inpaint_engine_versions
+            },
+            "inpaint_method": {
+                "label": "Inpaint Mode",
+                "type": "str",
+                "fallbacks": ["Inpaint Mode"],
+                "default": modules.flags.inpaint_option_default,
+                "validator": lambda v: isinstance(v, str) and v in modules.flags.inpaint_options
+            },
+            "freeu": {
+                "label": "FreeU",
+                "type": "tuple",
+                "fallbacks": ["FreeU"],
+                "default": None,
+                "validator": lambda v: isinstance(v, (tuple, list)) and len(v) == 4,
+                "transform": lambda v: self._safe_eval_tuple(v, 4)
+            },
+            "version": {
+                "label": "Version",
+                "type": "str",
+                "fallbacks": ["Version"],
+                "default": "",
+                "validator": lambda v: isinstance(v, str)
+            },
+            "created_by": {
+                "label": "User",
+                "type": "str",
+                "fallbacks": ["User", "created_by"],
+                "default": "",
+                "validator": lambda v: isinstance(v, str)
+            },
+            "lora_hashes": {
+                "label": "Lora hashes",
+                "type": "str",
+                "fallbacks": ["Lora hashes"],
+                "default": "",
+                "validator": lambda v: isinstance(v, str)
+            },
+            "lora_weights": {
+                "label": "Lora weights",
+                "type": "str",
+                "fallbacks": ["Lora weights"],
+                "default": "",
+                "validator": lambda v: isinstance(v, str)
+            },
+            "full_prompt": {
+                "label": "Full Prompt",
+                "type": "list",
+                "fallbacks": ["full_prompt"],
+                "default": [],
+                "validator": lambda v: isinstance(v, list)
+            },
+            "full_negative_prompt": {
+                "label": "Full Negative Prompt",
+                "type": "list",
+                "fallbacks": ["full_negative_prompt"],
+                "default": [],
+                "validator": lambda v: isinstance(v, list)
+            },
+            "loras": {
+                "label": "LoRAs",
+                "type": "list",
+                "fallbacks": ["loras"],
+                "default": [],
+                "validator": lambda v: isinstance(v, list)
+            }
+        }
+
+    def _safe_eval_list(self, v):
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            try:
+                result = eval(v)
+                if isinstance(result, list):
+                    return result
+            except Exception:
+                pass
+        raise ValueError(f"Cannot convert to list: {v}")
+
+    def _safe_eval_resolution(self, v):
+        if isinstance(v, (tuple, list)) and len(v) == 2:
+            return (int(v[0]), int(v[1]))
+        if isinstance(v, str):
+            m = re_imagesize.match(v.strip())
+            if m:
+                return (int(m.group(1)), int(m.group(2)))
+            try:
+                result = eval(v)
+                if isinstance(result, (tuple, list)) and len(result) == 2:
+                    return (int(result[0]), int(result[1]))
+            except Exception:
+                pass
+        raise ValueError(f"Cannot convert to resolution: {v}")
+
+    def _safe_eval_tuple(self, v, expected_len):
+        if isinstance(v, (tuple, list)) and len(v) == expected_len:
+            return tuple(float(x) for x in v)
+        if isinstance(v, str):
+            try:
+                result = eval(v)
+                if isinstance(result, (tuple, list)) and len(result) == expected_len:
+                    return tuple(float(x) for x in result)
+            except Exception:
+                pass
+        raise ValueError(f"Cannot convert to tuple of length {expected_len}: {v}")
+
+    def parse_from_image(self, image: Image.Image) -> ParsedMetadata:
+        raw, scheme = self._read_info_from_image(image)
+        if raw is None:
+            result = ParsedMetadata(source=MetadataSource.EMBEDDED, scheme=None, raw=None)
+            return result
+
+        return self.parse_raw(raw, scheme, source=MetadataSource.EMBEDDED)
+
+    def parse_raw(self, raw: Any, scheme: Optional[MetadataScheme] = None,
+                  source: str = MetadataSource.UNKNOWN) -> ParsedMetadata:
+        result = ParsedMetadata(source=source, scheme=scheme, raw=raw)
+
+        if raw is None:
+            return result
+
+        data = {}
+        if isinstance(raw, dict):
+            data = raw.copy()
+        elif isinstance(raw, str):
+            if is_json(raw):
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    data = {}
+            else:
+                data = {"__a1111_text__": raw}
+
+        if "__a1111_text__" in data or (scheme == MetadataScheme.A1111 and isinstance(raw, str)):
+            text = data.get("__a1111_text__", raw if isinstance(raw, str) else "")
+            data = self._parse_a1111_text(text)
+
+        data = self._normalize_model_filenames(data)
+        data = self._normalize_loras(data)
+
+        for key, field_def in self._field_definitions.items():
+            result.fields[key] = self._parse_field(key, field_def, data, source)
+
+        return result
+
+    def _parse_field(self, key: str, field_def: dict, data: dict, source: str) -> FieldResult:
+        label = field_def["label"]
+        result = FieldResult(key=key, label=label, source=source)
+
+        value = None
+        found = False
+
+        if key in data and data[key] is not None:
+            value = data[key]
+            found = True
+        else:
+            for fallback in field_def.get("fallbacks", []):
+                if fallback in data and data[fallback] is not None:
+                    value = data[fallback]
+                    found = True
+                    break
+
+        if not found:
+            result.valid = True
+            result.value = field_def.get("default")
+            return result
+
+        result.raw_value = value
+
+        try:
+            if "transform" in field_def:
+                value = field_def["transform"](value)
+
+            if "validator" in field_def:
+                if not field_def["validator"](value):
+                    result.valid = False
+                    result.error = f"Validation failed for value: {value}"
+                    result.value = field_def.get("default")
+                    return result
+
+            result.value = value
+            result.valid = True
+        except Exception as e:
+            result.valid = False
+            result.error = str(e)
+            result.value = field_def.get("default")
+
+        return result
+
+    def _parse_a1111_text(self, text: str) -> dict:
+        metadata_prompt = ''
+        metadata_negative_prompt = ''
+
+        done_with_prompt = False
+
+        *lines, lastline = text.strip().split("\n")
+        if len(re_param.findall(lastline)) < 3:
+            lines.append(lastline)
+            lastline = ''
+
+        for line in lines:
+            line = line.strip()
+            if line.startswith("Negative prompt:"):
+                done_with_prompt = True
+                line = line[len("Negative prompt:"):].strip()
+            if done_with_prompt:
+                metadata_negative_prompt += ('' if metadata_negative_prompt == '' else "\n") + line
+            else:
+                metadata_prompt += ('' if metadata_prompt == '' else "\n") + line
+
+        found_styles, prompt, negative_prompt = extract_styles_from_prompt(metadata_prompt, metadata_negative_prompt)
+
+        data = {
+            'prompt': prompt,
+            'negative_prompt': negative_prompt
+        }
+
+        a1111_to_fooocus = {
+            'Raw prompt': 'raw_prompt',
+            'Raw negative prompt': 'raw_negative_prompt',
+            'Negative prompt': 'negative_prompt',
+            'Styles': 'styles',
+            'Performance': 'performance',
+            'Steps': 'steps',
+            'Sampler': 'sampler',
+            'Scheduler': 'scheduler',
+            'VAE': 'vae',
+            'CFG scale': 'guidance_scale',
+            'Seed': 'seed',
+            'Size': 'resolution',
+            'Sharpness': 'sharpness',
+            'ADM Guidance': 'adm_guidance',
+            'Refiner Swap Method': 'refiner_swap_method',
+            'Adaptive CFG': 'adaptive_cfg',
+            'Clip skip': 'clip_skip',
+            'Overwrite Switch': 'overwrite_switch',
+            'FreeU': 'freeu',
+            'Model': 'base_model',
+            'Model hash': 'base_model_hash',
+            'Refiner': 'refiner_model',
+            'Refiner hash': 'refiner_model_hash',
+            'Lora hashes': 'lora_hashes',
+            'Lora weights': 'lora_weights',
+            'User': 'created_by',
+            'Version': 'version'
+        }
+
+        for k, v in re_param.findall(lastline):
+            try:
+                if v != '' and v[0] == '"' and v[-1] == '"':
+                    v = unquote(v)
+
+                m = re_imagesize.match(v)
+                if m is not None:
+                    data['resolution'] = (m.group(1), m.group(2))
+                else:
+                    fooocus_key = a1111_to_fooocus.get(k, k)
+                    data[fooocus_key] = v
+            except Exception:
+                pass
+
+        if 'raw_prompt' in data:
+            data['prompt'] = data['raw_prompt']
+            raw_prompt = data['raw_prompt'].replace("\n", ', ')
+            if metadata_prompt != raw_prompt and modules.sdxl_styles.fooocus_expansion not in found_styles:
+                found_styles.append(modules.sdxl_styles.fooocus_expansion)
+
+        if 'raw_negative_prompt' in data:
+            data['negative_prompt'] = data['raw_negative_prompt']
+
+        data['styles'] = list(found_styles)
+
+        if 'steps' in data and 'performance' not in data:
+            try:
+                steps_int = int(data['steps'])
+                data['performance'] = Performance.by_steps(steps_int).value
+            except (ValueError, KeyError):
+                pass
+
+        if 'sampler' in data:
+            sampler = data['sampler'].replace(' Karras', '')
+            if 'Karras' in data.get('sampler', '') and 'scheduler' not in data:
+                data['scheduler'] = 'karras'
+            for k, v in SAMPLERS.items():
+                if v == sampler:
+                    data['sampler'] = k
+                    break
+
+        return data
+
+    def _normalize_model_filenames(self, data: dict) -> dict:
+        result = data.copy()
+
+        for key in ['base_model', 'refiner_model']:
+            if key in result and result[key]:
+                result[key] = self._resolve_filename(result[key], modules.config.model_filenames)
+
+        if 'vae' in result and result['vae']:
+            result['vae'] = self._resolve_filename(result['vae'], modules.config.vae_filenames)
+
+        return result
+
+    def _resolve_filename(self, stem_or_name: str, filenames: list) -> str:
+        if not stem_or_name or stem_or_name in ['', 'None']:
+            return stem_or_name
+
+        for filename in filenames:
+            path = Path(filename)
+            if stem_or_name == path.stem or stem_or_name == filename:
+                return filename
+
+        return stem_or_name
+
+    def _normalize_loras(self, data: dict) -> dict:
+        result = data.copy()
+
+        lora_data = ''
+        if result.get('lora_weights', '') != '':
+            lora_data = result['lora_weights']
+        elif result.get('lora_hashes', '') != '' and result['lora_hashes'].split(', ')[0].count(':') == 2:
+            lora_data = result['lora_hashes']
+
+        if lora_data != '':
+            for li, lora in enumerate(lora_data.split(', ')):
+                lora_split = lora.split(': ')
+                lora_name = lora_split[0]
+                lora_weight = lora_split[2] if len(lora_split) == 3 else lora_split[1]
+                resolved_name = self._resolve_filename(lora_name, modules.config.lora_filenames)
+                result[f'lora_combined_{li + 1}'] = f'{resolved_name} : {lora_weight}'
+
+        return result
+
+    def _read_info_from_image(self, image: Image.Image) -> tuple:
         items = (image.info or {}).copy()
 
         parameters = items.pop('parameters', None)
@@ -832,270 +657,29 @@ class MetadataService:
 
         return parameters, metadata_scheme
 
-    def parse_from_image(self, image: Image.Image) -> MetadataResult:
-        parameters, scheme = self.read_from_image(image)
-        result = MetadataResult(source=MetadataSource.EMBEDDED, scheme=scheme, raw_metadata=parameters)
+    def get_lora_field(self, index: int, data: dict, performance_filename: Optional[str] = None) -> dict:
+        key = f'lora_combined_{index}'
+        fallback = f'LoRA {index}'
 
-        if parameters is None or scheme is None:
+        result = {
+            'enabled': True,
+            'name': 'None',
+            'weight': 1.0,
+            'valid': True,
+            'error': ''
+        }
+
+        raw_value = None
+        if key in data:
+            raw_value = data[key]
+        elif fallback in data:
+            raw_value = data[fallback]
+
+        if raw_value is None:
             return result
 
         try:
-            parser = self.get_parser(scheme)
-            parsed = parser.parse(parameters)
-            result.fields = parsed.fields
-            for field in result.fields.values():
-                if field.source == MetadataSource.UNKNOWN:
-                    field.source = MetadataSource.EMBEDDED
-        except Exception as e:
-            result.set_field('_parse_error', str(e), valid=False, error=str(e))
-
-        return result
-
-    def parse(self, data: Any, scheme: MetadataScheme = MetadataScheme.FOOOCUS, source: str = MetadataSource.UNKNOWN) -> MetadataResult:
-        result = MetadataResult(source=source, scheme=scheme, raw_metadata=data)
-
-        try:
-            parser = self.get_parser(scheme)
-            parsed = parser.parse(data)
-            result.fields = parsed.fields
-            for field in result.fields.values():
-                if field.source == MetadataSource.UNKNOWN:
-                    field.source = source
-        except Exception as e:
-            result.set_field('_parse_error', str(e), valid=False, error=str(e))
-
-        return result
-
-    def parse_from_dict(self, data: dict, scheme: MetadataScheme = MetadataScheme.FOOOCUS, source: str = MetadataSource.UNKNOWN) -> MetadataResult:
-        return self.parse(data, scheme, source)
-
-    def parse_from_preset(self, preset_content: dict) -> MetadataResult:
-        result = MetadataResult(source=MetadataSource.PRESET, scheme=MetadataScheme.FOOOCUS)
-        result.raw_metadata = preset_content
-
-        if not preset_content or not isinstance(preset_content, dict):
-            return result
-
-        try:
-            preset_prepared = {}
-            items = preset_content
-
-            for settings_key, meta_key in modules.config.possible_preset_keys.items():
-                try:
-                    if settings_key == "default_loras":
-                        loras = getattr(modules.config, settings_key)
-                        if settings_key in items:
-                            loras = items[settings_key]
-                        for index, lora in enumerate(loras[:modules.config.default_max_lora_number]):
-                            preset_prepared[f'lora_combined_{index + 1}'] = ' : '.join(map(str, lora))
-                    elif settings_key == "default_aspect_ratio":
-                        if settings_key in items and items[settings_key] is not None:
-                            default_aspect_ratio = items[settings_key]
-                            width, height = default_aspect_ratio.split('*')
-                        else:
-                            default_aspect_ratio = getattr(modules.config, settings_key)
-                            width, height = default_aspect_ratio.split('×')
-                            height = height[:height.index(" ")]
-                        preset_prepared[meta_key] = (width, height)
-                    else:
-                        preset_prepared[meta_key] = items[settings_key] if settings_key in items and items[settings_key] is not None else getattr(modules.config, settings_key)
-
-                    if settings_key == "default_styles" or settings_key == "default_aspect_ratio":
-                        preset_prepared[meta_key] = str(preset_prepared[meta_key])
-                except Exception as e:
-                    result.set_field(meta_key if meta_key != '<processed>' else settings_key, None,
-                                     source=MetadataSource.PRESET, valid=False, error=str(e),
-                                     raw_value=items.get(settings_key))
-
-            parser = self.get_parser(MetadataScheme.FOOOCUS)
-            parsed = parser.parse(preset_prepared)
-            for key, field in parsed.fields.items():
-                if key not in result.fields or field.valid:
-                    field.source = MetadataSource.PRESET
-                    result.fields[key] = field
-
-        except Exception as e:
-            result.set_field('_parse_error', str(e), valid=False, error=str(e))
-
-        return result
-
-    def diff(self, metadata_a: MetadataResult, metadata_b: MetadataResult) -> MetadataDiff:
-        diff = MetadataDiff()
-
-        all_keys = set(metadata_a.fields.keys()) | set(metadata_b.fields.keys())
-
-        for key in all_keys:
-            a_field = metadata_a.fields.get(key)
-            b_field = metadata_b.fields.get(key)
-
-            if a_field is None and b_field is not None:
-                if b_field.valid:
-                    diff.added[key] = b_field
-            elif a_field is not None and b_field is None:
-                if a_field.valid:
-                    diff.removed[key] = a_field
-            elif a_field is not None and b_field is not None:
-                if not a_field.valid and not b_field.valid:
-                    continue
-                elif not a_field.valid:
-                    diff.added[key] = b_field
-                elif not b_field.valid:
-                    diff.removed[key] = a_field
-                elif a_field.value != b_field.value:
-                    diff.changed[key] = (a_field, b_field)
-                else:
-                    diff.unchanged[key] = a_field
-
-        return diff
-
-    def parse_private_log_file(self, log_html_path: str) -> dict:
-        import urllib.parse
-        import os
-
-        result = {}
-        if not log_html_path or not os.path.exists(log_html_path):
-            return result
-
-        try:
-            with open(log_html_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-
-            pattern = r'<div id="([^"]+)" class="image-container">.*?onclick="to_clipboard\(\'([^\']*)\'"'
-            matches = re.findall(pattern, content, re.DOTALL)
-
-            for div_id, js_txt in matches:
-                try:
-                    json_str = urllib.parse.unquote(js_txt)
-                    metadata_dict = json.loads(json_str)
-                    image_filename = div_id.replace('_', '.')
-                    result[image_filename] = metadata_dict
-                except Exception:
-                    continue
-        except Exception:
-            pass
-
-        return result
-
-    def find_private_log_for_image(self, image_path: str) -> Optional[str]:
-        import os
-
-        if not image_path:
-            return None
-
-        image_dir = os.path.dirname(image_path)
-        log_path = os.path.join(image_dir, 'log.html')
-
-        if os.path.exists(log_path):
-            return log_path
-
-        return None
-
-    def parse_from_private_log(self, image_path: str, log_html_path: str = None) -> MetadataResult:
-        import os
-
-        result = MetadataResult(source=MetadataSource.PRIVATE_LOG)
-
-        if log_html_path is None:
-            log_html_path = self.find_private_log_for_image(image_path)
-
-        if not log_html_path:
-            return result
-
-        image_filename = os.path.basename(image_path)
-        log_data = self.parse_private_log_file(log_html_path)
-
-        if image_filename in log_data:
-            metadata_dict = log_data[image_filename]
-            result.raw_metadata = metadata_dict
-
-            if 'metadata_scheme' in metadata_dict:
-                try:
-                    scheme = MetadataScheme(metadata_dict['metadata_scheme'])
-                    result.scheme = scheme
-                except (ValueError, TypeError):
-                    result.scheme = MetadataScheme.FOOOCUS
-            else:
-                result.scheme = MetadataScheme.FOOOCUS
-
-            parser = self.get_parser(result.scheme)
-            parsed = parser.parse(metadata_dict)
-            result.fields = parsed.fields
-            for field in result.fields.values():
-                if field.source == MetadataSource.UNKNOWN:
-                    field.source = MetadataSource.PRIVATE_LOG
-
-        return result
-
-    def parse_from_image_with_private_log(self, image_path: str, image_obj: Image.Image = None, log_html_path: str = None) -> MetadataResult:
-        import os
-
-        if image_obj is None:
-            if not os.path.exists(image_path):
-                return MetadataResult()
-            image_obj = Image.open(image_path)
-
-        embedded = self.parse_from_image(image_obj)
-        private_log = self.parse_from_private_log(image_path, log_html_path)
-
-        result = MetadataResult(
-            scheme=embedded.scheme or private_log.scheme,
-            source=MetadataSource.EMBEDDED if embedded.fields else MetadataSource.PRIVATE_LOG,
-            raw_metadata=embedded.raw_metadata or private_log.raw_metadata
-        )
-
-        result.merge(embedded, only_missing=False)
-        result.merge(private_log, only_missing=True)
-
-        return result
-
-    def serialize_metadata(self, metadata: MetadataResult, scheme: MetadataScheme = None, extra_data: dict = None) -> str:
-        if scheme is None:
-            scheme = metadata.scheme or MetadataScheme.FOOOCUS
-
-        parser = self.get_parser(scheme)
-        return parser.serialize(metadata, extra_data)
-
-    def get_exif(self, metadata: str, metadata_scheme: str) -> Image.Exif:
-        exif = Image.Exif()
-        exif[0x9286] = metadata
-        exif[0x0131] = 'Fooocus v' + fooocus_version.version
-        exif[0x927C] = metadata_scheme
-        return exif
-
-    def build_load_parameters(self, metadata: MetadataResult, is_generating: bool, inpaint_mode: str) -> list:
-        import gradio as gr
-        schema = get_metadata_schema()
-        loaded_parameter_dict = metadata.to_simple_dict()
-        results = [len(loaded_parameter_dict) > 0]
-
-        performance = None
-        for field_schema in schema:
-            try:
-                if field_schema.key == 'inpaint_engine_version':
-                    field_schema.build_from_metadata(metadata, results, inpaint_mode=inpaint_mode)
-                elif field_schema.key == 'performance':
-                    performance = field_schema.build_from_metadata(metadata, results)
-                else:
-                    field_schema.build_from_metadata(metadata, results)
-            except Exception as e:
-                for _ in range(field_schema.ui_count):
-                    results.append(gr.update())
-
-        if is_generating:
-            results.append(gr.update())
-        else:
-            results.append(gr.update(visible=True))
-
-        results.append(gr.update(visible=False))
-
-        performance_filename = None
-        if performance is not None and performance in Performance.values():
-            perf = Performance(performance)
-            performance_filename = perf.lora_filename()
-
-        def _lora_getter(key, fallback, metadata, results, performance_filename):
-            try:
-                raw_value = metadata.get(key, metadata.get(fallback) if fallback else None)
+            if isinstance(raw_value, str):
                 split_data = raw_value.split(' : ')
                 enabled = True
                 name = split_data[0]
@@ -1107,275 +691,415 @@ class MetadataService:
                     weight = split_data[2]
 
                 if name == performance_filename:
-                    raise Exception('performance LoRA')
+                    result['name'] = 'None'
+                    result['enabled'] = True
+                    result['weight'] = 1.0
+                    return result
 
                 weight = float(weight)
-                results.append(enabled)
-                results.append(name)
-                results.append(weight)
-            except Exception:
-                results.append(True)
-                results.append('None')
-                results.append(1)
+                resolved_name = self._resolve_filename(name, modules.config.lora_filenames)
 
-        for i in range(modules.config.default_max_lora_number):
-            _lora_getter(f'lora_combined_{i + 1}', f'LoRA {i + 1}', metadata, results, performance_filename)
-
-        return results
-
-    def build_metadata_from_ui_params(self, ui_params: list) -> MetadataResult:
-        schema = get_metadata_schema()
-        result = MetadataResult(source=MetadataSource.CURRENT_UI, scheme=MetadataScheme.FOOOCUS)
-
-        try:
-            idx = 0
-            has_data = ui_params[idx] if idx < len(ui_params) else False
-            idx += 1
-            result.set_field('__has_data__', str(bool(has_data)), source=MetadataSource.CURRENT_UI)
-
-            for field_schema in schema:
-                try:
-                    if idx + field_schema.ui_count > len(ui_params):
-                        break
-
-                    values = ui_params[idx:idx + field_schema.ui_count]
-                    idx += field_schema.ui_count
-
-                    self._set_field_from_ui(result, field_schema, values)
-                except Exception as e:
-                    result.set_field(field_schema.key, None,
-                                     source=MetadataSource.CURRENT_UI,
-                                     valid=False, error=str(e))
-
-            if idx + 2 <= len(ui_params):
-                idx += 2
-
-            if idx + 5 <= len(ui_params):
-                freeu_enabled = ui_params[idx]
-                idx += 1
-                if freeu_enabled:
-                    b1, b2, s1, s2 = ui_params[idx], ui_params[idx + 1], ui_params[idx + 2], ui_params[idx + 3]
-                    result.set_field('freeu', str((b1, b2, s1, s2)),
-                                     source=MetadataSource.CURRENT_UI,
-                                     raw_value=(freeu_enabled, b1, b2, s1, s2))
-                idx += 4
-
-            for i in range(modules.config.default_max_lora_number):
-                if idx + 3 > len(ui_params):
-                    break
-                enabled = ui_params[idx]
-                name = ui_params[idx + 1]
-                weight = ui_params[idx + 2]
-                idx += 3
-                if name != 'None':
-                    result.set_field(f'lora_combined_{i + 1}', f'{enabled} : {name} : {weight}',
-                                     source=MetadataSource.CURRENT_UI,
-                                     raw_value=(enabled, name, weight))
-
+                result['enabled'] = enabled
+                result['name'] = resolved_name if resolved_name else name
+                result['weight'] = weight
+            elif isinstance(raw_value, (list, tuple)) and len(raw_value) >= 2:
+                if len(raw_value) == 3:
+                    result['enabled'] = raw_value[0]
+                    result['name'] = raw_value[1]
+                    result['weight'] = float(raw_value[2])
+                else:
+                    result['name'] = raw_value[0]
+                    result['weight'] = float(raw_value[1])
         except Exception as e:
-            result.set_field('_parse_error', str(e), valid=False, error=str(e))
+            result['valid'] = False
+            result['error'] = str(e)
 
         return result
 
-    @staticmethod
-    def _set_field_from_ui(result: MetadataResult, field_schema: FieldSchema, values: list):
-        key = field_schema.key
-        source = MetadataSource.CURRENT_UI
+    def get_all_loras(self, data: dict, max_count: int, performance_filename: Optional[str] = None) -> list:
+        loras = []
+        for i in range(1, max_count + 1):
+            loras.append(self.get_lora_field(i, data, performance_filename))
+        return loras
 
-        if key == 'image_number':
-            result.set_field(key, str(values[0]), source=source, raw_value=values[0])
+    def diff(self, left: ParsedMetadata, right: ParsedMetadata, keys: Optional[list] = None) -> MetadataDiff:
+        result = MetadataDiff()
 
-        elif key == 'prompt' or key == 'negative_prompt' or key == 'performance' or \
-             key == 'refiner_swap_method' or key == 'base_model' or key == 'refiner_model' or \
-             key == 'sampler' or key == 'scheduler' or key == 'vae' or key == 'inpaint_method' or \
-             key == 'inpaint_engine_version':
-            v = values[0]
-            if isinstance(v, str) and v.strip() != '':
-                result.set_field(key, v, source=source, raw_value=v)
+        if keys is None:
+            all_keys = set()
+            all_keys.update(left.fields.keys())
+            all_keys.update(right.fields.keys())
+            keys = sorted(all_keys)
 
-        elif key == 'styles':
-            result.set_field(key, str(values[0]), source=source, raw_value=values[0])
+        for key in keys:
+            label = self._field_definitions.get(key, {}).get("label", key)
+            left_field = left.get_field(key)
+            right_field = right.get_field(key)
 
-        elif key == 'steps':
-            steps_val = values[0]
-            if isinstance(steps_val, int) and steps_val == -1:
-                if result.has('performance') and result.get('performance') in Steps:
-                    steps_val = Steps[result.get('performance')]
-            result.set_field(key, str(steps_val), source=source, raw_value=values[0])
+            left_val = left_field.value if left_field else None
+            right_val = right_field.value if right_field else None
 
-        elif key == 'overwrite_switch' or key == 'guidance_scale' or key == 'sharpness' or \
-             key == 'adaptive_cfg' or key == 'clip_skip' or key == 'refiner_switch':
-            result.set_field(key, str(values[0]), source=source, raw_value=values[0])
+            same = left_val == right_val
 
-        elif key == 'resolution':
-            aspect_ratio, overwrite_width, overwrite_height = values
-            if isinstance(overwrite_width, int) and overwrite_width > 0 and \
-               isinstance(overwrite_height, int) and overwrite_height > 0:
-                result.set_field(key, str((overwrite_width, overwrite_height)),
-                                 source=source, raw_value=(overwrite_width, overwrite_height))
+            item = DiffItem(
+                key=key,
+                label=label,
+                left_value=left_val,
+                right_value=right_val,
+                same=same
+            )
+            result.items.append(item)
+
+            if same:
+                result.same_count += 1
             else:
-                try:
-                    if '×' in str(aspect_ratio):
-                        ratio_str = str(aspect_ratio).split('×')[0]
-                        width, height = ratio_str.split('*')
-                        result.set_field(key, str((int(width), int(height))),
-                                         source=source, raw_value=aspect_ratio)
-                except Exception:
-                    pass
+                result.diff_count += 1
 
-        elif key == 'adm_guidance':
-            result.set_field(key, str((values[0], values[1], values[2])),
-                             source=source, raw_value=tuple(values))
+        return result
 
-        elif key == 'seed_random':
-            result.set_field('seed_random', str(values[0]), source=source, raw_value=values[0])
-            result.set_field('seed', str(values[1]), source=source, raw_value=values[1])
-
-        elif key == 'freeu':
-            freeu_enabled = values[0]
-            if freeu_enabled:
-                b1, b2, s1, s2 = values[1], values[2], values[3], values[4]
-                result.set_field('freeu', str((b1, b2, s1, s2)),
-                                 source=source, raw_value=tuple(values))
-
-    def build_load_parameters_from_diff(self, diff: MetadataDiff, is_generating: bool, inpaint_mode: str) -> list:
-        merged_metadata = MetadataResult(source='diff_merge')
-
-        for field in diff.added.values():
-            merged_metadata.fields[field.key] = field
-        for key, (_, new_field) in diff.changed.items():
-            merged_metadata.fields[key] = new_field
-
-        return self.build_load_parameters(merged_metadata, is_generating, inpaint_mode)
-
-    def build_load_parameters_from_dict(self, metadata_dict: dict, is_generating: bool, inpaint_mode: str) -> list:
-        metadata = self.parse(metadata_dict, MetadataScheme.FOOOCUS)
-        return self.build_load_parameters(metadata, is_generating, inpaint_mode)
-
-    @staticmethod
-    def build_expected_schema_layout(default_enhance_tabs: int = None,
-                                     default_max_lora_number: int = None,
-                                     default_max_image_number: int = None) -> list:
-        if default_enhance_tabs is None:
-            default_enhance_tabs = modules.config.default_enhance_tabs
-        if default_max_lora_number is None:
-            default_max_lora_number = modules.config.default_max_lora_number
-        if default_max_image_number is None:
-            default_max_image_number = modules.config.default_max_image_number
-
-        schema = get_metadata_schema()
-        layout = []
-
-        layout.append({
-            'slot': 'advanced_checkbox',
-            'type': 'fixed_control',
-            'description': 'advanced_checkbox (has_data marker)',
-            'ui_count': 1,
-            'schema_key': '__has_data__',
-        })
-
-        for field_schema in schema:
-            layout.append({
-                'slot': f'schema_field[{field_schema.key}]',
-                'type': 'schema_field',
-                'description': f'{field_schema.label} ({field_schema.key})',
-                'ui_count': field_schema.ui_count,
-                'schema_key': field_schema.key,
-            })
-
-        layout.append({
-            'slot': 'generate_button',
-            'type': 'fixed_control',
-            'description': 'generate_button (visible control)',
-            'ui_count': 1,
-            'schema_key': None,
-        })
-        layout.append({
-            'slot': 'load_parameter_button',
-            'type': 'fixed_control',
-            'description': 'load_parameter_button (visible control)',
-            'ui_count': 1,
-            'schema_key': None,
-        })
-
-        layout.append({
-            'slot': 'freeu_ctrls',
-            'type': 'variable_group',
-            'description': 'freeu (enabled + 4 sliders)',
-            'ui_count': 5,
-            'schema_key': 'freeu',
-        })
-
-        for i in range(default_max_lora_number):
-            layout.append({
-                'slot': f'lora_ctrls[{i}]',
-                'type': 'variable_group',
-                'description': f'LoRA {i + 1} (enabled + model + weight)',
-                'ui_count': 3,
-                'schema_key': f'lora_combined_{i + 1}',
-            })
-
-        return layout
-
-    def validate_schema_against_load_outputs(self,
-                                              load_outputs_list: list,
-                                              default_enhance_tabs: int,
-                                              default_max_lora_number: int,
-                                              default_max_image_number: int,
-                                              control_names: dict = None) -> tuple[bool, str]:
-        expected = self.build_expected_schema_layout(
-            default_enhance_tabs=default_enhance_tabs,
-            default_max_lora_number=default_max_lora_number,
-            default_max_image_number=default_max_image_number,
-        )
-
-        expected_total = sum(item['ui_count'] for item in expected)
-        actual_total = len(load_outputs_list)
-
-        messages = []
-        passed = True
-
-        messages.append(f'[Metadata Schema Validation]')
-        messages.append(f'  Expected total UI controls: {expected_total}')
-        messages.append(f'  Actual load_data_outputs length: {actual_total}')
-
-        if expected_total != actual_total:
-            passed = False
-            messages.append(f'  ❌ LENGTH MISMATCH! Difference: {actual_total - expected_total:+d}')
-            messages.append(f'     Expected layout breakdown:')
-            offset = 0
-            for item in expected:
-                messages.append(f'       [{offset:03d}-{offset + item["ui_count"] - 1:03d}] '
-                              f'{item["description"]} (count={item["ui_count"]})')
-                offset += item['ui_count']
-
-            messages.append(f'     Actual controls:')
-            for i, ctrl in enumerate(load_outputs_list):
-                name = control_names.get(id(ctrl), repr(ctrl)) if control_names else f'control[{i}]'
-                messages.append(f'       [{i:03d}] {name}')
-
-        offset_expected = 0
-        offset_actual = 0
-        for i, item in enumerate(expected):
-            end_expected = offset_expected + item['ui_count'] - 1
-
-            if control_names and item['schema_key']:
-                actual_ctrls = load_outputs_list[offset_actual:offset_actual + item['ui_count']]
-                messages.append(f'  Slot [{offset_expected:03d}-{end_expected:03d}] {item["description"]}:')
-                for j, ctrl in enumerate(actual_ctrls):
-                    ctrl_name = control_names.get(id(ctrl), '?')
-                    messages.append(f'    → [{offset_actual + j:03d}] {ctrl_name}')
-
-            offset_expected += item['ui_count']
-            offset_actual += item['ui_count']
-
-        if passed:
-            messages.append('  ✅ Schema validation PASSED - all fields aligned')
+    def build_output_metadata(self, task_data: dict, scheme: MetadataScheme) -> str:
+        if scheme == MetadataScheme.FOOOCUS:
+            return self._build_fooocus_metadata(task_data)
         else:
-            messages.append('  ❌ Schema validation FAILED - please sync METADATA_SCHEMA with load_data_outputs')
+            return self._build_a1111_metadata(task_data)
 
-        return passed, '\n'.join(messages)
+    def _build_fooocus_metadata(self, task_data: dict) -> str:
+        result = {}
+
+        field_order = [
+            'prompt', 'negative_prompt', 'styles', 'performance', 'steps',
+            'sampler', 'scheduler', 'guidance_scale', 'sharpness',
+            'adm_guidance', 'adaptive_cfg', 'clip_skip', 'seed',
+            'resolution', 'overwrite_switch', 'refiner_swap_method',
+            'base_model', 'base_model_hash', 'refiner_model', 'refiner_model_hash',
+            'refiner_switch', 'vae', 'inpaint_engine_version', 'inpaint_method',
+            'freeu', 'version', 'created_by', 'full_prompt', 'full_negative_prompt',
+            'loras'
+        ]
+
+        for key in field_order:
+            if key in task_data:
+                result[key] = task_data[key]
+
+        return json.dumps(dict(sorted(result.items())))
+
+    def _build_a1111_metadata(self, task_data: dict) -> str:
+        fooocus_to_a1111 = {
+            'raw_prompt': 'Raw prompt',
+            'raw_negative_prompt': 'Raw negative prompt',
+            'negative_prompt': 'Negative prompt',
+            'styles': 'Styles',
+            'performance': 'Performance',
+            'steps': 'Steps',
+            'sampler': 'Sampler',
+            'scheduler': 'Scheduler',
+            'vae': 'VAE',
+            'guidance_scale': 'CFG scale',
+            'seed': 'Seed',
+            'resolution': 'Size',
+            'sharpness': 'Sharpness',
+            'adm_guidance': 'ADM Guidance',
+            'refiner_swap_method': 'Refiner Swap Method',
+            'adaptive_cfg': 'Adaptive CFG',
+            'clip_skip': 'Clip skip',
+            'overwrite_switch': 'Overwrite Switch',
+            'freeu': 'FreeU',
+            'base_model': 'Model',
+            'base_model_hash': 'Model hash',
+            'refiner_model': 'Refiner',
+            'refiner_model_hash': 'Refiner hash',
+            'lora_hashes': 'Lora hashes',
+            'lora_weights': 'Lora weights',
+            'created_by': 'User',
+            'version': 'Version'
+        }
+
+        data = task_data
+        width, height = data.get('resolution', (1024, 1024))
+        if isinstance(width, str) or isinstance(height, str):
+            try:
+                width, height = int(width), int(height)
+            except (ValueError, TypeError):
+                width, height = 1024, 1024
+
+        sampler = data.get('sampler', 'dpmpp_2m_sde_gpu')
+        scheduler = data.get('scheduler', 'karras')
+
+        if sampler in SAMPLERS and SAMPLERS[sampler] != '':
+            sampler_name = SAMPLERS[sampler]
+            if sampler_name not in CIVITAI_NO_KARRAS and scheduler == 'karras':
+                sampler_name += f' Karras'
+        else:
+            sampler_name = sampler
+
+        generation_params = {
+            'Steps': data.get('steps', 30),
+            'Sampler': sampler_name,
+            'Seed': data.get('seed', 0),
+            'Size': f'{width}x{height}',
+            'CFG scale': data.get('guidance_scale', 7.0),
+            'Sharpness': data.get('sharpness', 2.0),
+            'ADM Guidance': data.get('adm_guidance', ''),
+            'Model': Path(data.get('base_model', '')).stem if data.get('base_model') else '',
+            'Model hash': data.get('base_model_hash', ''),
+            'Performance': data.get('performance', ''),
+            'Scheduler': scheduler,
+            'VAE': Path(data.get('vae', '')).stem if data.get('vae') else '',
+            'Raw prompt': data.get('raw_prompt', data.get('prompt', '')),
+            'Raw negative prompt': data.get('raw_negative_prompt', data.get('negative_prompt', '')),
+        }
+
+        refiner_model = data.get('refiner_model', '')
+        if refiner_model and refiner_model not in ['', 'None']:
+            generation_params['Refiner'] = Path(refiner_model).stem
+            generation_params['Refiner hash'] = data.get('refiner_model_hash', '')
+
+        for key in ['adaptive_cfg', 'clip_skip', 'overwrite_switch', 'refiner_swap_method', 'freeu']:
+            if key in data and data[key] is not None:
+                a1111_key = fooocus_to_a1111.get(key, key)
+                generation_params[a1111_key] = data[key]
+
+        loras = data.get('loras', [])
+        if len(loras) > 0:
+            lora_hashes = []
+            lora_weights = []
+            for lora in loras:
+                if len(lora) >= 3:
+                    lora_name = Path(lora[0]).stem if lora[0] else ''
+                    lora_hashes.append(f'{lora_name}: {lora[2]}')
+                    lora_weights.append(f'{lora_name}: {lora[1]}')
+                elif len(lora) >= 2:
+                    lora_name = Path(lora[0]).stem if lora[0] else ''
+                    lora_weights.append(f'{lora_name}: {lora[1]}')
+            if lora_hashes:
+                generation_params['Lora hashes'] = ', '.join(lora_hashes)
+            if lora_weights:
+                generation_params['Lora weights'] = ', '.join(lora_weights)
+
+        if 'version' in data:
+            generation_params['Version'] = data['version']
+
+        if modules.config.metadata_created_by != '':
+            generation_params['User'] = modules.config.metadata_created_by
+
+        generation_params_text = ", ".join(
+            [k if k == v else f'{k}: {quote(v)}' for k, v in generation_params.items() if v is not None])
+
+        positive_prompt = data.get('full_prompt', [])
+        negative_prompt = data.get('full_negative_prompt', [])
+        positive_prompt_resolved = ', '.join(positive_prompt) if isinstance(positive_prompt, list) else str(positive_prompt)
+        negative_prompt_resolved = ', '.join(negative_prompt) if isinstance(negative_prompt, list) else str(negative_prompt)
+        negative_prompt_text = f"\nNegative prompt: {negative_prompt_resolved}" if negative_prompt_resolved else ""
+        return f"{positive_prompt_resolved}{negative_prompt_text}\n{generation_params_text}".strip()
+
+    def get_exif(self, metadata: str, metadata_scheme: str):
+        exif = Image.Exif()
+        exif[0x9286] = metadata
+        exif[0x0131] = 'Fooocus v' + fooocus_version.version
+        exif[0x927C] = metadata_scheme
+        return exif
+
+    def parse_from_preset(self, preset_content: dict) -> dict:
+        assert isinstance(preset_content, dict)
+        preset_prepared = {}
+        items = preset_content
+
+        for settings_key, meta_key in modules.config.possible_preset_keys.items():
+            if settings_key == "default_loras":
+                loras = getattr(modules.config, settings_key)
+                if settings_key in items:
+                    loras = items[settings_key]
+                for index, lora in enumerate(loras[:modules.config.default_max_lora_number]):
+                    preset_prepared[f'lora_combined_{index + 1}'] = ' : '.join(map(str, lora))
+            elif settings_key == "default_aspect_ratio":
+                if settings_key in items and items[settings_key] is not None:
+                    default_aspect_ratio = items[settings_key]
+                    width, height = default_aspect_ratio.split('*')
+                else:
+                    default_aspect_ratio = getattr(modules.config, settings_key)
+                    width, height = default_aspect_ratio.split('×')
+                    height = height[:height.index(" ")]
+                preset_prepared[meta_key] = (width, height)
+            else:
+                preset_prepared[meta_key] = items[settings_key] if settings_key in items and items[settings_key] is not None else getattr(modules.config, settings_key)
+
+            if settings_key == "default_styles" or settings_key == "default_aspect_ratio":
+                preset_prepared[meta_key] = str(preset_prepared[meta_key])
+
+        return preset_prepared
+
+    def load_parameters(self, raw_metadata, is_generating: bool, inpaint_mode: str) -> list:
+        if isinstance(raw_metadata, str):
+            try:
+                loaded_parameter_dict = json.loads(raw_metadata)
+            except Exception:
+                loaded_parameter_dict = {}
+        elif isinstance(raw_metadata, dict):
+            loaded_parameter_dict = raw_metadata
+        else:
+            loaded_parameter_dict = {}
+
+        parsed = self.parse_raw(loaded_parameter_dict, source=MetadataSource.UNKNOWN)
+
+        results = [len(loaded_parameter_dict) > 0]
+
+        results.append(self._get_image_number_result(parsed))
+        results.append(parsed.get('prompt', ''))
+        results.append(parsed.get('negative_prompt', ''))
+        results.append(parsed.get('styles', []))
+
+        performance_val = parsed.get('performance', Performance.SPEED.value)
+        results.append(performance_val)
+
+        results.append(self._get_steps_result(parsed))
+        results.append(parsed.get('overwrite_switch', -1))
+
+        resolution_results = self._get_resolution_results(parsed)
+        results.extend(resolution_results)
+
+        results.append(parsed.get('guidance_scale', 7.0))
+        results.append(parsed.get('sharpness', 2.0))
+        results.extend(self._get_adm_guidance_results(parsed))
+        results.append(parsed.get('refiner_swap_method', 'joint'))
+        results.append(parsed.get('adaptive_cfg', 7.0))
+        results.append(int(parsed.get('clip_skip', 2)))
+        results.append(parsed.get('base_model', 'None'))
+        results.append(parsed.get('refiner_model', 'None'))
+        results.append(parsed.get('refiner_switch', 0.8))
+        results.append(parsed.get('sampler', 'dpmpp_2m_sde_gpu'))
+        results.append(parsed.get('scheduler', 'karras'))
+        results.append(parsed.get('vae', 'Default (model)'))
+
+        seed_results = self._get_seed_results(parsed)
+        results.extend(seed_results)
+
+        inpaint_engine_results = self._get_inpaint_engine_results(parsed, inpaint_mode)
+        results.extend(inpaint_engine_results)
+
+        inpaint_method_results = self._get_inpaint_method_results(parsed)
+        results.extend(inpaint_method_results)
+
+        if is_generating:
+            results.append(gr.update())
+        else:
+            results.append(gr.update(visible=True))
+
+        results.append(gr.update(visible=False))
+
+        freeu_results = self._get_freeu_results(parsed)
+        results.extend(freeu_results)
+
+        performance_filename = None
+        if performance_val is not None and performance_val in Performance.values():
+            try:
+                perf = Performance(performance_val)
+                performance_filename = perf.lora_filename()
+            except ValueError:
+                pass
+
+        for i in range(modules.config.default_max_lora_number):
+            lora_result = self._get_single_lora_result(i + 1, loaded_parameter_dict, performance_filename)
+            results.extend(lora_result)
+
+        return results
+
+    def _get_image_number_result(self, parsed: ParsedMetadata) -> int:
+        val = parsed.get('image_number', 1)
+        try:
+            return min(int(val), modules.config.default_max_image_number)
+        except (ValueError, TypeError):
+            return 1
+
+    def _get_steps_result(self, parsed: ParsedMetadata) -> int:
+        steps = parsed.get('steps')
+        if steps is None:
+            return -1
+        try:
+            steps_int = int(steps)
+            performance_name = parsed.get('performance', '')
+            performance_name = str(performance_name).replace(' ', '_').replace('-', '_').casefold()
+            performance_candidates = [
+                key for key in Steps.keys()
+                if key.casefold() == performance_name and Steps[key] == steps_int
+            ]
+            if len(performance_candidates) == 0:
+                return steps_int
+            return -1
+        except (ValueError, TypeError):
+            return -1
+
+    def _get_resolution_results(self, parsed: ParsedMetadata) -> list:
+        resolution = parsed.get('resolution')
+        if resolution is None:
+            return [gr.update(), gr.update(), gr.update()]
+        try:
+            if isinstance(resolution, str):
+                width, height = self._safe_eval_resolution(resolution)
+            else:
+                width, height = int(resolution[0]), int(resolution[1])
+
+            formatted = modules.config.add_ratio(f'{width}*{height}')
+            if formatted in modules.config.available_aspect_ratios_labels:
+                return [formatted, -1, -1]
+            else:
+                return [gr.update(), width, height]
+        except Exception:
+            return [gr.update(), gr.update(), gr.update()]
+
+    def _get_adm_guidance_results(self, parsed: ParsedMetadata) -> list:
+        adm = parsed.get('adm_guidance')
+        if adm is None:
+            return [gr.update(), gr.update(), gr.update()]
+        try:
+            if isinstance(adm, str):
+                p, n, e = eval(adm)
+            else:
+                p, n, e = adm
+            return [float(p), float(n), float(e)]
+        except Exception:
+            return [gr.update(), gr.update(), gr.update()]
+
+    def _get_seed_results(self, parsed: ParsedMetadata) -> list:
+        seed = parsed.get('seed')
+        if seed is None:
+            return [gr.update(), gr.update()]
+        try:
+            return [False, int(seed)]
+        except (ValueError, TypeError):
+            return [gr.update(), gr.update()]
+
+    def _get_inpaint_engine_results(self, parsed: ParsedMetadata, inpaint_mode: str) -> list:
+        val = parsed.get('inpaint_engine_version')
+        if val is None or val not in modules.flags.inpaint_engine_versions:
+            return [gr.update(), 'empty']
+        if inpaint_mode != modules.flags.inpaint_option_detail:
+            return [val, val]
+        else:
+            return [gr.update(), val]
+
+    def _get_inpaint_method_results(self, parsed: ParsedMetadata) -> list:
+        val = parsed.get('inpaint_method')
+        if val is None or val not in modules.flags.inpaint_options:
+            return [gr.update()] + [gr.update()] * modules.config.default_enhance_tabs
+        return [val] + [val] * modules.config.default_enhance_tabs
+
+    def _get_freeu_results(self, parsed: ParsedMetadata) -> list:
+        freeu = parsed.get('freeu')
+        if freeu is None:
+            return [False, gr.update(), gr.update(), gr.update(), gr.update()]
+        try:
+            if isinstance(freeu, str):
+                b1, b2, s1, s2 = eval(freeu)
+            else:
+                b1, b2, s1, s2 = freeu
+            return [True, float(b1), float(b2), float(s1), float(s2)]
+        except Exception:
+            return [False, gr.update(), gr.update(), gr.update(), gr.update()]
+
+    def _get_single_lora_result(self, index: int, data: dict, performance_filename: Optional[str]) -> list:
+        lora = self.get_lora_field(index, data, performance_filename)
+        return [lora['enabled'], lora['name'], lora['weight']]
 
 
 def get_metadata_service() -> MetadataService:
-    return MetadataService.get_instance()
+    return MetadataService()

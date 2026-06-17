@@ -13,6 +13,7 @@ import modules.flags as flags
 import modules.gradio_hijack as grh
 import modules.style_sorter as style_sorter
 import modules.meta_parser
+from modules.metadata_service import get_metadata_service, MetadataSource
 import args_manager
 import copy
 import launch
@@ -23,7 +24,6 @@ from modules.private_logger import get_current_html_path
 from modules.ui_gradio_extensions import reload_javascript
 from modules.auth import auth_enabled, check_auth
 from modules.util import is_json
-from modules.metadata_service import get_metadata_service, MetadataSource, MetadataResult, MetadataDiff
 
 
 def build_preset_data_from_ui(*args):
@@ -458,94 +458,30 @@ with shared.gradio_root:
                                 gr.HTML('<a href="https://github.com/lllyasviel/Fooocus/discussions/3281" target="_blank">\U0001F4D4 Documentation</a>')
 
                     with gr.Tab(label='Metadata', id='metadata_tab') as metadata_tab:
-                        with gr.Tabs():
-                            with gr.Tab(label='Preview & Import'):
-                                with gr.Column():
-                                    metadata_input_image = grh.Image(label='For images created by Fooocus', source='upload', type='pil')
-                                    metadata_image_path = gr.Textbox(label='Image Path (for private log lookup)', value='', placeholder='Optional: path to the image file for private log fallback')
-                                    metadata_json = gr.JSON(label='Metadata')
-                                    metadata_import_button = gr.Button(value='Apply All Metadata', variant='primary')
-                                    state_metadata_result = gr.State(value=None)
-                                    state_metadata_full = gr.State(value=None)
+                        with gr.Column():
+                            metadata_input_image = grh.Image(label='For images created by Fooocus', source='upload', type='pil')
+                            metadata_json = gr.JSON(label='Metadata')
+                            metadata_import_button = gr.Button(value='Apply Metadata')
 
-                                def parse_metadata(file, image_path):
-                                    service = get_metadata_service()
-                                    if file is not None:
-                                        if image_path and image_path.strip():
-                                            metadata = service.parse_from_image_with_private_log(
-                                                image_path.strip(), image_obj=file
-                                            )
-                                        else:
-                                            metadata = service.parse_from_image(file)
-                                    else:
-                                        metadata = modules.metadata_service.MetadataResult()
-                                    return metadata.to_dict(), metadata.to_simple_dict(), metadata
+                        def trigger_metadata_preview(file):
+                            service = get_metadata_service()
+                            parsed = service.parse_from_image(file)
 
-                                metadata_input_image.upload(parse_metadata, inputs=[metadata_input_image, metadata_image_path],
-                                                            outputs=[metadata_json, state_metadata_result, state_metadata_full],
-                                                            queue=False, show_progress=True)
-                                metadata_image_path.change(parse_metadata, inputs=[metadata_input_image, metadata_image_path],
-                                                           outputs=[metadata_json, state_metadata_result, state_metadata_full],
-                                                           queue=False, show_progress=True)
+                            results = {}
+                            if parsed.raw is not None:
+                                results['parameters'] = parsed.raw
+                                results['parsed'] = parsed.to_display_dict()
+                                results['errors'] = parsed.errors() if parsed.has_errors() else {}
 
-                            with gr.Tab(label='Compare Parameters'):
-                                with gr.Column():
-                                    compare_summary = gr.Markdown(value='Upload an image in the "Preview & Import" tab first.')
-                                    compare_show_unchanged = gr.Checkbox(label='Show unchanged parameters', value=False)
-                                    compare_html = gr.HTML(value='')
-                                    with gr.Row():
-                                        compare_button = gr.Button(value='Compare with Current Settings', variant='secondary')
-                                        apply_diff_button = gr.Button(value='Apply Changed Parameters Only', variant='primary')
-                                    state_compare_diff = gr.State(value=None)
-                                    state_current_ui_params = gr.State(value=None)
+                            if parsed.scheme is not None:
+                                results['metadata_scheme'] = parsed.scheme.value
 
-                                def do_compare(metadata_full, show_unchanged, *ui_params):
-                                    service = get_metadata_service()
+                            results['source'] = parsed.source
 
-                                    if metadata_full is None or not metadata_full.fields:
-                                        return ('### No metadata loaded.\nUpload an image in the "Preview & Import" tab first.',
-                                                '', None, list(ui_params))
+                            return results
 
-                                    current_metadata = service.build_metadata_from_ui_params(list(ui_params))
-                                    diff = service.diff(current_metadata, metadata_full)
-
-                                    summary = f'### Diff Summary: {diff.summary()}'
-                                    html = diff.to_html(show_unchanged=show_unchanged)
-
-                                    return (summary, html, diff, list(ui_params))
-
-                                def apply_diff(diff, is_generating):
-                                    service = get_metadata_service()
-                                    if diff is None or not diff.has_differences:
-                                        print('No differences to apply.')
-                                        return [gr.update()] * len(load_data_outputs)
-                                    return service.build_load_parameters_from_diff(diff, is_generating, inpaint_mode)
-
-                                current_inputs = load_data_outputs[1:]
-
-                                compare_button.click(
-                                    do_compare,
-                                    inputs=[state_metadata_full, compare_show_unchanged] + current_inputs,
-                                    outputs=[compare_summary, compare_html, state_compare_diff, state_current_ui_params],
-                                    queue=False,
-                                    show_progress=True
-                                )
-
-                                compare_show_unchanged.change(
-                                    do_compare,
-                                    inputs=[state_metadata_full, compare_show_unchanged] + current_inputs,
-                                    outputs=[compare_summary, compare_html, state_compare_diff, state_current_ui_params],
-                                    queue=False,
-                                    show_progress=False
-                                )
-
-                                apply_diff_button.click(
-                                    apply_diff,
-                                    inputs=[state_compare_diff, state_is_generating],
-                                    outputs=load_data_outputs,
-                                    queue=False,
-                                    show_progress=True
-                                ).then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)
+                        metadata_input_image.upload(trigger_metadata_preview, inputs=metadata_input_image,
+                                                    outputs=metadata_json, queue=False, show_progress=True)
 
             with gr.Row(visible=modules.config.default_enhance_checkbox) as enhance_input_panel:
                 with gr.Tabs():
@@ -1105,82 +1041,11 @@ with shared.gradio_root:
                              inpaint_mode] + enhance_inpaint_mode_ctrls + [generate_button,
                              load_parameter_button] + freeu_ctrls + lora_ctrls
 
-        try:
-            service = get_metadata_service()
-            control_names = {}
-            named_controls = {
-                'advanced_checkbox': advanced_checkbox,
-                'image_number': image_number,
-                'prompt': prompt,
-                'negative_prompt': negative_prompt,
-                'style_selections': style_selections,
-                'performance_selection': performance_selection,
-                'overwrite_step': overwrite_step,
-                'overwrite_switch': overwrite_switch,
-                'aspect_ratios_selection': aspect_ratios_selection,
-                'overwrite_width': overwrite_width,
-                'overwrite_height': overwrite_height,
-                'guidance_scale': guidance_scale,
-                'sharpness': sharpness,
-                'adm_scaler_positive': adm_scaler_positive,
-                'adm_scaler_negative': adm_scaler_negative,
-                'adm_scaler_end': adm_scaler_end,
-                'refiner_swap_method': refiner_swap_method,
-                'adaptive_cfg': adaptive_cfg,
-                'clip_skip': clip_skip,
-                'base_model': base_model,
-                'refiner_model': refiner_model,
-                'refiner_switch': refiner_switch,
-                'sampler_name': sampler_name,
-                'scheduler_name': scheduler_name,
-                'vae_name': vae_name,
-                'seed_random': seed_random,
-                'image_seed': image_seed,
-                'inpaint_engine': inpaint_engine,
-                'inpaint_engine_state': inpaint_engine_state,
-                'inpaint_mode': inpaint_mode,
-                'generate_button': generate_button,
-                'load_parameter_button': load_parameter_button,
-            }
-            for name, ctrl in named_controls.items():
-                control_names[id(ctrl)] = name
-            for i, ctrl in enumerate(enhance_inpaint_mode_ctrls):
-                control_names[id(ctrl)] = f'enhance_inpaint_mode_ctrls[{i}]'
-            for i, ctrl in enumerate(freeu_ctrls):
-                control_names[id(ctrl)] = f'freeu_ctrls[{i}] (freeu_{["enabled","b1","b2","s1","s2"][i]})'
-            for i in range(0, len(lora_ctrls), 3):
-                idx = i // 3
-                if i < len(lora_ctrls):
-                    control_names[id(lora_ctrls[i])] = f'lora_ctrls[{idx}].enabled'
-                if i + 1 < len(lora_ctrls):
-                    control_names[id(lora_ctrls[i + 1])] = f'lora_ctrls[{idx}].model'
-                if i + 2 < len(lora_ctrls):
-                    control_names[id(lora_ctrls[i + 2])] = f'lora_ctrls[{idx}].weight'
-
-            validation_passed, validation_msg = service.validate_schema_against_load_outputs(
-                load_outputs_list=load_data_outputs,
-                default_enhance_tabs=modules.config.default_enhance_tabs,
-                default_max_lora_number=modules.config.default_max_lora_number,
-                default_max_image_number=modules.config.default_max_image_number,
-                control_names=control_names,
-            )
-            print(validation_msg)
-            if not validation_passed:
-                import sys
-                print('\n⚠️⚠️⚠️  CRITICAL WARNING: Metadata schema does not match load_data_outputs!  ⚠️⚠️⚠️')
-                print('Metadata tab display, parameter comparison, and parameter loading will be MISALIGNED.')
-                print('Please fix modules.metadata_service.METADATA_SCHEMA to match the UI controls.\n')
-                if args_manager.args.preset or getattr(args_manager.args, 'always_gpu', False):
-                    pass
-        except Exception as schema_validation_error:
-            print(f'[Metadata Schema Validation] Skipped due to error: {schema_validation_error}')
-
         if not args_manager.args.disable_preset_selection:
             def preset_selection_change(preset, is_generating, inpaint_mode):
-                service = get_metadata_service()
                 preset_content = modules.config.try_get_preset_content(preset) if preset != 'initial' else {}
-                metadata = service.parse_from_preset(preset_content)
-                preset_prepared = metadata.to_simple_dict()
+                service = get_metadata_service()
+                preset_prepared = service.parse_from_preset(preset_content)
 
                 default_model = preset_prepared.get('base_model')
                 previous_default_models = preset_prepared.get('previous_default_models', [])
@@ -1189,17 +1054,14 @@ with shared.gradio_root:
                 lora_downloads = preset_prepared.get('lora_downloads', {})
                 vae_downloads = preset_prepared.get('vae_downloads', {})
 
-                base_model, checkpoint_downloads = launch.download_models(
+                preset_prepared['base_model'], preset_prepared['checkpoint_downloads'] = launch.download_models(
                     default_model, previous_default_models, checkpoint_downloads, embeddings_downloads, lora_downloads,
                     vae_downloads)
-                metadata.set_field('base_model', base_model, source=MetadataSource.PRESET)
-                metadata.set_field('checkpoint_downloads', checkpoint_downloads, source=MetadataSource.PRESET)
 
                 if 'prompt' in preset_prepared and preset_prepared.get('prompt') == '':
-                    if 'prompt' in metadata.fields:
-                        del metadata.fields['prompt']
+                    del preset_prepared['prompt']
 
-                return service.build_load_parameters(metadata, is_generating, inpaint_mode)
+                return service.load_parameters(json.dumps(preset_prepared), is_generating, inpaint_mode)
 
 
             def inpaint_engine_state_change(inpaint_engine_version, *args):
@@ -1316,19 +1178,24 @@ with shared.gradio_root:
 
         prompt.input(parse_meta, inputs=[prompt, state_is_generating], outputs=[prompt, generate_button, load_parameter_button], queue=False, show_progress=False)
 
-        load_parameter_button.click(modules.meta_parser.load_parameter_button_click, inputs=[prompt, state_is_generating, inpaint_mode], outputs=load_data_outputs, queue=False, show_progress=False)
-
-        def trigger_metadata_import(metadata_dict, state_is_generating):
+        def load_parameters_from_prompt(raw_metadata, state_is_generating, inpaint_mode):
             service = get_metadata_service()
-            if metadata_dict and isinstance(metadata_dict, dict):
-                metadata = service.parse(metadata_dict, MetadataScheme.FOOOCUS)
-            else:
-                metadata = modules.metadata_service.MetadataResult()
+            return service.load_parameters(raw_metadata, state_is_generating, inpaint_mode)
+
+        load_parameter_button.click(load_parameters_from_prompt, inputs=[prompt, state_is_generating, inpaint_mode], outputs=load_data_outputs, queue=False, show_progress=False)
+
+        def trigger_metadata_import(file, state_is_generating):
+            service = get_metadata_service()
+            parsed = service.parse_from_image(file)
+            if parsed.raw is None:
                 print('Could not find metadata in the image!')
+                parsed_parameters = {}
+            else:
+                parsed_parameters = parsed.to_dict()
 
-            return service.build_load_parameters(metadata, state_is_generating, inpaint_mode)
+            return service.load_parameters(parsed_parameters, state_is_generating, inpaint_mode)
 
-        metadata_import_button.click(trigger_metadata_import, inputs=[state_metadata_result, state_is_generating], outputs=load_data_outputs, queue=False, show_progress=True) \
+        metadata_import_button.click(trigger_metadata_import, inputs=[metadata_input_image, state_is_generating], outputs=load_data_outputs, queue=False, show_progress=True) \
             .then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)
 
         generate_button.click(lambda: (gr.update(visible=True, interactive=True), gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=False), [], True),
