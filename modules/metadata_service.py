@@ -24,7 +24,272 @@ class MetadataSource:
     EMBEDDED = 'embedded'
     PRIVATE_LOG = 'private_log'
     PRESET = 'preset'
+    CURRENT_UI = 'current_ui'
     UNKNOWN = 'unknown'
+
+
+@dataclass
+class FieldSchema:
+    key: str
+    label: str
+    ui_count: int = 1
+    parse_from_metadata: Any = None
+    parse_from_ui: Any = None
+    build_from_metadata: Any = None
+    fallback_key: Optional[str] = None
+
+
+METADATA_SCHEMA = None
+
+
+def get_metadata_schema():
+    global METADATA_SCHEMA
+    if METADATA_SCHEMA is not None:
+        return METADATA_SCHEMA
+
+    import gradio as gr
+    from modules.flags import inpaint_engine_versions, inpaint_options
+
+    def _str_getter(key, fallback=None, cast_type=None):
+        def _fn(metadata, results, default=None):
+            try:
+                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
+                assert isinstance(h, str) or (cast_type is not None and h is not None)
+                if cast_type is not None:
+                    h = cast_type(h)
+                results.append(h)
+                return h
+            except Exception:
+                results.append(gr.update())
+                return None
+        return _fn
+
+    def _list_getter(key, fallback=None):
+        def _fn(metadata, results, default=None):
+            try:
+                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
+                h = eval(h)
+                assert isinstance(h, list)
+                results.append(h)
+            except Exception:
+                results.append(gr.update())
+        return _fn
+
+    def _number_getter(key, fallback=None, cast_type=float):
+        def _fn(metadata, results, default=None):
+            try:
+                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
+                assert h is not None
+                h = cast_type(h)
+                results.append(h)
+            except Exception:
+                results.append(gr.update())
+        return _fn
+
+    def _image_number_getter(key, fallback=None):
+        def _fn(metadata, results, default=None):
+            try:
+                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
+                assert h is not None
+                h = int(h)
+                h = min(h, modules.config.default_max_image_number)
+                results.append(h)
+            except Exception:
+                results.append(1)
+        return _fn
+
+    def _steps_getter(key, fallback=None):
+        def _fn(metadata, results, default=None):
+            try:
+                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
+                assert h is not None
+                h = int(h)
+                performance_name = metadata.get('performance', '').replace(' ', '_').replace('-', '_').casefold()
+                performance_candidates = [k for k in Steps.keys() if k.casefold() == performance_name and Steps[k] == h]
+                if len(performance_candidates) == 0:
+                    results.append(h)
+                    return
+                results.append(-1)
+            except Exception:
+                results.append(-1)
+        return _fn
+
+    def _resolution_getter(key, fallback=None):
+        def _fn(metadata, results, default=None):
+            try:
+                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
+                width, height = eval(h)
+                formatted = modules.config.add_ratio(f'{width}*{height}')
+                if formatted in modules.config.available_aspect_ratios_labels:
+                    results.append(formatted)
+                    results.append(-1)
+                    results.append(-1)
+                else:
+                    results.append(gr.update())
+                    results.append(int(width))
+                    results.append(int(height))
+            except Exception:
+                results.append(gr.update())
+                results.append(gr.update())
+                results.append(gr.update())
+        return _fn
+
+    def _seed_getter(key, fallback=None):
+        def _fn(metadata, results, default=None):
+            try:
+                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
+                assert h is not None
+                h = int(h)
+                results.append(False)
+                results.append(h)
+            except Exception:
+                results.append(gr.update())
+                results.append(gr.update())
+        return _fn
+
+    def _inpaint_engine_getter(key, fallback=None):
+        def _fn(metadata, results, default=None, inpaint_mode=None):
+            try:
+                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
+                assert isinstance(h, str) and h in inpaint_engine_versions
+                if inpaint_mode != modules.flags.inpaint_option_detail:
+                    results.append(h)
+                else:
+                    results.append(gr.update())
+                results.append(h)
+                return h
+            except Exception:
+                results.append(gr.update())
+                results.append('empty')
+                return None
+        return _fn
+
+    def _inpaint_method_getter(key, fallback=None):
+        def _fn(metadata, results, default=None):
+            try:
+                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
+                assert isinstance(h, str) and h in inpaint_options
+                results.append(h)
+                for i in range(modules.config.default_enhance_tabs):
+                    results.append(h)
+                return h
+            except Exception:
+                results.append(gr.update())
+                for i in range(modules.config.default_enhance_tabs):
+                    results.append(gr.update())
+        return _fn
+
+    def _adm_guidance_getter(key, fallback=None):
+        def _fn(metadata, results, default=None):
+            try:
+                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
+                p, n, e = eval(h)
+                results.append(float(p))
+                results.append(float(n))
+                results.append(float(e))
+            except Exception:
+                results.append(gr.update())
+                results.append(gr.update())
+                results.append(gr.update())
+        return _fn
+
+    def _freeu_getter(key, fallback=None):
+        def _fn(metadata, results, default=None):
+            try:
+                h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
+                b1, b2, s1, s2 = eval(h)
+                results.append(True)
+                results.append(float(b1))
+                results.append(float(b2))
+                results.append(float(s1))
+                results.append(float(s2))
+            except Exception:
+                results.append(False)
+                results.append(gr.update())
+                results.append(gr.update())
+                results.append(gr.update())
+                results.append(gr.update())
+        return _fn
+
+    def _lora_getter(key, fallback=None):
+        def _fn(metadata, results, default=None, performance_filename=None):
+            try:
+                raw_value = metadata.get(key, metadata.get(fallback) if fallback else None)
+                split_data = raw_value.split(' : ')
+                enabled = True
+                name = split_data[0]
+                weight = split_data[1]
+
+                if len(split_data) == 3:
+                    enabled = split_data[0] == 'True'
+                    name = split_data[1]
+                    weight = split_data[2]
+
+                if name == performance_filename:
+                    raise Exception('performance LoRA')
+
+                weight = float(weight)
+                results.append(enabled)
+                results.append(name)
+                results.append(weight)
+            except Exception:
+                results.append(True)
+                results.append('None')
+                results.append(1)
+        return _fn
+
+    METADATA_SCHEMA = [
+        FieldSchema('image_number', 'Image Number', ui_count=1,
+                   build_from_metadata=_image_number_getter('image_number', 'Image Number')),
+        FieldSchema('prompt', 'Prompt', ui_count=1,
+                   build_from_metadata=_str_getter('prompt', 'Prompt')),
+        FieldSchema('negative_prompt', 'Negative Prompt', ui_count=1,
+                   build_from_metadata=_str_getter('negative_prompt', 'Negative Prompt')),
+        FieldSchema('styles', 'Styles', ui_count=1,
+                   build_from_metadata=_list_getter('styles', 'Styles')),
+        FieldSchema('performance', 'Performance', ui_count=1,
+                   build_from_metadata=_str_getter('performance', 'Performance')),
+        FieldSchema('steps', 'Steps', ui_count=1,
+                   build_from_metadata=_steps_getter('steps', 'Steps')),
+        FieldSchema('overwrite_switch', 'Overwrite Switch', ui_count=1,
+                   build_from_metadata=_number_getter('overwrite_switch', 'Overwrite Switch')),
+        FieldSchema('resolution', 'Resolution', ui_count=3,
+                   build_from_metadata=_resolution_getter('resolution', 'Resolution')),
+        FieldSchema('guidance_scale', 'Guidance Scale', ui_count=1,
+                   build_from_metadata=_number_getter('guidance_scale', 'Guidance Scale')),
+        FieldSchema('sharpness', 'Sharpness', ui_count=1,
+                   build_from_metadata=_number_getter('sharpness', 'Sharpness')),
+        FieldSchema('adm_guidance', 'ADM Guidance', ui_count=3,
+                   build_from_metadata=_adm_guidance_getter('adm_guidance', 'ADM Guidance')),
+        FieldSchema('refiner_swap_method', 'Refiner Swap Method', ui_count=1,
+                   build_from_metadata=_str_getter('refiner_swap_method', 'Refiner Swap Method')),
+        FieldSchema('adaptive_cfg', 'CFG Mimicking from TSNR', ui_count=1,
+                   build_from_metadata=_number_getter('adaptive_cfg', 'CFG Mimicking from TSNR')),
+        FieldSchema('clip_skip', 'CLIP Skip', ui_count=1,
+                   build_from_metadata=_number_getter('clip_skip', 'CLIP Skip', cast_type=int)),
+        FieldSchema('base_model', 'Base Model', ui_count=1,
+                   build_from_metadata=_str_getter('base_model', 'Base Model')),
+        FieldSchema('refiner_model', 'Refiner Model', ui_count=1,
+                   build_from_metadata=_str_getter('refiner_model', 'Refiner Model')),
+        FieldSchema('refiner_switch', 'Refiner Switch', ui_count=1,
+                   build_from_metadata=_number_getter('refiner_switch', 'Refiner Switch')),
+        FieldSchema('sampler', 'Sampler', ui_count=1,
+                   build_from_metadata=_str_getter('sampler', 'Sampler')),
+        FieldSchema('scheduler', 'Scheduler', ui_count=1,
+                   build_from_metadata=_str_getter('scheduler', 'Scheduler')),
+        FieldSchema('vae', 'VAE', ui_count=1,
+                   build_from_metadata=_str_getter('vae', 'VAE')),
+        FieldSchema('seed_random', 'Seed Random', ui_count=2,
+                   build_from_metadata=_seed_getter('seed', 'Seed')),
+        FieldSchema('inpaint_engine_version', 'Inpaint Engine Version', ui_count=2,
+                   build_from_metadata=_inpaint_engine_getter('inpaint_engine_version', 'Inpaint Engine Version')),
+        FieldSchema('inpaint_method', 'Inpaint Mode', ui_count=1 + modules.config.default_enhance_tabs,
+                   build_from_metadata=_inpaint_method_getter('inpaint_method', 'Inpaint Mode')),
+        FieldSchema('freeu', 'FreeU', ui_count=5,
+                   build_from_metadata=_freeu_getter('freeu', 'FreeU')),
+    ]
+
+    return METADATA_SCHEMA
 
 
 @dataclass
@@ -798,32 +1063,23 @@ class MetadataService:
         return exif
 
     def build_load_parameters(self, metadata: MetadataResult, is_generating: bool, inpaint_mode: str) -> list:
+        import gradio as gr
+        schema = get_metadata_schema()
         loaded_parameter_dict = metadata.to_simple_dict()
         results = [len(loaded_parameter_dict) > 0]
 
-        self._get_image_number('image_number', 'Image Number', metadata, results)
-        self._get_str('prompt', 'Prompt', metadata, results)
-        self._get_str('negative_prompt', 'Negative Prompt', metadata, results)
-        self._get_list('styles', 'Styles', metadata, results)
-        performance = self._get_str('performance', 'Performance', metadata, results)
-        self._get_steps('steps', 'Steps', metadata, results)
-        self._get_number('overwrite_switch', 'Overwrite Switch', metadata, results)
-        self._get_resolution('resolution', 'Resolution', metadata, results)
-        self._get_number('guidance_scale', 'Guidance Scale', metadata, results)
-        self._get_number('sharpness', 'Sharpness', metadata, results)
-        self._get_adm_guidance('adm_guidance', 'ADM Guidance', metadata, results)
-        self._get_str('refiner_swap_method', 'Refiner Swap Method', metadata, results)
-        self._get_number('adaptive_cfg', 'CFG Mimicking from TSNR', metadata, results)
-        self._get_number('clip_skip', 'CLIP Skip', metadata, results, cast_type=int)
-        self._get_str('base_model', 'Base Model', metadata, results)
-        self._get_str('refiner_model', 'Refiner Model', metadata, results)
-        self._get_number('refiner_switch', 'Refiner Switch', metadata, results)
-        self._get_str('sampler', 'Sampler', metadata, results)
-        self._get_str('scheduler', 'Scheduler', metadata, results)
-        self._get_str('vae', 'VAE', metadata, results)
-        self._get_seed('seed', 'Seed', metadata, results)
-        self._get_inpaint_engine_version('inpaint_engine_version', 'Inpaint Engine Version', metadata, results, inpaint_mode)
-        self._get_inpaint_method('inpaint_method', 'Inpaint Mode', metadata, results)
+        performance = None
+        for field_schema in schema:
+            try:
+                if field_schema.key == 'inpaint_engine_version':
+                    field_schema.build_from_metadata(metadata, results, inpaint_mode=inpaint_mode)
+                elif field_schema.key == 'performance':
+                    performance = field_schema.build_from_metadata(metadata, results)
+                else:
+                    field_schema.build_from_metadata(metadata, results)
+            except Exception as e:
+                for _ in range(field_schema.ui_count):
+                    results.append(gr.update())
 
         if is_generating:
             results.append(gr.update())
@@ -832,317 +1088,155 @@ class MetadataService:
 
         results.append(gr.update(visible=False))
 
-        self._get_freeu('freeu', 'FreeU', metadata, results)
-
         performance_filename = None
         if performance is not None and performance in Performance.values():
             perf = Performance(performance)
             performance_filename = perf.lora_filename()
 
+        def _lora_getter(key, fallback, metadata, results, performance_filename):
+            try:
+                raw_value = metadata.get(key, metadata.get(fallback) if fallback else None)
+                split_data = raw_value.split(' : ')
+                enabled = True
+                name = split_data[0]
+                weight = split_data[1]
+
+                if len(split_data) == 3:
+                    enabled = split_data[0] == 'True'
+                    name = split_data[1]
+                    weight = split_data[2]
+
+                if name == performance_filename:
+                    raise Exception('performance LoRA')
+
+                weight = float(weight)
+                results.append(enabled)
+                results.append(name)
+                results.append(weight)
+            except Exception:
+                results.append(True)
+                results.append('None')
+                results.append(1)
+
         for i in range(modules.config.default_max_lora_number):
-            self._get_lora(f'lora_combined_{i + 1}', f'LoRA {i + 1}', metadata, results, performance_filename)
+            _lora_getter(f'lora_combined_{i + 1}', f'LoRA {i + 1}', metadata, results, performance_filename)
 
         return results
 
-    @staticmethod
-    def _get_str(key: str, fallback: str | None, metadata: MetadataResult, results: list, default=None) -> str | None:
-        try:
-            h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-            assert isinstance(h, str)
-            results.append(h)
-            return h
-        except Exception:
-            import gradio as gr
-            results.append(gr.update())
-            return None
-
-    @staticmethod
-    def _get_list(key: str, fallback: str | None, metadata: MetadataResult, results: list, default=None):
-        try:
-            h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-            h = eval(h)
-            assert isinstance(h, list)
-            results.append(h)
-        except Exception:
-            import gradio as gr
-            results.append(gr.update())
-
-    @staticmethod
-    def _get_number(key: str, fallback: str | None, metadata: MetadataResult, results: list, default=None, cast_type=float):
-        try:
-            h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-            assert h is not None
-            h = cast_type(h)
-            results.append(h)
-        except Exception:
-            import gradio as gr
-            results.append(gr.update())
-
-    @staticmethod
-    def _get_image_number(key: str, fallback: str | None, metadata: MetadataResult, results: list, default=None):
-        try:
-            h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-            assert h is not None
-            h = int(h)
-            h = min(h, modules.config.default_max_image_number)
-            results.append(h)
-        except Exception:
-            results.append(1)
-
-    @staticmethod
-    def _get_steps(key: str, fallback: str | None, metadata: MetadataResult, results: list, default=None):
-        try:
-            h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-            assert h is not None
-            h = int(h)
-            performance_name = metadata.get('performance', '').replace(' ', '_').replace('-', '_').casefold()
-            performance_candidates = [k for k in Steps.keys() if k.casefold() == performance_name and Steps[k] == h]
-            if len(performance_candidates) == 0:
-                results.append(h)
-                return
-            results.append(-1)
-        except Exception:
-            results.append(-1)
-
-    @staticmethod
-    def _get_resolution(key: str, fallback: str | None, metadata: MetadataResult, results: list, default=None):
-        try:
-            import gradio as gr
-            h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-            width, height = eval(h)
-            formatted = modules.config.add_ratio(f'{width}*{height}')
-            if formatted in modules.config.available_aspect_ratios_labels:
-                results.append(formatted)
-                results.append(-1)
-                results.append(-1)
-            else:
-                results.append(gr.update())
-                results.append(int(width))
-                results.append(int(height))
-        except Exception:
-            import gradio as gr
-            results.append(gr.update())
-            results.append(gr.update())
-            results.append(gr.update())
-
-    @staticmethod
-    def _get_seed(key: str, fallback: str | None, metadata: MetadataResult, results: list, default=None):
-        try:
-            import gradio as gr
-            h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-            assert h is not None
-            h = int(h)
-            results.append(False)
-            results.append(h)
-        except Exception:
-            import gradio as gr
-            results.append(gr.update())
-            results.append(gr.update())
-
-    @staticmethod
-    def _get_inpaint_engine_version(key: str, fallback: str | None, metadata: MetadataResult, results: list, inpaint_mode: str, default=None) -> str | None:
-        try:
-            import gradio as gr
-            import modules.flags
-            h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-            assert isinstance(h, str) and h in modules.flags.inpaint_engine_versions
-            if inpaint_mode != modules.flags.inpaint_option_detail:
-                results.append(h)
-            else:
-                results.append(gr.update())
-            results.append(h)
-            return h
-        except Exception:
-            import gradio as gr
-            results.append(gr.update())
-            results.append('empty')
-            return None
-
-    @staticmethod
-    def _get_inpaint_method(key: str, fallback: str | None, metadata: MetadataResult, results: list, default=None) -> str | None:
-        try:
-            import modules.flags
-            h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-            assert isinstance(h, str) and h in modules.flags.inpaint_options
-            results.append(h)
-            for i in range(modules.config.default_enhance_tabs):
-                results.append(h)
-            return h
-        except Exception:
-            import gradio as gr
-            results.append(gr.update())
-            for i in range(modules.config.default_enhance_tabs):
-                results.append(gr.update())
-
-    @staticmethod
-    def _get_adm_guidance(key: str, fallback: str | None, metadata: MetadataResult, results: list, default=None):
-        try:
-            h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-            p, n, e = eval(h)
-            results.append(float(p))
-            results.append(float(n))
-            results.append(float(e))
-        except Exception:
-            import gradio as gr
-            results.append(gr.update())
-            results.append(gr.update())
-            results.append(gr.update())
-
-    @staticmethod
-    def _get_freeu(key: str, fallback: str | None, metadata: MetadataResult, results: list, default=None):
-        try:
-            h = metadata.get(key, metadata.get(fallback, default) if fallback else default)
-            b1, b2, s1, s2 = eval(h)
-            results.append(True)
-            results.append(float(b1))
-            results.append(float(b2))
-            results.append(float(s1))
-            results.append(float(s2))
-        except Exception:
-            import gradio as gr
-            results.append(False)
-            results.append(gr.update())
-            results.append(gr.update())
-            results.append(gr.update())
-            results.append(gr.update())
-
-    @staticmethod
-    def _get_lora(key: str, fallback: str | None, metadata: MetadataResult, results: list, performance_filename: str | None):
-        try:
-            raw_value = metadata.get(key, metadata.get(fallback) if fallback else None)
-            split_data = raw_value.split(' : ')
-            enabled = True
-            name = split_data[0]
-            weight = split_data[1]
-
-            if len(split_data) == 3:
-                enabled = split_data[0] == 'True'
-                name = split_data[1]
-                weight = split_data[2]
-
-            if name == performance_filename:
-                raise Exception('performance LoRA')
-
-            weight = float(weight)
-            results.append(enabled)
-            results.append(name)
-            results.append(weight)
-        except Exception:
-            results.append(True)
-            results.append('None')
-            results.append(1)
-
     def build_metadata_from_ui_params(self, ui_params: list) -> MetadataResult:
-        import gradio as gr
-        result = MetadataResult(source='current_ui', scheme=MetadataScheme.FOOOCUS)
+        schema = get_metadata_schema()
+        result = MetadataResult(source=MetadataSource.CURRENT_UI, scheme=MetadataScheme.FOOOCUS)
 
         try:
             idx = 0
-            result.set_field('__has_data__', str(len(ui_params) > idx), source='current_ui')
+            has_data = ui_params[idx] if idx < len(ui_params) else False
             idx += 1
-            result.set_field('image_number', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            result.set_field('prompt', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            result.set_field('negative_prompt', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            result.set_field('styles', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            result.set_field('performance', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
-            idx += 1
+            result.set_field('__has_data__', str(bool(has_data)), source=MetadataSource.CURRENT_UI)
 
-            steps_val = ui_params[idx]
-            if isinstance(steps_val, int) and steps_val == -1:
-                if result.has('performance') and result.get('performance') in Steps:
-                    steps_val = Steps[result.get('performance')]
-            result.set_field('steps', str(steps_val), source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-
-            result.set_field('overwrite_switch', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-
-            aspect_ratio = ui_params[idx]
-            idx += 1
-            overwrite_width = ui_params[idx]
-            idx += 1
-            overwrite_height = ui_params[idx]
-            idx += 1
-
-            if isinstance(overwrite_width, int) and overwrite_width > 0 and isinstance(overwrite_height, int) and overwrite_height > 0:
-                result.set_field('resolution', str((overwrite_width, overwrite_height)), source='current_ui',
-                                raw_value=(overwrite_width, overwrite_height))
-            else:
+            for field_schema in schema:
                 try:
-                    if '×' in aspect_ratio:
-                        ratio_str = aspect_ratio.split('×')[0]
-                        width, height = ratio_str.split('*')
-                        result.set_field('resolution', str((int(width), int(height))), source='current_ui',
-                                        raw_value=aspect_ratio)
-                except Exception:
-                    pass
+                    if idx + field_schema.ui_count > len(ui_params):
+                        break
 
-            result.set_field('guidance_scale', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            result.set_field('sharpness', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            result.set_field('adm_guidance', str((ui_params[idx], ui_params[idx + 1], ui_params[idx + 2])),
-                            source='current_ui',
-                            raw_value=(ui_params[idx], ui_params[idx + 1], ui_params[idx + 2]))
-            idx += 3
-            result.set_field('refiner_swap_method', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            result.set_field('adaptive_cfg', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            result.set_field('clip_skip', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            result.set_field('base_model', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            result.set_field('refiner_model', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            result.set_field('refiner_switch', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            result.set_field('sampler', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            result.set_field('scheduler', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            result.set_field('vae', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            result.set_field('seed_random', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            result.set_field('seed', str(ui_params[idx]), source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            result.set_field('inpaint_engine_version', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            idx += 1
-            result.set_field('inpaint_method', ui_params[idx], source='current_ui', raw_value=ui_params[idx])
-            idx += 1
-            for _ in range(modules.config.default_enhance_tabs):
+                    values = ui_params[idx:idx + field_schema.ui_count]
+                    idx += field_schema.ui_count
+
+                    self._set_field_from_ui(result, field_schema, values)
+                except Exception as e:
+                    result.set_field(field_schema.key, None,
+                                     source=MetadataSource.CURRENT_UI,
+                                     valid=False, error=str(e))
+
+            if idx + 2 <= len(ui_params):
+                idx += 2
+
+            if idx + 5 <= len(ui_params):
+                freeu_enabled = ui_params[idx]
                 idx += 1
-            idx += 1
-            idx += 1
-
-            freeu_enabled = ui_params[idx]
-            idx += 1
-            if freeu_enabled:
-                b1, b2, s1, s2 = ui_params[idx], ui_params[idx + 1], ui_params[idx + 2], ui_params[idx + 3]
-                result.set_field('freeu', str((b1, b2, s1, s2)), source='current_ui',
-                                raw_value=(freeu_enabled, b1, b2, s1, s2))
-            idx += 4
+                if freeu_enabled:
+                    b1, b2, s1, s2 = ui_params[idx], ui_params[idx + 1], ui_params[idx + 2], ui_params[idx + 3]
+                    result.set_field('freeu', str((b1, b2, s1, s2)),
+                                     source=MetadataSource.CURRENT_UI,
+                                     raw_value=(freeu_enabled, b1, b2, s1, s2))
+                idx += 4
 
             for i in range(modules.config.default_max_lora_number):
+                if idx + 3 > len(ui_params):
+                    break
                 enabled = ui_params[idx]
                 name = ui_params[idx + 1]
                 weight = ui_params[idx + 2]
                 idx += 3
                 if name != 'None':
                     result.set_field(f'lora_combined_{i + 1}', f'{enabled} : {name} : {weight}',
-                                    source='current_ui',
-                                    raw_value=(enabled, name, weight))
+                                     source=MetadataSource.CURRENT_UI,
+                                     raw_value=(enabled, name, weight))
 
         except Exception as e:
             result.set_field('_parse_error', str(e), valid=False, error=str(e))
 
         return result
+
+    @staticmethod
+    def _set_field_from_ui(result: MetadataResult, field_schema: FieldSchema, values: list):
+        key = field_schema.key
+        source = MetadataSource.CURRENT_UI
+
+        if key == 'image_number':
+            result.set_field(key, str(values[0]), source=source, raw_value=values[0])
+
+        elif key == 'prompt' or key == 'negative_prompt' or key == 'performance' or \
+             key == 'refiner_swap_method' or key == 'base_model' or key == 'refiner_model' or \
+             key == 'sampler' or key == 'scheduler' or key == 'vae' or key == 'inpaint_method' or \
+             key == 'inpaint_engine_version':
+            v = values[0]
+            if isinstance(v, str) and v.strip() != '':
+                result.set_field(key, v, source=source, raw_value=v)
+
+        elif key == 'styles':
+            result.set_field(key, str(values[0]), source=source, raw_value=values[0])
+
+        elif key == 'steps':
+            steps_val = values[0]
+            if isinstance(steps_val, int) and steps_val == -1:
+                if result.has('performance') and result.get('performance') in Steps:
+                    steps_val = Steps[result.get('performance')]
+            result.set_field(key, str(steps_val), source=source, raw_value=values[0])
+
+        elif key == 'overwrite_switch' or key == 'guidance_scale' or key == 'sharpness' or \
+             key == 'adaptive_cfg' or key == 'clip_skip' or key == 'refiner_switch':
+            result.set_field(key, str(values[0]), source=source, raw_value=values[0])
+
+        elif key == 'resolution':
+            aspect_ratio, overwrite_width, overwrite_height = values
+            if isinstance(overwrite_width, int) and overwrite_width > 0 and \
+               isinstance(overwrite_height, int) and overwrite_height > 0:
+                result.set_field(key, str((overwrite_width, overwrite_height)),
+                                 source=source, raw_value=(overwrite_width, overwrite_height))
+            else:
+                try:
+                    if '×' in str(aspect_ratio):
+                        ratio_str = str(aspect_ratio).split('×')[0]
+                        width, height = ratio_str.split('*')
+                        result.set_field(key, str((int(width), int(height))),
+                                         source=source, raw_value=aspect_ratio)
+                except Exception:
+                    pass
+
+        elif key == 'adm_guidance':
+            result.set_field(key, str((values[0], values[1], values[2])),
+                             source=source, raw_value=tuple(values))
+
+        elif key == 'seed_random':
+            result.set_field('seed_random', str(values[0]), source=source, raw_value=values[0])
+            result.set_field('seed', str(values[1]), source=source, raw_value=values[1])
+
+        elif key == 'freeu':
+            freeu_enabled = values[0]
+            if freeu_enabled:
+                b1, b2, s1, s2 = values[1], values[2], values[3], values[4]
+                result.set_field('freeu', str((b1, b2, s1, s2)),
+                                 source=source, raw_value=tuple(values))
 
     def build_load_parameters_from_diff(self, diff: MetadataDiff, is_generating: bool, inpaint_mode: str) -> list:
         merged_metadata = MetadataResult(source='diff_merge')
