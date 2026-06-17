@@ -85,6 +85,8 @@ class DiffItem:
     left_value: Any = None
     right_value: Any = None
     same: bool = False
+    left_source: str = MetadataSource.UNKNOWN
+    right_source: str = MetadataSource.UNKNOWN
 
 
 @dataclass
@@ -99,7 +101,9 @@ class MetadataDiff:
                 "label": item.label,
                 "left": item.left_value,
                 "right": item.right_value,
-                "same": item.same
+                "same": item.same,
+                "left_source": item.left_source,
+                "right_source": item.right_source,
             }
             for item in self.items
         ]
@@ -751,7 +755,9 @@ class MetadataService:
                 label=label,
                 left_value=left_val,
                 right_value=right_val,
-                same=same
+                same=same,
+                left_source=left_field.source if left_field else MetadataSource.UNKNOWN,
+                right_source=right_field.source if right_field else MetadataSource.UNKNOWN,
             )
             result.items.append(item)
 
@@ -763,7 +769,7 @@ class MetadataService:
         return result
 
     def parse_from_image_with_log(self, image_path: str) -> ParsedMetadata:
-        image_path_obj = Path(image_path)
+        image_path_obj = Path(image_path).resolve()
         try:
             with Image.open(image_path_obj) as img:
                 parsed = self.parse_from_image(img)
@@ -771,10 +777,13 @@ class MetadataService:
             parsed = ParsedMetadata(source=MetadataSource.UNKNOWN, scheme=None, raw=None)
 
         log_path = image_path_obj.parent / "log.html"
-        image_basename = image_path_obj.name
 
         if log_path.exists():
-            log_parsed = self.parse_from_log_html(str(log_path), image_basename)
+            log_parsed = self.parse_from_log_html(
+                str(log_path),
+                image_filename=image_path_obj.name,
+                image_absolute_dir=str(image_path_obj.parent.resolve())
+            )
             if log_parsed is not None:
                 parsed = self.merge_metadata(parsed, log_parsed)
 
@@ -784,43 +793,85 @@ class MetadataService:
         parsed = self.parse_from_image(pil_image)
 
         if optional_filepath:
-            image_path_obj = Path(optional_filepath)
+            image_path_obj = Path(optional_filepath).resolve()
             log_path = image_path_obj.parent / "log.html"
-            image_basename = image_path_obj.name
             if log_path.exists():
-                log_parsed = self.parse_from_log_html(str(log_path), image_basename)
+                log_parsed = self.parse_from_log_html(
+                    str(log_path),
+                    image_filename=image_path_obj.name,
+                    image_absolute_dir=str(image_path_obj.parent.resolve())
+                )
                 if log_parsed is not None:
                     parsed = self.merge_metadata(parsed, log_parsed)
 
         return parsed
 
-    def parse_from_log_html(self, log_html_path: str, image_filename: str | None = None) -> Optional[ParsedMetadata]:
-        path = Path(log_html_path)
-        if not path.exists():
+    def parse_from_log_html(self, log_html_path: str, image_filename: str | None = None,
+                            image_absolute_dir: str | None = None) -> Optional[ParsedMetadata]:
+        log_path = Path(log_html_path).resolve()
+        if not log_path.exists():
             return None
 
         try:
-            html_content = path.read_text(encoding='utf-8')
+            html_content = log_path.read_text(encoding='utf-8')
         except Exception:
             return None
 
-        div_id = Path(image_filename).name.replace('.', '_') if image_filename else None
+        log_dir = log_path.parent.resolve()
 
         all_entries = self._extract_all_log_entries(html_content)
+        if len(all_entries) == 0:
+            return None
 
         selected_raw = None
 
-        if div_id is not None and div_id in all_entries:
-            selected_raw = all_entries[div_id]
-        elif len(all_entries) > 0:
+        if image_filename is not None:
+            expected_id = Path(image_filename).name.replace('.', '_')
+            expected_basename = Path(image_filename).name
+
+            candidates = []
+
             for entry_id, entry_data in all_entries.items():
-                if image_filename is None:
-                    selected_raw = entry_data
-                    break
-                src = entry_data.get("__image_src__", "")
-                if src and Path(src).name == image_filename:
-                    selected_raw = entry_data
-                    break
+                matches = False
+
+                if entry_id == expected_id:
+                    matches = True
+
+                entry_src = entry_data.get("__image_src__", "")
+                if entry_src:
+                    entry_basename = Path(entry_src).name
+                    if entry_basename == expected_basename:
+                        if not matches:
+                            matches = True
+                        try:
+                            entry_path = (log_dir / entry_src).resolve()
+                            if image_absolute_dir:
+                                expected_path = (Path(image_absolute_dir) / expected_basename).resolve()
+                                if str(entry_path) != str(expected_path):
+                                    matches = False
+                        except Exception:
+                            pass
+                    else:
+                        if entry_id == expected_id:
+                            matches = False
+
+                if matches:
+                    candidates.append(entry_data)
+
+            if len(candidates) == 1:
+                selected_raw = candidates[0]
+            elif len(candidates) > 1:
+                for entry_data in candidates:
+                    entry_src = entry_data.get("__image_src__", "")
+                    if entry_src and Path(entry_src).name == expected_basename:
+                        selected_raw = entry_data
+                        break
+                if selected_raw is None:
+                    selected_raw = candidates[0]
+        else:
+            for entry_id, entry_data in all_entries.items():
+                selected_raw = entry_data
+                break
 
         if selected_raw is None:
             return None
@@ -893,6 +944,16 @@ class MetadataService:
 
         return result
 
+    @staticmethod
+    def _is_empty_value(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str) and value == "":
+            return True
+        if isinstance(value, (list, tuple)) and len(value) == 0:
+            return True
+        return False
+
     def merge_metadata(self, embedded: ParsedMetadata, private_log: ParsedMetadata) -> ParsedMetadata:
         merged = ParsedMetadata(
             source=f"{embedded.source}+{private_log.source}" if embedded.source != private_log.source else embedded.source,
@@ -909,29 +970,42 @@ class MetadataService:
             private_field = private_log.get_field(key)
             label = self._field_definitions.get(key, {}).get("label", key)
 
-            if embedded_field is not None and embedded_field.valid and embedded_field.value is not None:
-                if embedded_field.value != self._field_definitions.get(key, {}).get("default"):
-                    result_field = FieldResult(
-                        key=key,
-                        label=label,
-                        value=embedded_field.value,
-                        valid=True,
-                        source=embedded_field.source,
-                        raw_value=embedded_field.raw_value
-                    )
-                    merged.fields[key] = result_field
-                    continue
+            use_embedded = False
+            use_private = False
 
-            if private_field is not None and private_field.valid:
-                result_field = FieldResult(
+            if embedded_field is not None:
+                if embedded_field.valid and not self._is_empty_value(embedded_field.value):
+                    use_embedded = True
+                elif private_field is not None and private_field.valid:
+                    use_private = True
+                else:
+                    use_embedded = True
+            else:
+                if private_field is not None and private_field.valid:
+                    use_private = True
+
+            if use_embedded and embedded_field is not None:
+                merged.fields[key] = FieldResult(
+                    key=key,
+                    label=label,
+                    value=embedded_field.value,
+                    valid=embedded_field.valid,
+                    error=embedded_field.error,
+                    source=embedded_field.source,
+                    raw_value=embedded_field.raw_value
+                )
+                continue
+
+            if use_private and private_field is not None:
+                merged.fields[key] = FieldResult(
                     key=key,
                     label=label,
                     value=private_field.value,
-                    valid=True,
+                    valid=private_field.valid,
+                    error=private_field.error,
                     source=private_field.source,
                     raw_value=private_field.raw_value
                 )
-                merged.fields[key] = result_field
                 continue
 
             if embedded_field is not None:

@@ -475,7 +475,17 @@ with shared.gradio_root:
                             results = {}
                             if parsed.raw is not None:
                                 results['parameters'] = parsed.raw
-                                results['parsed'] = parsed.to_display_dict()
+
+                                parsed_with_source = {}
+                                for key, field in parsed.fields.items():
+                                    entry = {'value': field.value}
+                                    if field.source != MetadataSource.UNKNOWN:
+                                        entry['source'] = field.source
+                                    if not field.valid:
+                                        entry['error'] = field.error
+                                    parsed_with_source[field.label] = entry
+                                results['parsed'] = parsed_with_source
+
                                 results['errors'] = parsed.errors() if parsed.has_errors() else {}
 
                             if parsed.scheme is not None:
@@ -484,7 +494,8 @@ with shared.gradio_root:
                             results['source'] = parsed.source
 
                             if MetadataSource.PRIVATE_LOG in str(parsed.source):
-                                results['note'] = 'Embedded metadata merged with private log fields (log.html).'
+                                results['note'] = ('Fields were merged: private_log entries filled only when embedded metadata '
+                                                   'is missing, empty, or failed to parse (default values are preserved).')
 
                             return results
 
@@ -520,11 +531,27 @@ with shared.gradio_root:
 
                             diff = service.diff(base_parsed, target_parsed)
 
+                            source_color_map = {
+                                MetadataSource.EMBEDDED: '#3b82f6',
+                                MetadataSource.PRIVATE_LOG: '#f59e0b',
+                                f'{MetadataSource.EMBEDDED}+{MetadataSource.PRIVATE_LOG}': '#8b5cf6',
+                                f'{MetadataSource.PRIVATE_LOG}+{MetadataSource.EMBEDDED}': '#8b5cf6',
+                                MetadataSource.PRESET: '#10b981',
+                            }
+                            def source_badge(src):
+                                color = source_color_map.get(src, '#666')
+                                display = str(src).replace('_', ' ')
+                                return f'<span style="font-size:10px;color:white;background:{color};padding:1px 6px;border-radius:3px;">{display}</span>'
+
                             summary_lines = [
                                 f'<h3 style="color:#444;">Difference Summary</h3>',
                                 f'<p>Total compared fields: <b>{diff.same_count + diff.diff_count}</b> | '
                                 f'Same: <b style="color:green;">{diff.same_count}</b> | '
                                 f'Different: <b style="color:red;">{diff.diff_count}</b></p>',
+                                f'<p style="font-size:12px;color:#666;">'
+                                f'Legend: {source_badge(MetadataSource.EMBEDDED)} = Embedded in image | '
+                                f'{source_badge(MetadataSource.PRIVATE_LOG)} = Private log (log.html) | '
+                                f'{source_badge(f"{MetadataSource.EMBEDDED}+{MetadataSource.PRIVATE_LOG}")} = Merged</p>',
                                 '<hr/>'
                             ]
 
@@ -534,11 +561,13 @@ with shared.gradio_root:
                                 status = '<span style="color:green;">SAME</span>' if item.same else '<span style="color:red;">DIFF</span>'
                                 left_val = str(item.left_value).replace('<', '&lt;').replace('>', '&gt;')
                                 right_val = str(item.right_value).replace('<', '&lt;').replace('>', '&gt;')
+                                left_src = source_badge(item.left_source)
+                                right_src = source_badge(item.right_source)
                                 table_rows += (
                                     f'<tr style="background:{bg};">'
                                     f'<td><b>{item.label}</b><br/><small style="color:#888;">{item.key}</small></td>'
-                                    f'<td><small>{left_val[:120]}</small></td>'
-                                    f'<td><small>{right_val[:120]}</small></td>'
+                                    f'<td><small>{left_val[:80]}</small><br/>{left_src}</td>'
+                                    f'<td><small>{right_val[:80]}</small><br/>{right_src}</td>'
                                     f'<td>{status}</td>'
                                     f'</tr>'
                                 )
@@ -547,10 +576,10 @@ with shared.gradio_root:
                                 summary_lines.append(
                                     '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
                                     '<thead><tr style="background:#ddd;">'
-                                    '<th style="width:25%;">Field</th>'
-                                    '<th style="width:30%;">Base</th>'
-                                    '<th style="width:30%;">Target</th>'
-                                    '<th style="width:15%;">Status</th>'
+                                    '<th style="width:22%;">Field</th>'
+                                    '<th style="width:29%;">Base (with source)</th>'
+                                    '<th style="width:29%;">Target (with source)</th>'
+                                    '<th style="width:20%;">Status</th>'
                                     '</tr></thead>'
                                     f'<tbody>{table_rows}</tbody></table>'
                                 )
@@ -570,7 +599,9 @@ with shared.gradio_root:
                                         'field': item.label,
                                         'key': item.key,
                                         'base_value': item.left_value,
+                                        'base_source': item.left_source,
                                         'target_value': item.right_value,
+                                        'target_source': item.right_source,
                                         'same': item.same
                                     }
                                     for item in diff.items
