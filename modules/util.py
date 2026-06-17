@@ -544,9 +544,9 @@ def parse_prompt_matrix_config(matrix_config_text: str) -> list:
                     name = str(item['name']).strip()
                     values = item['values']
                     if isinstance(values, str):
-                        values = [v.strip() for v in values.split(',') if v.strip()]
+                        values = [v.strip() for v in values.split(',')]
                     elif isinstance(values, list):
-                        values = [str(v).strip() for v in values if str(v).strip() != '']
+                        values = [str(v).strip() for v in values]
                     if name and len(values) > 0:
                         entry = {'name': name, 'values': values}
                         if item.get('is_param_override') or name.startswith('@'):
@@ -564,7 +564,7 @@ def parse_prompt_matrix_config(matrix_config_text: str) -> list:
         if ':' in line:
             name_part, values_part = line.split(':', 1)
             name = name_part.strip()
-            values = [v.strip() for v in values_part.split(',') if v.strip()]
+            values = [v.strip() for v in values_part.split(',')]
             if name and len(values) > 0:
                 entry = {'name': name, 'values': values}
                 if name.startswith('@'):
@@ -687,27 +687,32 @@ def get_matrix_combination_count(matrix_config: list) -> int:
 
 
 def validate_matrix_config(matrix_config: list, max_combinations: int = 512,
-                           max_variables: int = 20, image_number: int = 1) -> dict:
+                           max_variables: int = 20, image_number: int = 1,
+                           max_tasks: int = None) -> dict:
     result = {'valid': True, 'errors': [], 'warnings': [],
               'total_combinations': 0, 'total_tasks': 0}
 
     if not matrix_config:
         result['total_combinations'] = 1
-        result['total_tasks'] = image_number
+        result['total_tasks'] = max(1, image_number)
         return result
 
+    image_number = max(1, image_number)
     result['total_combinations'] = get_matrix_combination_count(matrix_config)
     result['total_tasks'] = result['total_combinations'] * image_number
+
+    task_limit = max_tasks if max_tasks is not None else max_combinations
 
     if len(matrix_config) > max_variables:
         result['errors'].append(
             f'Too many variables: {len(matrix_config)} (max {max_variables})')
         result['valid'] = False
 
-    if result['total_combinations'] > max_combinations:
+    if result['total_tasks'] > task_limit:
         result['errors'].append(
-            f'Too many matrix combinations: {result["total_combinations"]} '
-            f'(max {max_combinations}). Reduce variables or values.')
+            f'Too many total tasks: {result["total_tasks"]} '
+            f'= {result["total_combinations"]} matrix combinations × {image_number} per image '
+            f'(max {task_limit}). Reduce variables, values, or image_number.')
         result['valid'] = False
 
     for var in matrix_config:

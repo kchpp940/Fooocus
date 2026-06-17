@@ -292,13 +292,19 @@ with shared.gradio_root:
                                 value='<div style="color: #888; font-size: 12px;">Enter variables above. Total combinations will be calculated when you click Generate.</div>'
                             )
 
-                            def update_matrix_info(enabled, config_text):
+                            def update_matrix_info(enabled, config_text, img_num):
                                 if not enabled:
                                     return '<div style="color: #888; font-size: 12px;">Matrix disabled.</div>'
                                 from modules.util import parse_prompt_matrix_config, get_matrix_combination_count, validate_matrix_config
+                                import modules.config
                                 config = parse_prompt_matrix_config(config_text)
                                 count = get_matrix_combination_count(config)
-                                validation = validate_matrix_config(config)
+                                validation = validate_matrix_config(
+                                    config,
+                                    max_combinations=modules.config.default_prompt_matrix_max_combinations,
+                                    max_variables=modules.config.default_prompt_matrix_max_variables,
+                                    image_number=int(img_num or 1)
+                                )
                                 text_vars = []
                                 param_vars = []
                                 for v in config:
@@ -317,7 +323,8 @@ with shared.gradio_root:
                                     parts = ['<span style="color:#888;">None defined</span>']
                                 status_color = '#10b981' if validation['valid'] else '#ef4444'
                                 status_text = 'OK' if validation['valid'] else 'ERROR'
-                                html = f'<div style="font-size: 12px;">{" | ".join(parts)} | <strong style="color:{status_color};">Total: {count} [{status_text}]</strong></div>'
+                                total_tasks = validation.get('total_tasks', count)
+                                html = f'<div style="font-size: 12px;">{" | ".join(parts)} | <strong style="color:{status_color};">Combos: {count} | Tasks: {total_tasks} [{status_text}]</strong></div>'
                                 if validation.get('errors'):
                                     html += f'<div style="color:#ef4444; font-size: 11px; margin-top: 4px; line-height: 1.4;">'
                                     for err in validation['errors']:
@@ -338,14 +345,21 @@ with shared.gradio_root:
                                 show_progress=False
                             ).then(
                                 update_matrix_info,
-                                inputs=[prompt_matrix, prompt_matrix_config],
+                                inputs=[prompt_matrix, prompt_matrix_config, image_number],
                                 outputs=[prompt_matrix_info],
                                 queue=False,
                                 show_progress=False
                             )
                             prompt_matrix_config.change(
                                 update_matrix_info,
-                                inputs=[prompt_matrix, prompt_matrix_config],
+                                inputs=[prompt_matrix, prompt_matrix_config, image_number],
+                                outputs=[prompt_matrix_info],
+                                queue=False,
+                                show_progress=False
+                            )
+                            image_number.change(
+                                update_matrix_info,
+                                inputs=[prompt_matrix, prompt_matrix_config, image_number],
                                 outputs=[prompt_matrix_info],
                                 queue=False,
                                 show_progress=False
