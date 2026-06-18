@@ -3,6 +3,11 @@ import threading
 from extras.inpaint_mask import generate_mask_from_image, SAMOptions
 from modules.patch import PatchSettings, patch_settings, patch_all
 import modules.config
+import modules.diagnostics as diagnostics
+from modules.diagnostics import (
+    DiagnosticContext, DiagnosticStage, DiagnosticErrorCategory,
+    log_info, log_warning, log_error, register_task, get_current_context,
+)
 
 patch_all()
 
@@ -19,6 +24,9 @@ class AsyncTask:
         self.results = []
         self.last_stop = False
         self.processing = False
+
+        self.trace_id = diagnostics.generate_trace_id()
+        self.diagnostic_context: DiagnosticContext | None = None
 
         self.performance_loras = []
 
@@ -335,6 +343,7 @@ def worker():
         )
 
     def save_and_log(async_task, height, imgs, task, use_expansion, width, loras, persist_image=True) -> list:
+        ctx = get_current_context()
         img_paths = []
         for x in imgs:
             d = [('Prompt', 'prompt', task['log_positive_prompt']),
@@ -389,18 +398,65 @@ def worker():
             d.append(('Metadata Scheme', 'metadata_scheme',
                       async_task.metadata_scheme.value if async_task.save_metadata_to_images else async_task.save_metadata_to_images))
             d.append(('Version', 'version', 'Fooocus v' + fooocus_version.version))
-            img_paths.append(log(x, d, metadata_parser, async_task.output_format, task, persist_image))
+            try:
+                if ctx:
+                    ctx.start_stage(DiagnosticStage.IMAGE_SAVE)
+                img_path = log(x, d, metadata_parser, async_task.output_format, task, persist_image)
+                img_paths.append(img_path)
+                if ctx:
+                    ctx.add_output_file(img_path)
+                    log_info(
+                        DiagnosticStage.IMAGE_SAVE,
+                        f"图像已保存: {os.path.basename(img_path)}",
+                        ctx=ctx,
+                        extra_data={
+                            "image_path": img_path,
+                            "width": width,
+                            "height": height,
+                            "seed": task['task_seed'],
+                        }
+                    )
+                    ctx.end_stage(DiagnosticStage.IMAGE_SAVE, "completed")
+            except Exception as save_err:
+                log_error(
+                    DiagnosticStage.IMAGE_SAVE,
+                    "图像保存失败",
+                    exception=save_err,
+                    category=DiagnosticErrorCategory.IMAGE_SAVE_FAILED,
+                    ctx=ctx,
+                    extra_data={"width": width, "height": height},
+                )
+                raise
 
         return img_paths
 
     def apply_control_nets(async_task, height, ip_adapter_face_path, ip_adapter_path, width, current_progress):
+        ctx = get_current_context()
         for task in async_task.cn_tasks[flags.cn_canny]:
             cn_img, cn_stop, cn_weight = task
             cn_img = resize_image(HWC3(cn_img), width=width, height=height)
 
             if not async_task.skipping_cn_preprocessor:
-                cn_img = preprocessors.canny_pyramid(cn_img, async_task.canny_low_threshold,
-                                                     async_task.canny_high_threshold)
+                try:
+                    if ctx:
+                        ctx.start_stage(DiagnosticStage.CONTROLNET_PREPROCESS)
+                    cn_img = preprocessors.canny_pyramid(cn_img, async_task.canny_low_threshold,
+                                                         async_task.canny_high_threshold)
+                    if ctx:
+                        ctx.end_stage(DiagnosticStage.CONTROLNET_PREPROCESS, "completed")
+                except Exception as cn_err:
+                    log_error(
+                        DiagnosticStage.CONTROLNET_PREPROCESS,
+                        "Canny ControlNet 预处理失败",
+                        exception=cn_err,
+                        category=DiagnosticErrorCategory.CONTROLNET_PREPROCESS_FAILED,
+                        ctx=ctx,
+                        extra_data={
+                            "low_threshold": async_task.canny_low_threshold,
+                            "high_threshold": async_task.canny_high_threshold,
+                        },
+                    )
+                    raise
 
             cn_img = HWC3(cn_img)
             task[0] = core.numpy_to_pytorch(cn_img)
@@ -411,7 +467,21 @@ def worker():
             cn_img = resize_image(HWC3(cn_img), width=width, height=height)
 
             if not async_task.skipping_cn_preprocessor:
-                cn_img = preprocessors.cpds(cn_img)
+                try:
+                    if ctx:
+                        ctx.start_stage(DiagnosticStage.CONTROLNET_PREPROCESS)
+                    cn_img = preprocessors.cpds(cn_img)
+                    if ctx:
+                        ctx.end_stage(DiagnosticStage.CONTROLNET_PREPROCESS, "completed")
+                except Exception as cn_err:
+                    log_error(
+                        DiagnosticStage.CONTROLNET_PREPROCESS,
+                        "CPDS ControlNet 预处理失败",
+                        exception=cn_err,
+                        category=DiagnosticErrorCategory.CONTROLNET_PREPROCESS_FAILED,
+                        ctx=ctx,
+                    )
+                    raise
 
             cn_img = HWC3(cn_img)
             task[0] = core.numpy_to_pytorch(cn_img)
@@ -424,7 +494,22 @@ def worker():
             # https://github.com/tencent-ailab/IP-Adapter/blob/d580c50a291566bbf9fc7ac0f760506607297e6d/README.md?plain=1#L75
             cn_img = resize_image(cn_img, width=224, height=224, resize_mode=0)
 
-            task[0] = ip_adapter.preprocess(cn_img, ip_adapter_path=ip_adapter_path)
+            try:
+                if ctx:
+                    ctx.start_stage(DiagnosticStage.IP_ADAPTER_PREPROCESS)
+                task[0] = ip_adapter.preprocess(cn_img, ip_adapter_path=ip_adapter_path)
+                if ctx:
+                    ctx.end_stage(DiagnosticStage.IP_ADAPTER_PREPROCESS, "completed")
+            except Exception as ip_err:
+                log_error(
+                    DiagnosticStage.IP_ADAPTER_PREPROCESS,
+                    "IP-Adapter 预处理失败",
+                    exception=ip_err,
+                    category=DiagnosticErrorCategory.IP_ADAPTER_PREPROCESS_FAILED,
+                    ctx=ctx,
+                    extra_data={"ip_adapter_path": ip_adapter_path},
+                )
+                raise
             if async_task.debugging_cn_preprocessor:
                 yield_result(async_task, cn_img, current_progress, async_task.black_out_nsfw, do_not_show_finished_images=True)
         for task in async_task.cn_tasks[flags.cn_ip_face]:
@@ -432,17 +517,48 @@ def worker():
             cn_img = HWC3(cn_img)
 
             if not async_task.skipping_cn_preprocessor:
-                cn_img = extras.face_crop.crop_image(cn_img)
+                try:
+                    if ctx:
+                        ctx.start_stage(DiagnosticStage.IP_ADAPTER_PREPROCESS)
+                    cn_img = extras.face_crop.crop_image(cn_img)
+                except Exception as crop_err:
+                    log_error(
+                        DiagnosticStage.IP_ADAPTER_PREPROCESS,
+                        "IP-Adapter 人脸裁剪失败",
+                        exception=crop_err,
+                        category=DiagnosticErrorCategory.IP_ADAPTER_PREPROCESS_FAILED,
+                        ctx=ctx,
+                    )
+                    raise
 
             # https://github.com/tencent-ailab/IP-Adapter/blob/d580c50a291566bbf9fc7ac0f760506607297e6d/README.md?plain=1#L75
             cn_img = resize_image(cn_img, width=224, height=224, resize_mode=0)
 
-            task[0] = ip_adapter.preprocess(cn_img, ip_adapter_path=ip_adapter_face_path)
+            try:
+                task[0] = ip_adapter.preprocess(cn_img, ip_adapter_path=ip_adapter_face_path)
+                if ctx:
+                    ctx.end_stage(DiagnosticStage.IP_ADAPTER_PREPROCESS, "completed")
+            except Exception as ip_err:
+                log_error(
+                    DiagnosticStage.IP_ADAPTER_PREPROCESS,
+                    "IP-Adapter Face 预处理失败",
+                    exception=ip_err,
+                    category=DiagnosticErrorCategory.IP_ADAPTER_PREPROCESS_FAILED,
+                    ctx=ctx,
+                    extra_data={"ip_adapter_face_path": ip_adapter_face_path},
+                )
+                raise
             if async_task.debugging_cn_preprocessor:
                 yield_result(async_task, cn_img, current_progress, async_task.black_out_nsfw, do_not_show_finished_images=True)
         all_ip_tasks = async_task.cn_tasks[flags.cn_ip] + async_task.cn_tasks[flags.cn_ip_face]
         if len(all_ip_tasks) > 0:
             pipeline.final_unet = ip_adapter.patch_model(pipeline.final_unet, all_ip_tasks)
+        if ctx:
+            log_info(
+                DiagnosticStage.CONTROLNET_PREPROCESS,
+                f"ControlNet/IP-Adapter 预处理完成: Canny={len(async_task.cn_tasks[flags.cn_canny])}, CPDS={len(async_task.cn_tasks[flags.cn_cpds])}, IP={len(async_task.cn_tasks[flags.cn_ip])}, IP-Face={len(async_task.cn_tasks[flags.cn_ip_face])}",
+                ctx=ctx,
+            )
 
     def apply_vary(async_task, uov_method, denoising_strength, uov_input_image, switch, current_progress, advance_progress=False):
         if 'subtle' in uov_method:
@@ -1072,6 +1188,38 @@ def worker():
         preparation_start_time = time.perf_counter()
         async_task.processing = True
 
+        ctx = DiagnosticContext(trace_id=async_task.trace_id)
+        async_task.diagnostic_context = ctx
+        register_task(ctx)
+
+        with ctx:
+            ctx.start_stage(DiagnosticStage.REQUEST_INIT)
+            log_info(
+                DiagnosticStage.REQUEST_INIT,
+                "请求处理开始",
+                ctx=ctx,
+                extra_data={
+                    "prompt": async_task.prompt,
+                    "negative_prompt": async_task.negative_prompt,
+                    "style_selections": async_task.style_selections,
+                    "performance": async_task.performance_selection.value,
+                    "image_number": async_task.image_number,
+                    "aspect_ratio": async_task.aspect_ratios_selection,
+                    "base_model": async_task.base_model_name,
+                    "refiner_model": async_task.refiner_model_name,
+                    "seed": async_task.seed,
+                }
+            )
+
+            ctx.add_param_summary("performance", async_task.performance_selection.value)
+            ctx.add_param_summary("image_number", async_task.image_number)
+            ctx.add_param_summary("aspect_ratio", async_task.aspect_ratios_selection)
+            ctx.add_param_summary("base_model", async_task.base_model_name)
+            ctx.add_param_summary("refiner_model", async_task.refiner_model_name)
+            ctx.add_param_summary("seed", async_task.seed)
+            ctx.add_param_summary("steps", async_task.steps)
+            ctx.add_param_summary("cfg_scale", async_task.cfg_scale)
+
         async_task.outpaint_selections = [o.lower() for o in async_task.outpaint_selections]
         base_model_additional_loras = []
         async_task.uov_method = async_task.uov_method.casefold()
@@ -1471,11 +1619,62 @@ def worker():
                 handler(task)
                 if task.generate_image_grid:
                     build_image_wall(task)
+                ctx = task.diagnostic_context
+                if ctx:
+                    ctx.start_stage(DiagnosticStage.CLEANUP)
+                    ctx.mark_success()
+                    log_info(
+                        DiagnosticStage.CLEANUP,
+                        f"任务完成，生成 {len(task.results)} 张图像",
+                        ctx=ctx,
+                        extra_data={
+                            "output_count": len(task.results),
+                            "output_files": task.results,
+                        }
+                    )
+                    ctx.end_stage(DiagnosticStage.CLEANUP, "completed")
                 task.yields.append(['finish', task.results])
                 pipeline.prepare_text_encoder(async_call=True)
-            except:
+            except diagnostics.DiagnosticsError as de:
+                ctx = task.diagnostic_context
+                if ctx:
+                    ctx.mark_failed()
+                task.yields.append(['finish', task.results])
+                task.yields.append(['error', {
+                    'trace_id': task.trace_id,
+                    'human_message': de.human_message,
+                    'category': de.category.value,
+                    'diagnostic_summary': ctx.to_summary_string() if ctx else de.get_diagnostic_summary(),
+                }])
+            except Exception as e:
+                ctx = task.diagnostic_context
+                error_stage = DiagnosticStage.UNKNOWN
+                if ctx and ctx.current_stage:
+                    try:
+                        error_stage = DiagnosticStage(ctx.current_stage)
+                    except ValueError:
+                        error_stage = DiagnosticStage.DIFFUSION
+                category = DiagnosticErrorCategory.UNKNOWN_ERROR
+                if isinstance(e, torch.cuda.OutOfMemoryError):
+                    category = DiagnosticErrorCategory.GPU_OUT_OF_MEMORY
+                human_msg = "生成过程中发生未知错误"
+                if category == DiagnosticErrorCategory.GPU_OUT_OF_MEMORY:
+                    human_msg = "显存不足，无法继续生成"
+                log_error(
+                    error_stage,
+                    human_msg,
+                    exception=e,
+                    category=category,
+                    ctx=ctx,
+                )
                 traceback.print_exc()
                 task.yields.append(['finish', task.results])
+                task.yields.append(['error', {
+                    'trace_id': task.trace_id,
+                    'human_message': human_msg,
+                    'category': category.value,
+                    'diagnostic_summary': ctx.to_summary_string() if ctx else f"Trace ID: {task.trace_id}\nError: {str(e)}",
+                }])
             finally:
                 if pid in modules.patch.patch_settings:
                     del modules.patch.patch_settings[pid]

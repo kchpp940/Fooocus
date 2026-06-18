@@ -13,6 +13,11 @@ from extras.expansion import FooocusExpansion
 from ldm_patched.modules.model_base import SDXL, SDXLRefiner
 from modules.sample_hijack import clip_separate
 from modules.util import get_file_from_folder_list, get_enabled_loras
+import modules.diagnostics as diagnostics
+from modules.diagnostics import (
+    DiagnosticStage, DiagnosticErrorCategory, get_current_context,
+    log_info, log_error,
+)
 
 
 model_base = core.StableDiffusionModel()
@@ -32,13 +37,36 @@ loaded_ControlNets = {}
 @torch.inference_mode()
 def refresh_controlnets(model_paths):
     global loaded_ControlNets
+    ctx = get_current_context()
     cache = {}
     for p in model_paths:
         if p is not None:
             if p in loaded_ControlNets:
                 cache[p] = loaded_ControlNets[p]
             else:
-                cache[p] = core.load_controlnet(p)
+                try:
+                    if ctx:
+                        ctx.start_stage(DiagnosticStage.MODEL_LOAD)
+                    cache[p] = core.load_controlnet(p)
+                    if ctx:
+                        ctx.add_model_loaded(p)
+                        log_info(
+                            DiagnosticStage.MODEL_LOAD,
+                            f"ControlNet 模型已加载: {os.path.basename(p)}",
+                            ctx=ctx,
+                            extra_data={"model_path": p},
+                        )
+                        ctx.end_stage(DiagnosticStage.MODEL_LOAD, "completed")
+                except Exception as e:
+                    log_error(
+                        DiagnosticStage.MODEL_LOAD,
+                        f"ControlNet 模型加载失败: {os.path.basename(p)}",
+                        exception=e,
+                        category=DiagnosticErrorCategory.MODEL_LOAD_FAILED,
+                        ctx=ctx,
+                        extra_data={"model_path": p},
+                    )
+                    raise
     loaded_ControlNets = cache
     return
 
@@ -52,6 +80,13 @@ def assert_model_integrity():
         error_message = 'You have selected base model other than SDXL. This is not supported yet.'
 
     if error_message is not None:
+        ctx = get_current_context()
+        log_error(
+            DiagnosticStage.MODEL_LOAD,
+            error_message,
+            category=DiagnosticErrorCategory.MODEL_LOAD_FAILED,
+            ctx=ctx,
+        )
         raise NotImplementedError(error_message)
 
     return True
@@ -61,17 +96,68 @@ def assert_model_integrity():
 @torch.inference_mode()
 def refresh_base_model(name, vae_name=None):
     global model_base
+    ctx = get_current_context()
 
     filename = get_file_from_folder_list(name, modules.config.paths_checkpoints)
+    if filename is None:
+        log_error(
+            DiagnosticStage.MODEL_LOAD,
+            f"找不到基础模型文件: {name}",
+            category=DiagnosticErrorCategory.MODEL_NOT_FOUND,
+            ctx=ctx,
+            extra_data={"model_name": name, "search_paths": modules.config.paths_checkpoints},
+        )
+        raise diagnostics.DiagnosticsError(
+            human_message=f"找不到基础模型: {name}",
+            category=DiagnosticErrorCategory.MODEL_NOT_FOUND,
+            stage=DiagnosticStage.MODEL_LOAD,
+            ctx=ctx,
+            extra_data={"model_name": name},
+        )
 
     vae_filename = None
     if vae_name is not None and vae_name != modules.flags.default_vae:
         vae_filename = get_file_from_folder_list(vae_name, modules.config.path_vae)
+        if vae_filename is None and vae_name != modules.flags.default_vae:
+            log_error(
+                DiagnosticStage.MODEL_LOAD,
+                f"找不到 VAE 文件: {vae_name}",
+                category=DiagnosticErrorCategory.MODEL_NOT_FOUND,
+                ctx=ctx,
+                extra_data={"vae_name": vae_name},
+            )
 
     if model_base.filename == filename and model_base.vae_filename == vae_filename:
         return
 
-    model_base = core.load_model(filename, vae_filename)
+    try:
+        if ctx:
+            ctx.start_stage(DiagnosticStage.MODEL_LOAD)
+        model_base = core.load_model(filename, vae_filename)
+        if ctx:
+            ctx.add_model_loaded(filename)
+            if vae_filename:
+                ctx.add_model_loaded(vae_filename)
+            log_info(
+                DiagnosticStage.MODEL_LOAD,
+                f"基础模型已加载: {os.path.basename(filename)}",
+                ctx=ctx,
+                extra_data={
+                    "base_model": filename,
+                    "vae": vae_filename,
+                },
+            )
+            ctx.end_stage(DiagnosticStage.MODEL_LOAD, "completed")
+    except Exception as e:
+        log_error(
+            DiagnosticStage.MODEL_LOAD,
+            f"基础模型加载失败: {os.path.basename(filename)}",
+            exception=e,
+            category=DiagnosticErrorCategory.MODEL_LOAD_FAILED,
+            ctx=ctx,
+            extra_data={"model_path": filename, "vae_path": vae_filename},
+        )
+        raise
     print(f'Base model loaded: {model_base.filename}')
     print(f'VAE loaded: {model_base.vae_filename}')
     return
@@ -81,8 +167,26 @@ def refresh_base_model(name, vae_name=None):
 @torch.inference_mode()
 def refresh_refiner_model(name):
     global model_refiner
+    ctx = get_current_context()
 
-    filename = get_file_from_folder_list(name, modules.config.paths_checkpoints)
+    filename = None
+    if name != 'None':
+        filename = get_file_from_folder_list(name, modules.config.paths_checkpoints)
+        if filename is None:
+            log_error(
+                DiagnosticStage.MODEL_LOAD,
+                f"找不到 Refiner 模型文件: {name}",
+                category=DiagnosticErrorCategory.MODEL_NOT_FOUND,
+                ctx=ctx,
+                extra_data={"model_name": name},
+            )
+            raise diagnostics.DiagnosticsError(
+                human_message=f"找不到 Refiner 模型: {name}",
+                category=DiagnosticErrorCategory.MODEL_NOT_FOUND,
+                stage=DiagnosticStage.MODEL_LOAD,
+                ctx=ctx,
+                extra_data={"model_name": name},
+            )
 
     if model_refiner.filename == filename:
         return
@@ -93,7 +197,29 @@ def refresh_refiner_model(name):
         print(f'Refiner unloaded.')
         return
 
-    model_refiner = core.load_model(filename)
+    try:
+        if ctx:
+            ctx.start_stage(DiagnosticStage.MODEL_LOAD)
+        model_refiner = core.load_model(filename)
+        if ctx:
+            ctx.add_model_loaded(filename)
+            log_info(
+                DiagnosticStage.MODEL_LOAD,
+                f"Refiner 模型已加载: {os.path.basename(filename)}",
+                ctx=ctx,
+                extra_data={"refiner_model": filename},
+            )
+            ctx.end_stage(DiagnosticStage.MODEL_LOAD, "completed")
+    except Exception as e:
+        log_error(
+            DiagnosticStage.MODEL_LOAD,
+            f"Refiner 模型加载失败: {os.path.basename(filename)}",
+            exception=e,
+            category=DiagnosticErrorCategory.MODEL_LOAD_FAILED,
+            ctx=ctx,
+            extra_data={"model_path": filename},
+        )
+        raise
     print(f'Refiner model loaded: {model_refiner.filename}')
 
     if isinstance(model_refiner.unet.model, SDXL):

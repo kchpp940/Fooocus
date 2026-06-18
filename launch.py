@@ -87,21 +87,6 @@ if args.hf_mirror is not None:
 from modules import config
 from modules.hash_cache import init_cache
 
-_diagnostics_output = config.format_diagnostics(show_warnings_only=True)
-if _diagnostics_output:
-    print(_diagnostics_output)
-
-if getattr(args, 'preflight_check', False):
-    _diag = config.get_diagnostics()
-    if getattr(args, 'preflight_json', False):
-        print(_diag.to_json())
-    else:
-        print(config.format_diagnostics(show_warnings_only=False))
-    _exit_code = 0 if _diag.config_ok else _diag.to_dict()['exit_code']
-    if getattr(args, 'preflight_strict', False) and _diag.warn_count > 0:
-        _exit_code = max(_exit_code, 2)
-    sys.exit(_exit_code)
-
 os.environ["U2NET_HOME"] = config.path_inpaint
 
 os.environ['GRADIO_TEMP_DIR'] = config.temp_path
@@ -163,5 +148,26 @@ config.default_base_model_name, config.checkpoint_downloads = download_models(
 
 config.update_files()
 init_cache(config.model_filenames, config.paths_checkpoints, config.lora_filenames, config.paths_loras)
+
+from modules import diagnostics as _diagnostics
+
+if getattr(args, 'disable_diagnostics', False):
+    _diagnostics.set_diagnostics_enabled(False)
+    print('[Diagnostics] Unified diagnostic logging is disabled.')
+else:
+    if getattr(args, 'diagnostics_log_file', None):
+        try:
+            _diagnostics.set_log_to_file(True, args.diagnostics_log_file)
+            print(f'[Diagnostics] Logging to file: {args.diagnostics_log_file}')
+        except Exception as e:
+            print(f'[Diagnostics] Warning: Failed to setup log file: {str(e)}')
+
+    if getattr(args, 'disable_diagnostics_redaction', False):
+        _diagnostics.set_sensitive_data_redacted(False)
+        print('[Diagnostics] WARNING: Sensitive data redaction is DISABLED. Full paths and prompts may appear in logs.')
+
+    if getattr(args, 'diagnostics_prompt_max_chars', 120) != 120:
+        _diagnostics.set_prompt_max_chars(args.diagnostics_prompt_max_chars)
+        print(f'[Diagnostics] Prompt max chars set to: {args.diagnostics_prompt_max_chars}')
 
 from webui import *
