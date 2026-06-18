@@ -12,21 +12,25 @@ QUIET_MODE = FORCE_JSON_ENV
 
 
 def run_preflight_check(stage: str = "pre-update"):
+    """
+    git 更新前的预检。使用 mode=report，永远不阻塞 git 更新流程。
+    """
     if FOOOCUS_SKIP_PREFLIGHT:
         if not QUIET_MODE:
             print(f"\n[Preflight] Stage '{stage}' skipped (FOOOCUS_SKIP_PREFLIGHT=1)\n")
         return None
     try:
-        from modules.environment_preflight import run_preflight
+        from modules.environment_preflight import run_preflight, CheckMode
         if not QUIET_MODE:
-            print(f"\n[Preflight] Running {stage} environment check ...\n")
+            print(f"\n[Preflight] Running {stage} environment check (mode=report, non-blocking) ...\n")
         report = run_preflight(
             root_dir=root,
-            exit_on_error=False,
+            mode=CheckMode.REPORT,
             print_report=True,
             use_colors=not QUIET_MODE,
             as_json=FORCE_JSON_ENV,
-            stage=stage
+            stage=stage,
+            call_exit=True
         )
         return report
     except Exception as e:

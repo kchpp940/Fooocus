@@ -29,6 +29,13 @@ class CheckCategory:
     DISK = "Disk"
 
 
+class CheckMode:
+    REPORT = "report"
+    HEALTHCHECK = "healthcheck"
+    STRICT = "strict"
+    _ALL = (REPORT, HEALTHCHECK, STRICT)
+
+
 @dataclass
 class CheckResult:
     name: str
@@ -87,6 +94,15 @@ class PreflightReport:
             "has_errors": self.has_errors,
             "results": [r.to_dict() for r in self.results],
         }
+
+
+def _mode_exit_code(mode: str, report: PreflightReport) -> int:
+    """根据模式和检查结果计算退出码（不含异常情况）。"""
+    if mode == CheckMode.REPORT:
+        return 0
+    if mode in (CheckMode.HEALTHCHECK, CheckMode.STRICT):
+        return 1 if report.has_errors else 0
+    return 0
 
 
 def _get_package_version(package_name: str) -> Optional[str]:
@@ -671,45 +687,105 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _resolve_mode(mode: Optional[str], exit_on_error_deprecated: bool) -> str:
+    """
+    解析最终运行模式。
+    优先使用 mode 参数；未指定时向后兼容 exit_on_error（等价于 strict）。
+    默认模式为 report（始终不影响退出码）。
+    """
+    if mode is not None:
+        m = mode.strip().lower()
+        if m in CheckMode._ALL:
+            return m
+        raise ValueError(f"Unknown preflight mode: {mode!r}. Valid: {CheckMode._ALL}")
+    if exit_on_error_deprecated:
+        return CheckMode.STRICT
+    return CheckMode.REPORT
+
+
 _RUN_CACHE: Dict[str, PreflightReport] = {}
 
 
 def run_preflight(root_dir: Optional[str] = None,
+                  mode: Optional[str] = None,
                   exit_on_error: bool = False,
                   print_report: bool = True,
                   use_colors: bool = True,
                   as_json: bool = False,
-                  stage: Optional[str] = None) -> Optional[PreflightReport]:
-    skip = _env_flag("FOOOCUS_SKIP_PREFLIGHT", default=False)
-    if skip:
-        if print_report:
-            print("[Preflight] Skipped (FOOOCUS_SKIP_PREFLIGHT=1)")
-        return None
+                  stage: Optional[str] = None,
+                  call_exit: bool = True) -> Optional[PreflightReport]:
+    """
+    运行环境预检。
+
+    Parameters
+    ----------
+    mode : {"report", "healthcheck", "strict"} or None
+        * report      - 只输出报告，**无论是否有错误**退出码均为 0（除自身异常=2）。
+                        用于内嵌在正常启动流程中，不阻塞启动。
+        * healthcheck - FAIL 级检查项 → 退出 1；WARNING / PASS → 退出 0；自身异常 → 退出 2。
+                        用于 Docker HEALTHCHECK（WARNING 不判为不健康）。
+        * strict     - 与 healthcheck 退出码规则相同，但语义为 CI/用户主动校验。
+                        用于 --preflight-check 独立运行与 CI pipeline。
+    exit_on_error : bool
+        已废弃参数，等价于 mode='strict'。请勿与 mode 同时指定。
+    call_exit : bool
+        是否在内部调用 sys.exit。False 时仅计算并返回退出码（通过 report._exit_code 标记）。
+    """
+    try:
+        effective_mode = _resolve_mode(mode, exit_on_error)
+    except ValueError as e:
+        print(f"[Preflight] Error: {e}", file=sys.stderr)
+        if call_exit:
+            sys.exit(2)
+        raise
 
     force_json = _env_flag("FOOOCUS_PREFLIGHT_JSON", default=False)
     effective_json = force_json or as_json
+
+    skip = _env_flag("FOOOCUS_SKIP_PREFLIGHT", default=False)
+    if skip:
+        if print_report:
+            if effective_json:
+                payload = {"skipped": True, "reason": "FOOOCUS_SKIP_PREFLIGHT=1", "mode": effective_mode}
+                print(json.dumps(payload, indent=2))
+            else:
+                print(f"[Preflight] Skipped (FOOOCUS_SKIP_PREFLIGHT=1, mode={effective_mode})")
+        if call_exit:
+            sys.exit(0)
+        return None
 
     cache_key = f"{os.path.abspath(root_dir or '.')}:{stage or 'all'}"
     cached = _RUN_CACHE.get(cache_key)
     if cached is not None and not effective_json:
         if print_report:
-            print(f"[Preflight] Stage '{stage or 'all'}' skipped (cached from earlier run)")
+            print(f"[Preflight] Stage '{stage or 'all'}' skipped (cached, mode={effective_mode})")
+        cached._exit_code = _mode_exit_code(effective_mode, cached)
+        if call_exit and cached._exit_code != 0:
+            sys.exit(cached._exit_code)
         return cached
 
     checker = PreflightChecker(root_dir=root_dir)
     report = checker.run_all()
     _RUN_CACHE[cache_key] = report
+    report._exit_code = _mode_exit_code(effective_mode, report)
 
     if print_report:
         if effective_json:
-            print(json.dumps(report.to_dict(), indent=2))
+            payload = report.to_dict()
+            payload["mode"] = effective_mode
+            payload["exit_code"] = report._exit_code
+            print(json.dumps(payload, indent=2))
         else:
             print(format_report(report, use_colors=use_colors))
+            if effective_mode != CheckMode.REPORT and report._exit_code != 0:
+                print(
+                    f"[Preflight] mode={effective_mode}: exit code {report._exit_code} will be returned "
+                    f"({len(report.failed)} failures detected).",
+                    file=sys.stderr
+                )
 
-    if exit_on_error and report.has_errors:
-        if not effective_json:
-            print("Exiting due to preflight check failures.", file=sys.stderr)
-        sys.exit(1)
+    if call_exit and report._exit_code != 0:
+        sys.exit(report._exit_code)
 
     return report
 
@@ -727,9 +803,21 @@ def _main():
         help="Root directory of the Fooocus installation"
     )
     parser.add_argument(
+        "--mode",
+        type=str,
+        choices=list(CheckMode._ALL),
+        default=None,
+        help=(
+            "运行模式 (独立 CLI 默认 strict)。\n"
+            "  report      - 只出报告，退出码永为 0（启动内嵌使用）\n"
+            "  healthcheck - 有 FAIL 就非零退出（Docker HEALTHCHECK）\n"
+            "  strict      - 有 FAIL 就非零退出（CI / --preflight-check 默认）"
+        )
+    )
+    parser.add_argument(
         "--exit-on-error",
         action="store_true",
-        help="Exit with non-zero code if any check fails"
+        help="[已废弃，等同于 --mode strict]"
     )
     parser.add_argument(
         "--no-colors",
@@ -750,16 +838,21 @@ def _main():
 
     args = parser.parse_args()
 
-    report = run_preflight(
-        root_dir=args.root,
-        exit_on_error=args.exit_on_error,
-        print_report=True,
-        use_colors=not args.no_colors and not args.json,
-        as_json=args.json,
-        stage=args.stage
-    )
-    if args.exit_on_error and report is not None and report.has_errors:
-        sys.exit(1)
+    # 独立 CLI 默认 strict；用户显式传 mode 优先
+    resolved_mode = args.mode if args.mode is not None else CheckMode.STRICT
+
+    try:
+        report = run_preflight(
+            root_dir=args.root,
+            mode=resolved_mode,
+            print_report=True,
+            use_colors=not args.no_colors and not args.json,
+            as_json=args.json,
+            stage=args.stage,
+            call_exit=True
+        )
+    except ValueError:
+        sys.exit(2)
 
 
 if __name__ == "__main__":

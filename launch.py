@@ -4,6 +4,21 @@ import sys
 
 PREFLIGHT_ONLY = "--preflight-check" in sys.argv
 PREFLIGHT_JSON = PREFLIGHT_ONLY and "--json" in sys.argv
+
+
+def _extract_preflight_mode(argv):
+    """从 argv 中提取 --mode 值，不修改原列表。未显式指定时返回 None（默认 strict）。"""
+    mode = None
+    for i, arg in enumerate(argv):
+        if arg == "--mode" and i + 1 < len(argv):
+            mode = argv[i + 1]
+        elif arg.startswith("--mode="):
+            mode = arg.split("=", 1)[1]
+    return mode
+
+
+PREFLIGHT_MODE_CLI = _extract_preflight_mode(sys.argv) if PREFLIGHT_ONLY else None
+
 FORCE_JSON_ENV = os.environ.get("FOOOCUS_PREFLIGHT_JSON", "").strip().lower() in ("1", "true", "yes", "on")
 QUIET_MODE = PREFLIGHT_JSON or FORCE_JSON_ENV
 FOOOCUS_SKIP_PREFLIGHT = os.environ.get("FOOOCUS_SKIP_PREFLIGHT", "").strip().lower() in ("1", "true", "yes", "on")
@@ -24,43 +39,56 @@ ssl._create_default_https_context = ssl._create_unverified_context
 
 
 def _strip_preflight_args(argv):
+    """移除 --preflight-check、--json、--mode <value>、--mode=<value>，不影响其他参数。"""
     result = []
-    skip_next = False
-    for i, arg in enumerate(argv):
-        if skip_next:
-            skip_next = False
-            continue
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
         if arg in ("--preflight-check", "--json"):
+            i += 1
+            continue
+        if arg == "--mode" and i + 1 < len(argv):
+            i += 2
+            continue
+        if arg.startswith("--mode="):
+            i += 1
             continue
         result.append(arg)
+        i += 1
     return result
 
 
 if PREFLIGHT_ONLY:
     try:
-        from modules.environment_preflight import run_preflight
+        from modules.environment_preflight import run_preflight, CheckMode
+        # 独立模式默认 strict；用户显式 --mode 优先
+        resolved_mode = PREFLIGHT_MODE_CLI if PREFLIGHT_MODE_CLI else CheckMode.STRICT
         if not FOOOCUS_SKIP_PREFLIGHT:
             if not QUIET_MODE:
-                print("\n[Preflight] Running environment check (preflight-only mode) ...\n", file=sys.stderr)
+                print(
+                    f"\n[Preflight] Running environment check (preflight-only, mode={resolved_mode}) ...\n",
+                    file=sys.stderr
+                )
             report = run_preflight(
                 root_dir=root,
-                exit_on_error=False,
+                mode=resolved_mode,
                 print_report=True,
                 use_colors=not QUIET_MODE,
                 as_json=PREFLIGHT_JSON,
-                stage="preflight-only"
+                stage="preflight-only",
+                call_exit=True
             )
-            if report is not None:
-                sys.exit(1 if report.has_errors else 0)
-            else:
-                sys.exit(0)
+            # 兜底：call_exit=True 已在内部处理退出，这里防止极端情况
+            sys.exit(getattr(report, "_exit_code", 0) if report else 0)
         else:
             if not QUIET_MODE:
                 print("[Preflight] Skipped (FOOOCUS_SKIP_PREFLIGHT=1)", file=sys.stderr)
             if PREFLIGHT_JSON:
                 import json
-                print(json.dumps({"skipped": True, "reason": "FOOOCUS_SKIP_PREFLIGHT=1"}, indent=2))
+                print(json.dumps({"skipped": True, "reason": "FOOOCUS_SKIP_PREFLIGHT=1", "mode": resolved_mode}, indent=2))
             sys.exit(0)
+    except SystemExit:
+        raise
     except Exception as e:
         if PREFLIGHT_JSON:
             import json as _json
@@ -83,21 +111,26 @@ TRY_INSTALL_XFORMERS = False
 
 
 def run_preflight_check(stage: str = "early"):
+    """
+    正常启动内嵌的预检。使用 mode=report，永远不阻塞启动。
+    退出码始终为 0（除自身异常=2），只给出可视化提示。
+    """
     if FOOOCUS_SKIP_PREFLIGHT:
         if not QUIET_MODE:
             print(f"\n[Preflight] Stage '{stage}' skipped (FOOOCUS_SKIP_PREFLIGHT=1)\n")
         return None
     try:
-        from modules.environment_preflight import run_preflight
+        from modules.environment_preflight import run_preflight, CheckMode
         if not QUIET_MODE:
-            print(f"\n[Preflight] Running {stage} environment check ...\n")
+            print(f"\n[Preflight] Running {stage} environment check (mode=report, non-blocking) ...\n")
         report = run_preflight(
             root_dir=root,
-            exit_on_error=False,
+            mode=CheckMode.REPORT,
             print_report=True,
             use_colors=not QUIET_MODE,
             as_json=FORCE_JSON_ENV,
-            stage=stage
+            stage=stage,
+            call_exit=True
         )
         return report
     except Exception as e:

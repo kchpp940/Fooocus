@@ -7,26 +7,15 @@ ORIGINALDIR=/content/app
 export FOOOCUS_USER_DATA_DIR="$DATADIR"
 
 function do_preflight() {
-    local json_mode=0
-    local exit_on_error=1
-    for arg in "$@"; do
-        case "$arg" in
-            --json) json_mode=1 ;;
-            --no-exit) exit_on_error=0 ;;
-        esac
-    done
-
+    # 将后续参数原样透传给 launch.py --preflight-check
+    # 示例:
+    #   preflight                    -> 严格模式，有 FAIL 非零退出 (默认 strict)
+    #   preflight --json             -> strict + JSON 输出 (CI 用)
+    #   preflight --mode healthcheck -> Docker HEALTHCHECK 用
+    #   preflight --mode report      -> 只出报告，退出码永为 0
+    #   preflight --json --mode strict -> CI 严格模式 + JSON
     cd $ORIGINALDIR
-    if [[ $json_mode -eq 1 ]]; then
-        python launch.py --preflight-check --json
-    else
-        python launch.py --preflight-check
-    fi
-    local rc=$?
-    if [[ $exit_on_error -eq 0 ]]; then
-        exit 0
-    fi
-    exit $rc
+    exec python launch.py --preflight-check "$@"
 }
 
 if [[ "$1" == "preflight" ]]; then

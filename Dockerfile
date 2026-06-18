@@ -29,6 +29,6 @@ COPY --chown=user:user . /content/app
 RUN mv /content/app/models /content/app/models.org
 
 HEALTHCHECK --interval=5m --timeout=30s --start-period=2m --retries=2 \
-	CMD /content/entrypoint.sh preflight --json --no-exit > /tmp/preflight.json 2>&1 || exit 1
+	CMD /content/entrypoint.sh preflight --json --mode healthcheck > /tmp/preflight.json 2>/tmp/preflight.err
 
 CMD [ "sh", "-c", "/content/entrypoint.sh ${CMDARGS}" ]
