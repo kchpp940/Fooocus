@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Tuple, Any, Callable
 import copy
 
 
@@ -152,3 +152,17 @@ class EnhanceCtrl:
     inpaint_respective_field: float = 0.0
     inpaint_erode_or_dilate: int = 0
     mask_invert: bool = False
+
+
+@dataclass
+class WorkerRuntime:
+    pid: int
+    pipeline: Any
+    inpaint_worker: Any
+    flags: Any
+    ldm_model_management: Any
+    ip_adapter: Any
+    default_censor: Callable
+    fooocus_expansion: str
+    log: Callable
+    time_module: Any
