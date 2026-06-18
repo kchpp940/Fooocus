@@ -174,9 +174,9 @@ class ConfigSchema:
                     try:
                         if t is bool and isinstance(value, str):
                             return value.lower() in ('true', '1', 'yes', 'on'), None
-                        if t is int and isinstance(value, numbers.Number):
+                        if t is int and isinstance(value, (numbers.Number, str)):
                             return int(value), None
-                        if t is float and isinstance(value, numbers.Number):
+                        if t is float and isinstance(value, (numbers.Number, str)):
                             return float(value), None
                         if t is str:
                             return str(value), None
@@ -186,10 +186,18 @@ class ConfigSchema:
             else:
                 if expected is bool and isinstance(value, str):
                     return value.lower() in ('true', '1', 'yes', 'on'), None
-                if expected is int and isinstance(value, numbers.Number):
+                if expected is int and isinstance(value, (numbers.Number, str)):
                     return int(value), None
-                if expected is float and isinstance(value, numbers.Number):
+                if expected is float and isinstance(value, (numbers.Number, str)):
                     return float(value), None
+                if expected is numbers.Number and isinstance(value, str):
+                    try:
+                        return float(value), None
+                    except (ValueError, TypeError):
+                        try:
+                            return int(value), None
+                        except (ValueError, TypeError):
+                            pass
                 if expected is str:
                     return str(value), None
                 return expected(value), None
@@ -470,6 +478,104 @@ class ConfigSchema:
     def get_cli_fields(self) -> List[ConfigField]:
         return [f for f in self._fields.values() if f.cli_arg is not None]
 
+    def get_preset_fields(self) -> List[ConfigField]:
+        return [f for f in self._fields.values() if f.save_to_config and not f.is_path and not f.key.startswith('cli_')]
+
+    def get_config_file_fields(self) -> List[ConfigField]:
+        return [f for f in self._fields.values() if f.save_to_config and not f.key.startswith('cli_')]
+
+    def import_and_validate(self, data: Dict[str, Any], source: ConfigSource,
+                            source_detail: str = "") -> Tuple[Dict[str, Any], List[ConfigIssue]]:
+        cleaned = {}
+        issues = []
+
+        for raw_key, raw_val in data.items():
+            key, is_deprecated = self.resolve_deprecated(raw_key)
+
+            if is_deprecated:
+                issues.append(ConfigIssue(
+                    issue_type=ConfigIssueType.DEPRECATED_FIELD,
+                    key=raw_key,
+                    message=f"Deprecated field '{raw_key}' - automatically mapped to '{key}'",
+                    source=source,
+                    raw_value=raw_val
+                ))
+
+            if not self.has_field(key):
+                issues.append(ConfigIssue(
+                    issue_type=ConfigIssueType.UNKNOWN_KEY,
+                    key=raw_key,
+                    message=f"Unknown config key '{raw_key}' - will be ignored during save",
+                    source=source,
+                    raw_value=raw_val
+                ))
+                continue
+
+            field = self.get_field(key)
+            if not field.save_to_config:
+                issues.append(ConfigIssue(
+                    issue_type=ConfigIssueType.UNKNOWN_KEY,
+                    key=raw_key,
+                    message=f"Key '{raw_key}' is marked as save_to_config=False - will be filtered out",
+                    source=source,
+                    raw_value=raw_val
+                ))
+                continue
+
+            converted, type_issue = self._convert_type(raw_val, field)
+            if type_issue:
+                issues.append(type_issue)
+                continue
+
+            is_valid, validation_issue = self._validate_value(converted, field, source)
+            if not is_valid and validation_issue:
+                issues.append(validation_issue)
+                continue
+
+            cleaned[key] = converted
+
+        return cleaned, issues
+
+    def export_for_preset(self, result: ConfigLoadResult, include_schema_defaults: bool = False) -> Dict[str, Any]:
+        exported = {}
+        for field in self.get_preset_fields():
+            cv = result.values.get(field.key)
+            if cv is None:
+                if include_schema_defaults and field.default_value is not None:
+                    exported[field.key] = field.default_value
+                continue
+            if include_schema_defaults or cv.source not in (ConfigSource.SCHEMA_DEFAULT, ConfigSource.HARDCODED_FALLBACK):
+                exported[field.key] = cv.value
+        return exported
+
+    def export_for_config_file(self, result: ConfigLoadResult, include_schema_defaults: bool = False) -> Dict[str, Any]:
+        exported = {}
+        for field in self.get_config_file_fields():
+            cv = result.values.get(field.key)
+            if cv is None:
+                if include_schema_defaults and field.default_value is not None:
+                    exported[field.key] = field.default_value
+                continue
+            if include_schema_defaults or cv.source not in (ConfigSource.SCHEMA_DEFAULT, ConfigSource.HARDCODED_FALLBACK, ConfigSource.BUILTIN_PRESET):
+                exported[field.key] = cv.value
+        return exported
+
+    def get_export_metadata(self, result: ConfigLoadResult) -> Dict[str, Dict[str, Any]]:
+        metadata = {}
+        for key, cv in result.values.items():
+            field = self.get_field(key)
+            if field is None:
+                continue
+            metadata[key] = {
+                'source': cv.source.value,
+                'source_detail': cv.source_detail,
+                'save_to_config': field.save_to_config,
+                'in_preset_export': field.save_to_config and not field.is_path and not key.startswith('cli_'),
+                'in_config_file_export': field.save_to_config and not key.startswith('cli_'),
+                'is_schema_default': cv.source in (ConfigSource.SCHEMA_DEFAULT, ConfigSource.HARDCODED_FALLBACK),
+            }
+        return metadata
+
     def format_summary(self, result: ConfigLoadResult) -> str:
         lines = []
         lines.append("=" * 70)
@@ -489,7 +595,28 @@ class ConfigSchema:
                     val = result.values.get(key)
                     if val:
                         display_val = json.dumps(val.value) if not isinstance(val.value, (list, dict)) or len(str(val.value)) < 80 else f"<{type(val.value).__name__} len={len(val.value)}>"
-                        lines.append(f"  {key} = {display_val}")
+                        field = self.get_field(key)
+                        write_flags = []
+                        if field and field.save_to_config:
+                            if field.is_path:
+                                write_flags.append("cfg")
+                            elif not key.startswith('cli_'):
+                                write_flags.append("preset+cfg")
+                        if write_flags:
+                            flag_str = f" [{'|'.join(write_flags)}]"
+                        else:
+                            flag_str = ""
+                        lines.append(f"  {key} = {display_val}{flag_str}  # {val.source_detail}")
+
+        preset_data = self.export_for_preset(result, include_schema_defaults=False)
+        config_file_data = self.export_for_config_file(result, include_schema_defaults=False)
+        lines.append("\n" + "-" * 70)
+        lines.append(f"WRITE-BACK PREVIEW")
+        lines.append(f"  save_user_preset() will write: {len(preset_data)} keys (non-path, non-cli, non-default)")
+        lines.append(f"  update_config_file() will write: {len(config_file_data)} keys (non-cli, non-default, non-builtin-preset)")
+        if preset_data:
+            sample_keys = sorted(list(preset_data.keys()))[:8]
+            lines.append(f"  preset keys: {', '.join(sample_keys)}{' ...' if len(preset_data) > 8 else ''}")
 
         issues = result.issues
         if issues:

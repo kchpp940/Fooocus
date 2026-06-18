@@ -80,6 +80,22 @@ def get_config_source(key: str) -> str:
     return config_schema.get_source_detail(config_result, key)
 
 
+def export_for_preset(include_schema_defaults: bool = False) -> dict:
+    return config_schema.export_for_preset(config_result, include_schema_defaults)
+
+
+def export_for_config_file(include_schema_defaults: bool = False) -> dict:
+    return config_schema.export_for_config_file(config_result, include_schema_defaults)
+
+
+def import_and_validate_preset_data(data: dict) -> tuple:
+    return config_schema.import_and_validate(data, ConfigSource.USER_PRESET, 'user_preset_save')
+
+
+def get_export_metadata() -> dict:
+    return config_schema.get_export_metadata(config_result)
+
+
 def _apply_cli_overrides():
     cli_issues = args_manager.sync_cli_args_to_config_result(config_result)
     config_result.issues.extend(cli_issues)
@@ -89,7 +105,7 @@ def _apply_cli_overrides():
 
 
 def _load_all_configs():
-    global config_dict, always_save_keys, visited_keys, loaded_preset_content, loaded_config_file_content
+    global config_dict, loaded_preset_content, loaded_config_file_content
 
     builtin_preset_path = os.path.join(_root_dir, 'presets', 'default.json')
     builtin_preset_data = {}
@@ -117,7 +133,6 @@ def _load_all_configs():
                     f'config:{os.path.basename(config_path)}'
                 )
                 config_result.issues.extend(issues)
-                always_save_keys = list(config_file_data.keys())
         except Exception as e:
             print(f'Failed to load config file "{config_path}" . The reason is: {str(e)}')
             print('Please make sure that:')
@@ -144,12 +159,6 @@ def _load_all_configs():
     env_issues = config_schema.load_env(config_result)
     config_result.issues.extend(env_issues)
 
-    for key, field in config_schema.fields.items():
-        if field.save_to_config and key not in visited_keys:
-            visited_keys.append(key)
-        if field.save_to_config and key not in always_save_keys:
-            always_save_keys.append(key)
-
     config_schema.apply_defaults(config_result)
 
     _apply_cli_overrides()
@@ -157,12 +166,6 @@ def _load_all_configs():
     for key, cv in config_result.values.items():
         if cv.value is not None:
             config_dict[key] = cv.value
-            field = config_schema.get_field(key)
-            if field and field.save_to_config:
-                if key not in visited_keys:
-                    visited_keys.append(key)
-                if key not in always_save_keys and cv.source in (ConfigSource.CONFIG_FILE, ConfigSource.ENVIRONMENT_VARIABLE, ConfigSource.CLI_ARGUMENT):
-                    always_save_keys.append(key)
 
     print(config_schema.format_summary(config_result))
 
@@ -323,12 +326,21 @@ def save_user_preset(preset_name, preset_data):
     if preset_name in builtin_presets:
         return False, 'Cannot overwrite built-in preset'
 
+    cleaned_data, issues = import_and_validate_preset_data(preset_data)
+    if issues:
+        warn_msgs = []
+        for issue in issues:
+            warn_msgs.append(f"[{issue.issue_type.value}] {issue.key}: {issue.message}")
+        print(f'[Preset Save Validation] {len(issues)} issue(s):')
+        for msg in warn_msgs:
+            print(f'  - {msg}')
+
     preset_path = os.path.join(get_user_presets_dir(), f'{preset_name}.json')
 
     try:
         with open(preset_path, "w", encoding="utf-8") as json_file:
-            json.dump(preset_data, json_file, indent=4, ensure_ascii=False)
-        print(f'User preset saved: {preset_path}')
+            json.dump(cleaned_data, json_file, indent=4, ensure_ascii=False)
+        print(f'User preset saved: {preset_path} ({len(cleaned_data)} keys, {len(issues)} filtered)')
         update_presets()
         return True, add_user_prefix(preset_name)
     except Exception as e:
@@ -411,6 +423,8 @@ def get_preset_details(preset_name):
             return {'name': preset_name, 'type': 'initial', 'details': {}, 'description': 'Initial default settings'}
         return None
 
+    validated_content, issues = import_and_validate_preset_data(content)
+
     result = {
         'name': preset_name,
         'type': 'user' if is_user_preset(preset_name) else 'builtin',
@@ -438,8 +452,8 @@ def get_preset_details(preset_name):
     }
 
     for config_key, display_name in display_keys.items():
-        if config_key in content:
-            value = content[config_key]
+        if config_key in validated_content:
+            value = validated_content[config_key]
             if config_key == 'default_loras' and isinstance(value, list):
                 lora_strs = []
                 for lora in value:
@@ -719,7 +733,7 @@ REWRITE_PRESET = False
 if REWRITE_PRESET and isinstance(args_manager.args.preset, str):
     save_path = os.path.join(_root_dir, 'presets', args_manager.args.preset + '.json')
     with open(save_path, "w", encoding="utf-8") as json_file:
-        json.dump({k: config_dict[k] for k in possible_preset_keys}, json_file, indent=4)
+        json.dump(export_for_preset(include_schema_defaults=True), json_file, indent=4)
     print(f'Preset saved to {save_path}. Exiting ...')
     exit(0)
 
@@ -736,8 +750,8 @@ available_aspect_ratios_labels = [add_ratio(x) for x in available_aspect_ratios]
 
 if not os.path.exists(config_path):
     with open(config_path, "w", encoding="utf-8") as json_file:
-        save_keys = [k for k in always_save_keys if k in config_dict]
-        json.dump({k: config_dict[k] for k in save_keys}, json_file, indent=4)
+        json.dump(export_for_config_file(include_schema_defaults=False), json_file, indent=4)
+    print(f'Config file created at {config_path} via schema export')
 
 with open(config_example_path, "w", encoding="utf-8") as json_file:
     cpa = config_path.replace("\\", "\\\\")
@@ -746,8 +760,7 @@ with open(config_example_path, "w", encoding="utf-8") as json_file:
                     f'This file is a tutorial and example. Please edit "{cpa}" to really change any settings.\n'
                     + 'Remember to split the paths with "\\\\" rather than "\\", '
                       'and there is no "," before the last "}". \n\n\n')
-    visit_keys = [k for k in visited_keys if k in config_dict]
-    json.dump({k: config_dict[k] for k in visit_keys}, json_file, indent=4)
+    json.dump(export_for_config_file(include_schema_defaults=True), json_file, indent=4)
 
 model_filenames = []
 lora_filenames = []
