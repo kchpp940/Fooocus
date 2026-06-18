@@ -89,6 +89,8 @@ class ConfigField:
     ui_default: bool = True
     save_to_config: bool = True
     post_process: Optional[Callable[[Any], Any]] = None
+    preset_binding: Optional[str] = None
+    ui_to_config_transform: Optional[Callable[[Any], Any]] = None
 
 
 @dataclass
@@ -576,6 +578,40 @@ class ConfigSchema:
             }
         return metadata
 
+    def get_preset_binding_map(self) -> Dict[str, Dict[str, Any]]:
+        binding_map = {}
+        for field in self.get_preset_fields():
+            if field.preset_binding:
+                binding_map[field.preset_binding] = {
+                    'key': field.key,
+                    'expected_type': field.expected_type,
+                    'transform': field.ui_to_config_transform,
+                    'default_value': field.default_value,
+                }
+        return binding_map
+
+    def export_from_ui_values(self, ui_values: Dict[str, Any]) -> Dict[str, Any]:
+        binding_map = self.get_preset_binding_map()
+        raw_data = {}
+
+        for binding_name, binding_info in binding_map.items():
+            if binding_name in ui_values:
+                val = ui_values[binding_name]
+                transform = binding_info.get('transform')
+                if transform is not None:
+                    try:
+                        val = transform(val)
+                    except Exception:
+                        pass
+                raw_data[binding_info['key']] = val
+
+        for field in self.get_preset_fields():
+            if field.key not in raw_data and field.key in ('checkpoint_downloads', 'embeddings_downloads', 'lora_downloads', 'vae_downloads'):
+                raw_data[field.key] = {}
+
+        cleaned, _ = self.import_and_validate(raw_data, ConfigSource.USER_PRESET, 'ui_preset_save')
+        return cleaned
+
     def format_summary(self, result: ConfigLoadResult) -> str:
         lines = []
         lines.append("=" * 70)
@@ -756,16 +792,22 @@ def build_fooocus_schema(root_dir: str) -> ConfigSchema:
     model_fields = [
         ConfigField('default_model', 'model.safetensors', str,
                     category='models', description='Base checkpoint model',
-                    validator=lambda x: isinstance(x, str)),
+                    validator=lambda x: isinstance(x, str),
+                    preset_binding='base_model',
+                    ui_to_config_transform=lambda x: x if x else 'model.safetensors'),
         ConfigField('previous_default_models', [], list,
                     category='models', description='Previous default models history',
                     validator=lambda x: isinstance(x, list) and all(isinstance(k, str) for k in x)),
         ConfigField('default_refiner', 'None', str,
                     category='models', description='Refiner model',
-                    validator=lambda x: isinstance(x, str)),
+                    validator=lambda x: isinstance(x, str),
+                    preset_binding='refiner_model',
+                    ui_to_config_transform=lambda x: x if x else 'None'),
         ConfigField('default_refiner_switch', 0.8, numbers.Number,
                     category='models', description='Refiner switch point',
-                    validator=lambda x: isinstance(x, numbers.Number) and 0 <= x <= 1),
+                    validator=lambda x: isinstance(x, numbers.Number) and 0 <= x <= 1,
+                    preset_binding='refiner_switch',
+                    ui_to_config_transform=lambda x: float(x)),
         ConfigField('default_loras_min_weight', -2, numbers.Number,
                     category='models', description='Minimum LoRA weight',
                     validator=lambda x: isinstance(x, numbers.Number) and -10 <= x <= 10),
@@ -778,13 +820,16 @@ def build_fooocus_schema(root_dir: str) -> ConfigSchema:
         ], list,
                     category='models', description='Default LoRA list',
                     validator=validate_loras,
-                    post_process=post_process_loras),
+                    post_process=post_process_loras,
+                    preset_binding='loras'),
         ConfigField('default_max_lora_number', 5, int,
                     category='models', description='Maximum number of LoRA slots',
                     validator=lambda x: isinstance(x, int) and x >= 1),
         ConfigField('default_vae', flags.default_vae, str,
                     category='models', description='VAE override',
-                    validator=lambda x: isinstance(x, str)),
+                    validator=lambda x: isinstance(x, str),
+                    preset_binding='vae',
+                    ui_to_config_transform=lambda x: x if x != flags.default_vae else 'Default (model)'),
     ]
 
     for f in model_fields:
@@ -793,28 +838,41 @@ def build_fooocus_schema(root_dir: str) -> ConfigSchema:
     sampling_fields = [
         ConfigField('default_cfg_scale', 7.0, numbers.Number,
                     category='sampling', description='CFG Scale',
-                    validator=lambda x: isinstance(x, numbers.Number)),
+                    validator=lambda x: isinstance(x, numbers.Number),
+                    preset_binding='guidance_scale',
+                    ui_to_config_transform=lambda x: float(x)),
         ConfigField('default_sample_sharpness', 2.0, numbers.Number,
                     category='sampling', description='Sample sharpness',
-                    validator=lambda x: isinstance(x, numbers.Number)),
+                    validator=lambda x: isinstance(x, numbers.Number),
+                    preset_binding='sharpness',
+                    ui_to_config_transform=lambda x: float(x)),
         ConfigField('default_cfg_tsnr', 7.0, numbers.Number,
                     category='sampling', description='Adaptive CFG (TSNR)',
-                    validator=lambda x: isinstance(x, numbers.Number)),
+                    validator=lambda x: isinstance(x, numbers.Number),
+                    preset_binding='adaptive_cfg',
+                    ui_to_config_transform=lambda x: float(x)),
         ConfigField('default_clip_skip', 2, int,
                     category='sampling', description='CLIP skip layers',
-                    validator=lambda x: isinstance(x, int) and 1 <= x <= flags.clip_skip_max),
+                    validator=lambda x: isinstance(x, int) and 1 <= x <= flags.clip_skip_max,
+                    preset_binding='clip_skip',
+                    ui_to_config_transform=lambda x: int(x)),
         ConfigField('default_sampler', 'dpmpp_2m_sde_gpu', str,
                     category='sampling', description='Sampler name',
-                    validator=lambda x: x in flags.sampler_list),
+                    validator=lambda x: x in flags.sampler_list,
+                    preset_binding='sampler'),
         ConfigField('default_scheduler', 'karras', str,
                     category='sampling', description='Scheduler name',
-                    validator=lambda x: x in flags.scheduler_list),
+                    validator=lambda x: x in flags.scheduler_list,
+                    preset_binding='scheduler'),
         ConfigField('default_performance', flags.Performance.SPEED.value, str,
                     category='sampling', description='Performance mode',
-                    validator=lambda x: x in flags.Performance.values()),
+                    validator=lambda x: x in flags.Performance.values(),
+                    preset_binding='performance'),
         ConfigField('default_overwrite_step', -1, int,
                     category='sampling', description='Overwrite step count (-1 = auto)',
-                    validator=lambda x: isinstance(x, int)),
+                    validator=lambda x: isinstance(x, int),
+                    preset_binding='steps',
+                    ui_to_config_transform=lambda x: int(x)),
         ConfigField('default_overwrite_switch', -1, int,
                     category='sampling', description='Overwrite switch step (-1 = auto)',
                     validator=lambda x: isinstance(x, int)),
@@ -832,13 +890,17 @@ def build_fooocus_schema(root_dir: str) -> ConfigSchema:
     prompt_fields = [
         ConfigField('default_prompt', '', str,
                     category='prompts', description='Default positive prompt',
-                    validator=lambda x: isinstance(x, str)),
+                    validator=lambda x: isinstance(x, str),
+                    preset_binding='prompt'),
         ConfigField('default_prompt_negative', '', str,
                     category='prompts', description='Default negative prompt',
-                    validator=lambda x: isinstance(x, str)),
+                    validator=lambda x: isinstance(x, str),
+                    preset_binding='negative_prompt'),
         ConfigField('default_styles', ["Fooocus V2", "Fooocus Enhance", "Fooocus Sharp"], list,
                     category='prompts', description='Default styles',
-                    validator=lambda x: isinstance(x, list) and all(y in sdxl_styles.legal_style_names for y in x)),
+                    validator=lambda x: isinstance(x, list) and all(y in sdxl_styles.legal_style_names for y in x),
+                    preset_binding='styles',
+                    ui_to_config_transform=lambda x: list(x) if x else []),
     ]
 
     for f in prompt_fields:
@@ -903,10 +965,13 @@ def build_fooocus_schema(root_dir: str) -> ConfigSchema:
                     save_to_config=False),
         ConfigField('default_aspect_ratio', aspect_ratio_default, str,
                     category='image', description='Default aspect ratio',
-                    validator=lambda x: x in flags.sdxl_aspect_ratios),
+                    validator=lambda x: x in flags.sdxl_aspect_ratios,
+                    preset_binding='resolution',
+                    ui_to_config_transform=lambda x: x.replace('×', '*').split(' ')[0] if '×' in str(x) else str(x).replace('×', '*')),
         ConfigField('default_inpaint_engine_version', 'v2.6', str,
                     category='image', description='Inpaint engine version',
-                    validator=lambda x: x in flags.inpaint_engine_versions),
+                    validator=lambda x: x in flags.inpaint_engine_versions,
+                    preset_binding='inpaint_engine_version'),
     ]
 
     for f in image_fields:
@@ -1033,16 +1098,20 @@ def build_fooocus_schema(root_dir: str) -> ConfigSchema:
     download_fields = [
         ConfigField('checkpoint_downloads', {}, dict,
                     category='downloads', description='Checkpoint URL map',
-                    validator=lambda x: isinstance(x, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in x.items())),
+                    validator=lambda x: isinstance(x, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in x.items()),
+                    preset_binding='checkpoint_downloads'),
         ConfigField('lora_downloads', {}, dict,
                     category='downloads', description='LoRA URL map',
-                    validator=lambda x: isinstance(x, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in x.items())),
+                    validator=lambda x: isinstance(x, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in x.items()),
+                    preset_binding='lora_downloads'),
         ConfigField('embeddings_downloads', {}, dict,
                     category='downloads', description='Embedding URL map',
-                    validator=lambda x: isinstance(x, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in x.items())),
+                    validator=lambda x: isinstance(x, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in x.items()),
+                    preset_binding='embeddings_downloads'),
         ConfigField('vae_downloads', {}, dict,
                     category='downloads', description='VAE URL map',
-                    validator=lambda x: isinstance(x, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in x.items())),
+                    validator=lambda x: isinstance(x, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in x.items()),
+                    preset_binding='vae_downloads'),
     ]
 
     for f in download_fields:

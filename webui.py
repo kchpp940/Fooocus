@@ -26,24 +26,24 @@ from modules.util import is_json
 
 
 def build_preset_data_from_ui(*args):
-    preset_data = {}
+    ui_values = {}
 
     arg_idx = 0
-    default_model = args[arg_idx]; arg_idx += 1
-    default_refiner = args[arg_idx]; arg_idx += 1
-    default_refiner_switch = args[arg_idx]; arg_idx += 1
-    default_cfg_scale = args[arg_idx]; arg_idx += 1
-    default_sample_sharpness = args[arg_idx]; arg_idx += 1
-    default_cfg_tsnr = args[arg_idx]; arg_idx += 1
-    default_clip_skip = args[arg_idx]; arg_idx += 1
-    default_sampler = args[arg_idx]; arg_idx += 1
-    default_scheduler = args[arg_idx]; arg_idx += 1
-    default_vae = args[arg_idx]; arg_idx += 1
-    default_performance = args[arg_idx]; arg_idx += 1
-    default_aspect_ratio_label = args[arg_idx]; arg_idx += 1
-    default_styles = args[arg_idx]; arg_idx += 1
-    default_overwrite_step = args[arg_idx]; arg_idx += 1
-    default_inpaint_engine_version = args[arg_idx]; arg_idx += 1
+    ui_values['base_model'] = args[arg_idx]; arg_idx += 1
+    ui_values['refiner_model'] = args[arg_idx]; arg_idx += 1
+    ui_values['refiner_switch'] = args[arg_idx]; arg_idx += 1
+    ui_values['guidance_scale'] = args[arg_idx]; arg_idx += 1
+    ui_values['sharpness'] = args[arg_idx]; arg_idx += 1
+    ui_values['adaptive_cfg'] = args[arg_idx]; arg_idx += 1
+    ui_values['clip_skip'] = args[arg_idx]; arg_idx += 1
+    ui_values['sampler'] = args[arg_idx]; arg_idx += 1
+    ui_values['scheduler'] = args[arg_idx]; arg_idx += 1
+    ui_values['vae'] = args[arg_idx]; arg_idx += 1
+    ui_values['performance'] = args[arg_idx]; arg_idx += 1
+    ui_values['resolution'] = args[arg_idx]; arg_idx += 1
+    ui_values['styles'] = args[arg_idx]; arg_idx += 1
+    ui_values['steps'] = args[arg_idx]; arg_idx += 1
+    ui_values['inpaint_engine_version'] = args[arg_idx]; arg_idx += 1
 
     lora_count = modules.config.default_max_lora_number
     default_loras = []
@@ -52,36 +52,9 @@ def build_preset_data_from_ui(*args):
         model = args[arg_idx]; arg_idx += 1
         weight = args[arg_idx]; arg_idx += 1
         default_loras.append([enabled, model if model else 'None', float(weight)])
+    ui_values['loras'] = default_loras
 
-    if '×' in str(default_aspect_ratio_label):
-        ratio_part = str(default_aspect_ratio_label).split(' ')[0]
-        default_aspect_ratio = ratio_part.replace('×', '*')
-    else:
-        default_aspect_ratio = str(default_aspect_ratio_label).replace('×', '*')
-
-    preset_data = {
-        'default_model': default_model if default_model else 'model.safetensors',
-        'default_refiner': default_refiner if default_refiner else 'None',
-        'default_refiner_switch': float(default_refiner_switch),
-        'default_loras': default_loras,
-        'default_cfg_scale': float(default_cfg_scale),
-        'default_sample_sharpness': float(default_sample_sharpness),
-        'default_cfg_tsnr': float(default_cfg_tsnr),
-        'default_clip_skip': int(default_clip_skip),
-        'default_sampler': default_sampler,
-        'default_scheduler': default_scheduler,
-        'default_vae': default_vae if default_vae != modules.flags.default_vae else 'Default (model)',
-        'default_performance': default_performance,
-        'default_aspect_ratio': default_aspect_ratio,
-        'default_styles': list(default_styles) if default_styles else [],
-        'default_overwrite_step': int(default_overwrite_step),
-        'default_inpaint_engine_version': default_inpaint_engine_version,
-        'checkpoint_downloads': {},
-        'embeddings_downloads': {},
-        'lora_downloads': {},
-        'vae_downloads': {},
-    }
-    return preset_data
+    return modules.config.export_from_ui_values(ui_values)
 
 
 def format_preset_details_html(preset_name):

@@ -96,6 +96,14 @@ def get_export_metadata() -> dict:
     return config_schema.get_export_metadata(config_result)
 
 
+def export_from_ui_values(ui_values: dict) -> dict:
+    return config_schema.export_from_ui_values(ui_values)
+
+
+def get_preset_binding_map() -> dict:
+    return config_schema.get_preset_binding_map()
+
+
 def _apply_cli_overrides():
     cli_issues = args_manager.sync_cli_args_to_config_result(config_result)
     config_result.issues.extend(cli_issues)
@@ -697,36 +705,20 @@ default_describe_content_type = get_ui_default('default_describe_content_type', 
 
 config_dict["default_loras"] = default_loras = default_loras[:default_max_lora_number] + [[True, 'None', 1.0] for _ in range(default_max_lora_number - len(default_loras))]
 
-possible_preset_keys = {
-    "default_model": "base_model",
-    "default_refiner": "refiner_model",
-    "default_refiner_switch": "refiner_switch",
-    "previous_default_models": "previous_default_models",
-    "default_loras_min_weight": "default_loras_min_weight",
-    "default_loras_max_weight": "default_loras_max_weight",
-    "default_loras": "<processed>",
-    "default_cfg_scale": "guidance_scale",
-    "default_sample_sharpness": "sharpness",
-    "default_cfg_tsnr": "adaptive_cfg",
-    "default_clip_skip": "clip_skip",
-    "default_sampler": "sampler",
-    "default_scheduler": "scheduler",
-    "default_overwrite_step": "steps",
-    "default_overwrite_switch": "overwrite_switch",
-    "default_performance": "performance",
-    "default_image_number": "image_number",
-    "default_prompt": "prompt",
-    "default_prompt_negative": "negative_prompt",
-    "default_styles": "styles",
-    "default_aspect_ratio": "resolution",
-    "default_save_metadata_to_images": "default_save_metadata_to_images",
-    "checkpoint_downloads": "checkpoint_downloads",
-    "embeddings_downloads": "embeddings_downloads",
-    "lora_downloads": "lora_downloads",
-    "vae_downloads": "vae_downloads",
-    "default_vae": "vae",
-    "default_inpaint_engine_version": "inpaint_engine_version",
-}
+
+def _build_possible_preset_keys():
+    result = {}
+    binding_map = config_schema.get_preset_binding_map()
+    for binding_name, binding_info in binding_map.items():
+        result[binding_info['key']] = binding_name
+    for field in config_schema.get_preset_fields():
+        if field.key not in result:
+            if field.preset_binding is None:
+                result[field.key] = field.key
+    result['default_loras'] = '<processed>'
+    return result
+
+possible_preset_keys = _build_possible_preset_keys()
 
 REWRITE_PRESET = False
 
