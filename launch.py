@@ -6,18 +6,22 @@ PREFLIGHT_ONLY = "--preflight-check" in sys.argv
 PREFLIGHT_JSON = PREFLIGHT_ONLY and "--json" in sys.argv
 
 
-def _extract_preflight_mode(argv):
-    """从 argv 中提取 --mode 值，不修改原列表。未显式指定时返回 None（默认 strict）。"""
-    mode = None
+def _extract_preflight_arg(argv, name):
+    """
+    从 argv 中提取 --name <value> 或 --name=<value> 的值。
+    返回 (value, has_arg)。value 为 None 表示未指定。
+    """
+    value = None
     for i, arg in enumerate(argv):
-        if arg == "--mode" and i + 1 < len(argv):
-            mode = argv[i + 1]
-        elif arg.startswith("--mode="):
-            mode = arg.split("=", 1)[1]
-    return mode
+        if arg == f"--{name}" and i + 1 < len(argv):
+            value = argv[i + 1]
+        elif arg.startswith(f"--{name}="):
+            value = arg.split("=", 1)[1]
+    return value
 
 
-PREFLIGHT_MODE_CLI = _extract_preflight_mode(sys.argv) if PREFLIGHT_ONLY else None
+PREFLIGHT_POLICY_CLI = _extract_preflight_arg(sys.argv, "policy") if PREFLIGHT_ONLY else None
+PREFLIGHT_MODE_CLI = _extract_preflight_arg(sys.argv, "mode") if PREFLIGHT_ONLY else None
 
 FORCE_JSON_ENV = os.environ.get("FOOOCUS_PREFLIGHT_JSON", "").strip().lower() in ("1", "true", "yes", "on")
 QUIET_MODE = PREFLIGHT_JSON or FORCE_JSON_ENV
@@ -39,19 +43,29 @@ ssl._create_default_https_context = ssl._create_unverified_context
 
 
 def _strip_preflight_args(argv):
-    """移除 --preflight-check、--json、--mode <value>、--mode=<value>，不影响其他参数。"""
+    """
+    移除 --preflight-check、--json，以及 --policy/--mode 及其值，
+    不影响 Fooocus 其他启动参数。
+    """
     result = []
     i = 0
+    skip_next_names = {"policy", "mode"}
     while i < len(argv):
         arg = argv[i]
         if arg in ("--preflight-check", "--json"):
             i += 1
             continue
-        if arg == "--mode" and i + 1 < len(argv):
-            i += 2
-            continue
-        if arg.startswith("--mode="):
-            i += 1
+        consumed = False
+        for name in skip_next_names:
+            if arg == f"--{name}" and i + 1 < len(argv):
+                i += 2
+                consumed = True
+                break
+            if arg.startswith(f"--{name}="):
+                i += 1
+                consumed = True
+                break
+        if consumed:
             continue
         result.append(arg)
         i += 1
@@ -60,22 +74,31 @@ def _strip_preflight_args(argv):
 
 if PREFLIGHT_ONLY:
     try:
-        from modules.environment_preflight import run_preflight, CheckMode
-        # 独立模式默认 strict；用户显式 --mode 优先
-        resolved_mode = PREFLIGHT_MODE_CLI if PREFLIGHT_MODE_CLI else CheckMode.STRICT
+        from modules.environment_preflight import run_preflight, PreflightPolicy
+
+        # 策略选择：--policy > --mode > 默认 cli_default
+        if PREFLIGHT_POLICY_CLI:
+            resolved_policy = PREFLIGHT_POLICY_CLI
+        elif PREFLIGHT_MODE_CLI:
+            # 兼容 --mode，走动态解析
+            resolved_policy = None
+        else:
+            resolved_policy = "cli_default"
+
         if not FOOOCUS_SKIP_PREFLIGHT:
             if not QUIET_MODE:
+                label = resolved_policy if resolved_policy else f"mode={PREFLIGHT_MODE_CLI}"
                 print(
-                    f"\n[Preflight] Running environment check (preflight-only, mode={resolved_mode}) ...\n",
+                    f"\n[Preflight] Running environment check (preflight-only, {label}) ...\n",
                     file=sys.stderr
                 )
             report = run_preflight(
                 root_dir=root,
-                mode=resolved_mode,
+                policy=resolved_policy,
+                mode=PREFLIGHT_MODE_CLI if resolved_policy is None else None,
                 print_report=True,
                 use_colors=not QUIET_MODE,
                 as_json=PREFLIGHT_JSON,
-                stage="preflight-only",
                 call_exit=True
             )
             # 兜底：call_exit=True 已在内部处理退出，这里防止极端情况
@@ -85,7 +108,11 @@ if PREFLIGHT_ONLY:
                 print("[Preflight] Skipped (FOOOCUS_SKIP_PREFLIGHT=1)", file=sys.stderr)
             if PREFLIGHT_JSON:
                 import json
-                print(json.dumps({"skipped": True, "reason": "FOOOCUS_SKIP_PREFLIGHT=1", "mode": resolved_mode}, indent=2))
+                print(json.dumps({
+                    "skipped": True,
+                    "reason": "FOOOCUS_SKIP_PREFLIGHT=1",
+                    "policy": resolved_policy or PREFLIGHT_MODE_CLI,
+                }, indent=2))
             sys.exit(0)
     except SystemExit:
         raise
@@ -110,26 +137,27 @@ REINSTALL_ALL = False
 TRY_INSTALL_XFORMERS = False
 
 
-def run_preflight_check(stage: str = "early"):
+def run_preflight_check(policy: str = "launch_early"):
     """
-    正常启动内嵌的预检。使用 mode=report，永远不阻塞启动。
-    退出码始终为 0（除自身异常=2），只给出可视化提示。
+    正常启动内嵌的预检。默认使用 launch_early 策略（非阻塞，只出报告）。
+
+    所有规则（mode / stage / 缓存键 / 退出码）由 PreflightPolicy 集中定义，
+    调用方只需传入 policy 名称，无需关心内部细节。
     """
     if FOOOCUS_SKIP_PREFLIGHT:
         if not QUIET_MODE:
-            print(f"\n[Preflight] Stage '{stage}' skipped (FOOOCUS_SKIP_PREFLIGHT=1)\n")
+            print(f"\n[Preflight] policy={policy} skipped (FOOOCUS_SKIP_PREFLIGHT=1)\n")
         return None
     try:
-        from modules.environment_preflight import run_preflight, CheckMode
+        from modules.environment_preflight import run_preflight
         if not QUIET_MODE:
-            print(f"\n[Preflight] Running {stage} environment check (mode=report, non-blocking) ...\n")
+            print(f"\n[Preflight] Running {policy} environment check (non-blocking) ...\n")
         report = run_preflight(
             root_dir=root,
-            mode=CheckMode.REPORT,
+            policy=policy,
             print_report=True,
             use_colors=not QUIET_MODE,
             as_json=FORCE_JSON_ENV,
-            stage=stage,
             call_exit=True
         )
         return report

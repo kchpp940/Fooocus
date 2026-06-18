@@ -105,6 +105,127 @@ def _mode_exit_code(mode: str, report: PreflightReport) -> int:
     return 0
 
 
+_PREFLIGHT_POLICIES: Dict[str, "PreflightPolicy"] = {}
+
+
+@dataclass(frozen=True)
+class PreflightPolicy:
+    """
+    单一入口的预检策略。集中定义 mode / stage / 缓存键 / 退出码规则。
+
+    所有调用方只传 policy 名称，由 policy 决定内部行为，
+    避免不同入口散传 mode/stage/exit_on_error 导致行为不一致。
+    """
+    name: str
+    mode: str
+    stage: str
+    description: str = ""
+
+    @classmethod
+    def register(cls, name: str, mode: str, stage: str, description: str = "") -> "PreflightPolicy":
+        policy = cls(name=name, mode=mode, stage=stage, description=description)
+        _PREFLIGHT_POLICIES[name] = policy
+        return policy
+
+    @classmethod
+    def get(cls, name: str) -> "PreflightPolicy":
+        if name not in _PREFLIGHT_POLICIES:
+            raise ValueError(
+                f"Unknown preflight policy: {name!r}. "
+                f"Available: {sorted(_PREFLIGHT_POLICIES.keys())}"
+            )
+        return _PREFLIGHT_POLICIES[name]
+
+    @classmethod
+    def all_policies(cls) -> Dict[str, "PreflightPolicy"]:
+        return dict(_PREFLIGHT_POLICIES)
+
+
+# ===== 标准策略注册 =====
+PreflightPolicy.register(
+    "launch_early",
+    mode=CheckMode.REPORT,
+    stage="early",
+    description="启动早期内嵌检查（非阻塞，只出报告）",
+)
+PreflightPolicy.register(
+    "launch_post_install",
+    mode=CheckMode.REPORT,
+    stage="post-install",
+    description="依赖安装完成后的验证（非阻塞，只出报告）",
+)
+PreflightPolicy.register(
+    "pre_update",
+    mode=CheckMode.REPORT,
+    stage="pre-update",
+    description="git 更新前的预检（非阻塞，只出报告）",
+)
+PreflightPolicy.register(
+    "cli_default",
+    mode=CheckMode.STRICT,
+    stage="preflight-only",
+    description="独立 CLI 默认策略（严格模式，有 FAIL 就退出）",
+)
+PreflightPolicy.register(
+    "healthcheck",
+    mode=CheckMode.HEALTHCHECK,
+    stage="healthcheck",
+    description="Docker HEALTHCHECK 专用（FAIL 才不健康，WARNING 仍算健康）",
+)
+PreflightPolicy.register(
+    "ci",
+    mode=CheckMode.STRICT,
+    stage="ci",
+    description="CI pipeline 专用（严格模式 + JSON 输出）",
+)
+PreflightPolicy.register(
+    "report",
+    mode=CheckMode.REPORT,
+    stage="report",
+    description="通用报告模式（永远不阻塞）",
+)
+PreflightPolicy.register(
+    "strict",
+    mode=CheckMode.STRICT,
+    stage="strict",
+    description="通用严格模式（有 FAIL 就非零退出）",
+)
+
+
+def _resolve_policy(policy_name, mode, stage, exit_on_error_deprecated):
+    """
+    根据传入参数解析最终 policy。优先级：
+    1. 显式 policy= 名称（最推荐）
+    2. 显式 mode=（次选，stage 可选）
+    3. exit_on_error=True → 等价于 strict 模式（废弃）
+    4. 都没有 → 默认为 report 模式（内嵌安全默认值）
+    """
+    import warnings
+
+    if policy_name is not None:
+        return PreflightPolicy.get(policy_name)
+
+    # 旧参数兼容：exit_on_error → strict
+    if exit_on_error_deprecated:
+        warnings.warn(
+            "'exit_on_error' 参数已废弃，请使用 policy='strict' 或 mode='strict'。",
+            DeprecationWarning,
+            stacklevel=3
+        )
+        mode = mode or CheckMode.STRICT
+
+    resolved_mode = mode if mode is not None else CheckMode.REPORT
+    resolved_stage = stage if stage is not None else resolved_mode
+
+    # 用 mode+stage 构造一个动态 policy（无需注册）
+    return PreflightPolicy(
+        name=f"dynamic:{resolved_mode}/{resolved_stage}",
+        mode=resolved_mode,
+        stage=resolved_stage,
+        description="由 mode/stage 动态合成的策略",
+    )
+
+
 def _get_package_version(package_name: str) -> Optional[str]:
     try:
         return importlib.metadata.version(package_name)
@@ -687,26 +808,11 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _resolve_mode(mode: Optional[str], exit_on_error_deprecated: bool) -> str:
-    """
-    解析最终运行模式。
-    优先使用 mode 参数；未指定时向后兼容 exit_on_error（等价于 strict）。
-    默认模式为 report（始终不影响退出码）。
-    """
-    if mode is not None:
-        m = mode.strip().lower()
-        if m in CheckMode._ALL:
-            return m
-        raise ValueError(f"Unknown preflight mode: {mode!r}. Valid: {CheckMode._ALL}")
-    if exit_on_error_deprecated:
-        return CheckMode.STRICT
-    return CheckMode.REPORT
-
-
 _RUN_CACHE: Dict[str, PreflightReport] = {}
 
 
 def run_preflight(root_dir: Optional[str] = None,
+                  policy: Optional[str] = None,
                   mode: Optional[str] = None,
                   exit_on_error: bool = False,
                   print_report: bool = True,
@@ -717,22 +823,27 @@ def run_preflight(root_dir: Optional[str] = None,
     """
     运行环境预检。
 
+    **推荐用法：只传 policy= 名称**，例如 ``run_preflight(policy="launch_early")``。
+    所有 mode / stage / 退出码 / 缓存键规则都由 :class:`PreflightPolicy` 统一管理，
+    避免不同入口散传参数导致行为不一致。
+
     Parameters
     ----------
+    policy : str or None
+        标准策略名称，如 ``launch_early`` / ``healthcheck`` / ``ci`` / ``cli_default``。
+        优先于 mode / stage / exit_on_error 参数。
+        可用列表： ``PreflightPolicy.all_policies().keys()``
     mode : {"report", "healthcheck", "strict"} or None
-        * report      - 只输出报告，**无论是否有错误**退出码均为 0（除自身异常=2）。
-                        用于内嵌在正常启动流程中，不阻塞启动。
-        * healthcheck - FAIL 级检查项 → 退出 1；WARNING / PASS → 退出 0；自身异常 → 退出 2。
-                        用于 Docker HEALTHCHECK（WARNING 不判为不健康）。
-        * strict     - 与 healthcheck 退出码规则相同，但语义为 CI/用户主动校验。
-                        用于 --preflight-check 独立运行与 CI pipeline。
+        兼容参数。未指定 policy 时有效。
     exit_on_error : bool
-        已废弃参数，等价于 mode='strict'。请勿与 mode 同时指定。
+        **已废弃**，等价于 ``mode='strict'``。会打印 deprecation warning。
+    stage : str or None
+        兼容参数。用于缓存键，未指定 policy 时有效。
     call_exit : bool
-        是否在内部调用 sys.exit。False 时仅计算并返回退出码（通过 report._exit_code 标记）。
+        是否在内部调用 sys.exit。False 时仅将退出码写入 ``report._exit_code``。
     """
     try:
-        effective_mode = _resolve_mode(mode, exit_on_error)
+        effective_policy = _resolve_policy(policy, mode, stage, exit_on_error)
     except ValueError as e:
         print(f"[Preflight] Error: {e}", file=sys.stderr)
         if call_exit:
@@ -746,20 +857,33 @@ def run_preflight(root_dir: Optional[str] = None,
     if skip:
         if print_report:
             if effective_json:
-                payload = {"skipped": True, "reason": "FOOOCUS_SKIP_PREFLIGHT=1", "mode": effective_mode}
+                payload = {
+                    "skipped": True,
+                    "reason": "FOOOCUS_SKIP_PREFLIGHT=1",
+                    "policy": effective_policy.name,
+                    "mode": effective_policy.mode,
+                }
                 print(json.dumps(payload, indent=2))
             else:
-                print(f"[Preflight] Skipped (FOOOCUS_SKIP_PREFLIGHT=1, mode={effective_mode})")
+                print(
+                    f"[Preflight] Skipped (FOOOCUS_SKIP_PREFLIGHT=1, "
+                    f"policy={effective_policy.name}, mode={effective_policy.mode})"
+                )
         if call_exit:
             sys.exit(0)
         return None
 
-    cache_key = f"{os.path.abspath(root_dir or '.')}:{stage or 'all'}"
+    # 缓存键使用 policy.stage，保证同一 stage 的不同入口（如 launch.py early 和 CI early）共享同一缓存
+    cache_key = f"{os.path.abspath(root_dir or '.')}:{effective_policy.stage}"
     cached = _RUN_CACHE.get(cache_key)
     if cached is not None and not effective_json:
         if print_report:
-            print(f"[Preflight] Stage '{stage or 'all'}' skipped (cached, mode={effective_mode})")
-        cached._exit_code = _mode_exit_code(effective_mode, cached)
+            print(
+                f"[Preflight] policy={effective_policy.name} "
+                f"(stage={effective_policy.stage}) skipped (cached from earlier run)"
+            )
+        cached._exit_code = _mode_exit_code(effective_policy.mode, cached)
+        cached._policy = effective_policy.name
         if call_exit and cached._exit_code != 0:
             sys.exit(cached._exit_code)
         return cached
@@ -767,19 +891,23 @@ def run_preflight(root_dir: Optional[str] = None,
     checker = PreflightChecker(root_dir=root_dir)
     report = checker.run_all()
     _RUN_CACHE[cache_key] = report
-    report._exit_code = _mode_exit_code(effective_mode, report)
+    report._exit_code = _mode_exit_code(effective_policy.mode, report)
+    report._policy = effective_policy.name
 
     if print_report:
         if effective_json:
             payload = report.to_dict()
-            payload["mode"] = effective_mode
+            payload["policy"] = effective_policy.name
+            payload["mode"] = effective_policy.mode
+            payload["stage"] = effective_policy.stage
             payload["exit_code"] = report._exit_code
             print(json.dumps(payload, indent=2))
         else:
             print(format_report(report, use_colors=use_colors))
-            if effective_mode != CheckMode.REPORT and report._exit_code != 0:
+            if effective_policy.mode != CheckMode.REPORT and report._exit_code != 0:
                 print(
-                    f"[Preflight] mode={effective_mode}: exit code {report._exit_code} will be returned "
+                    f"[Preflight] policy={effective_policy.name} (mode={effective_policy.mode}): "
+                    f"exit code {report._exit_code} will be returned "
                     f"({len(report.failed)} failures detected).",
                     file=sys.stderr
                 )
@@ -792,9 +920,18 @@ def run_preflight(root_dir: Optional[str] = None,
 
 def _main():
     import argparse
+    import warnings
 
     parser = argparse.ArgumentParser(
-        description="Fooocus Environment Preflight Check"
+        description="Fooocus Environment Preflight Check",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Available policies:\n"
+            + "\n".join(
+                f"  {name:20s} - {p.description}"
+                for name, p in sorted(PreflightPolicy.all_policies().items())
+            )
+        )
     )
     parser.add_argument(
         "--root",
@@ -803,21 +940,33 @@ def _main():
         help="Root directory of the Fooocus installation"
     )
     parser.add_argument(
+        "--policy",
+        type=str,
+        default=None,
+        help="运行策略名称（推荐）。可用列表见下方。"
+    )
+    parser.add_argument(
         "--mode",
         type=str,
         choices=list(CheckMode._ALL),
         default=None,
-        help=(
-            "运行模式 (独立 CLI 默认 strict)。\n"
-            "  report      - 只出报告，退出码永为 0（启动内嵌使用）\n"
-            "  healthcheck - 有 FAIL 就非零退出（Docker HEALTHCHECK）\n"
-            "  strict      - 有 FAIL 就非零退出（CI / --preflight-check 默认）"
-        )
+        help="运行模式 (兼容参数，推荐改用 --policy)。"
+    )
+    parser.add_argument(
+        "--stage",
+        type=str,
+        default=None,
+        help="阶段标签，用于缓存键 (兼容参数，推荐改用 --policy)。"
     )
     parser.add_argument(
         "--exit-on-error",
         action="store_true",
-        help="[已废弃，等同于 --mode strict]"
+        help="[已废弃] 有 FAIL 就非零退出。等价于 --policy strict。"
+    )
+    parser.add_argument(
+        "--no-exit",
+        action="store_true",
+        help="[已废弃] 无论是否有错误退出码都为 0。等价于 --policy report。将打印 deprecation warning。"
     )
     parser.add_argument(
         "--no-colors",
@@ -829,26 +978,38 @@ def _main():
         action="store_true",
         help="Output results as JSON instead of human-readable format"
     )
-    parser.add_argument(
-        "--stage",
-        type=str,
-        default=None,
-        help="Stage label for caching (e.g. 'early', 'post-install')"
-    )
 
     args = parser.parse_args()
 
-    # 独立 CLI 默认 strict；用户显式传 mode 优先
-    resolved_mode = args.mode if args.mode is not None else CheckMode.STRICT
+    # 解析最终 policy
+    if args.policy is not None:
+        resolved_policy = args.policy
+    elif args.no_exit:
+        # --no-exit → report 模式
+        if not args.json:
+            print(
+                "[Preflight] Warning: --no-exit is deprecated, "
+                "use --policy report instead.",
+                file=sys.stderr
+            )
+        resolved_policy = "report"
+    elif args.exit_on_error or args.mode or args.stage:
+        # 使用兼容参数走 _resolve_policy 动态合成
+        resolved_policy = None
+    else:
+        # 独立 CLI 默认严格模式
+        resolved_policy = "cli_default"
 
     try:
         report = run_preflight(
             root_dir=args.root,
-            mode=resolved_mode,
+            policy=resolved_policy,
+            mode=args.mode if resolved_policy is None else None,
+            stage=args.stage if resolved_policy is None else None,
+            exit_on_error=args.exit_on_error if resolved_policy is None else False,
             print_report=True,
             use_colors=not args.no_colors and not args.json,
             as_json=args.json,
-            stage=args.stage,
             call_exit=True
         )
     except ValueError:
