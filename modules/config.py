@@ -104,6 +104,29 @@ def get_preset_binding_map() -> dict:
     return config_schema.get_preset_binding_map()
 
 
+def get_diagnostics():
+    return config_schema.build_diagnostics(config_result)
+
+
+def format_diagnostics(show_warnings_only: bool = False) -> str:
+    return config_schema.format_diagnostics_terminal(config_result, show_warnings_only)
+
+
+def run_config_preflight(root_dir: str = None, output_json: bool = False,
+                         include_config_txt: bool = True,
+                         include_user_presets: bool = False,
+                         include_deprecated_user_path: bool = False):
+    if root_dir is None:
+        root_dir = _root_dir
+    return config_schema.ConfigSchema.standalone_check(
+        root_dir=root_dir,
+        output_json=output_json,
+        include_config_txt=include_config_txt,
+        include_user_presets=include_user_presets,
+        include_deprecated_user_path=include_deprecated_user_path,
+    )
+
+
 def _apply_cli_overrides():
     cli_issues = args_manager.sync_cli_args_to_config_result(config_result)
     config_result.issues.extend(cli_issues)

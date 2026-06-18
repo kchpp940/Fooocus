@@ -87,6 +87,21 @@ if args.hf_mirror is not None:
 from modules import config
 from modules.hash_cache import init_cache
 
+_diagnostics_output = config.format_diagnostics(show_warnings_only=True)
+if _diagnostics_output:
+    print(_diagnostics_output)
+
+if getattr(args, 'preflight_check', False):
+    _diag = config.get_diagnostics()
+    if getattr(args, 'preflight_json', False):
+        print(_diag.to_json())
+    else:
+        print(config.format_diagnostics(show_warnings_only=False))
+    _exit_code = 0 if _diag.config_ok else _diag.to_dict()['exit_code']
+    if getattr(args, 'preflight_strict', False) and _diag.warn_count > 0:
+        _exit_code = max(_exit_code, 2)
+    sys.exit(_exit_code)
+
 os.environ["U2NET_HOME"] = config.path_inpaint
 
 os.environ['GRADIO_TEMP_DIR'] = config.temp_path

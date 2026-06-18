@@ -46,6 +46,30 @@ class ConfigIssueType(Enum):
     REPLACED_FIELD = "replaced_field"
 
 
+class ConfigSeverity(Enum):
+    INFO = "info"
+    WARN = "warn"
+    ERROR = "error"
+
+    @property
+    def priority(self) -> int:
+        return {
+            ConfigSeverity.INFO: 0,
+            ConfigSeverity.WARN: 10,
+            ConfigSeverity.ERROR: 20,
+        }[self]
+
+
+ISSUE_SEVERITY_MAP: Dict[ConfigIssueType, ConfigSeverity] = {
+    ConfigIssueType.UNKNOWN_KEY: ConfigSeverity.WARN,
+    ConfigIssueType.TYPE_ERROR: ConfigSeverity.ERROR,
+    ConfigIssueType.VALIDATION_ERROR: ConfigSeverity.ERROR,
+    ConfigIssueType.PATH_NOT_FOUND: ConfigSeverity.ERROR,
+    ConfigIssueType.DEPRECATED_FIELD: ConfigSeverity.WARN,
+    ConfigIssueType.REPLACED_FIELD: ConfigSeverity.WARN,
+}
+
+
 @dataclass
 class ConfigIssue:
     key: str
@@ -54,6 +78,21 @@ class ConfigIssue:
     source: Optional[ConfigSource] = None
     raw_value: Optional[Any] = None
     expected: Optional[str] = None
+
+    @property
+    def severity(self) -> ConfigSeverity:
+        return ISSUE_SEVERITY_MAP.get(self.issue_type, ConfigSeverity.WARN)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'key': self.key,
+            'type': self.issue_type.value,
+            'severity': self.severity.value,
+            'message': self.message,
+            'source': self.source.value if self.source else None,
+            'raw_value': None if self.raw_value is None else (str(self.raw_value)[:200]),
+            'expected': self.expected,
+        }
 
 
 @dataclass
@@ -111,6 +150,95 @@ class ConfigLoadResult:
 
     def issues_by_type(self, issue_type: ConfigIssueType) -> List[ConfigIssue]:
         return [i for i in self.issues if i.issue_type == issue_type]
+
+    def issues_by_severity(self, severity: ConfigSeverity) -> List[ConfigIssue]:
+        return [i for i in self.issues if i.severity == severity]
+
+    @property
+    def errors(self) -> List[ConfigIssue]:
+        return self.issues_by_severity(ConfigSeverity.ERROR)
+
+    @property
+    def warnings(self) -> List[ConfigIssue]:
+        return self.issues_by_severity(ConfigSeverity.WARN)
+
+    @property
+    def has_errors(self) -> bool:
+        return len(self.errors) > 0
+
+
+@dataclass
+class ConfigDiagnostics:
+    schema_version: str = "1.0"
+    config_ok: bool = True
+    total_issues: int = 0
+    error_count: int = 0
+    warn_count: int = 0
+    info_count: int = 0
+    issues: List[Dict[str, Any]] = field(default_factory=list)
+    source_counts: Dict[str, int] = field(default_factory=dict)
+    write_back_preview: Dict[str, Any] = field(default_factory=dict)
+    summary: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def has_errors(self) -> bool:
+        return self.error_count > 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'schema_version': self.schema_version,
+            'ok': self.config_ok,
+            'exit_code': 0 if self.config_ok else 3,
+            'counts': {
+                'total': self.total_issues,
+                'errors': self.error_count,
+                'warnings': self.warn_count,
+                'info': self.info_count,
+            },
+            'issues': self.issues,
+            'sources': self.source_counts,
+            'write_back_preview': self.write_back_preview,
+            'summary': self.summary,
+        }
+
+    def to_json(self, indent: int = 2) -> str:
+        return json.dumps(self.to_dict(), indent=indent, ensure_ascii=False)
+
+    @classmethod
+    def from_result(cls, schema: 'ConfigSchema', result: ConfigLoadResult) -> 'ConfigDiagnostics':
+        errors = result.errors
+        warnings = result.warnings
+        infos = result.issues_by_severity(ConfigSeverity.INFO)
+
+        source_counts = {}
+        for issue in result.issues:
+            src = issue.source.value if issue.source else 'unknown'
+            source_counts[src] = source_counts.get(src, 0) + 1
+
+        preset_data = schema.export_for_preset(result, include_schema_defaults=False)
+        cfg_data = schema.export_for_config_file(result, include_schema_defaults=False)
+
+        return cls(
+            schema_version="1.0",
+            config_ok=not result.has_errors,
+            total_issues=len(result.issues),
+            error_count=len(errors),
+            warn_count=len(warnings),
+            info_count=len(infos),
+            issues=[i.to_dict() for i in result.issues],
+            source_counts=source_counts,
+            write_back_preview={
+                'preset_keys': list(preset_data.keys()),
+                'preset_count': len(preset_data),
+                'config_file_keys': list(cfg_data.keys()),
+                'config_file_count': len(cfg_data),
+            },
+            summary={
+                'total_fields': len(schema.fields),
+                'loaded_fields': len(result.values),
+                'sources': {k: len(v) for k, v in result.sources_summary.items()},
+            },
+        )
 
 
 class ConfigSchema:
@@ -611,6 +739,121 @@ class ConfigSchema:
 
         cleaned, _ = self.import_and_validate(raw_data, ConfigSource.USER_PRESET, 'ui_preset_save')
         return cleaned
+
+    def build_diagnostics(self, result: ConfigLoadResult) -> ConfigDiagnostics:
+        return ConfigDiagnostics.from_result(self, result)
+
+    def format_diagnostics_terminal(self, result: ConfigLoadResult, show_warnings_only: bool = False) -> str:
+        lines = []
+        errors = result.errors
+        warnings = result.warnings
+
+        if show_warnings_only and not errors and not warnings:
+            return ""
+
+        if not errors and not warnings:
+            lines.append("[Config Diagnostics] ✓ No issues found.")
+            return "\n".join(lines)
+
+        lines.append("=" * 70)
+        lines.append("CONFIG DIAGNOSTICS")
+        lines.append("=" * 70)
+
+        if errors:
+            lines.append(f"\n[ERROR] {len(errors)} critical issue(s) - may break startup")
+            for issue in errors:
+                src = f" [{issue.source.value}]" if issue.source else ""
+                lines.append(f"  ✗ {issue.key}{src}: {issue.message}")
+
+        if warnings and not show_warnings_only:
+            lines.append(f"\n[WARN] {len(warnings)} warning(s) - safe to ignore but recommended to fix")
+            for issue in warnings:
+                src = f" [{issue.source.value}]" if issue.source else ""
+                lines.append(f"  ! {issue.key}{src}: {issue.message}")
+
+        if errors:
+            lines.append(f"\nExit code: 3 ({len(errors)} errors, {len(warnings)} warnings)")
+        elif warnings:
+            lines.append(f"\nExit code: 0 ({len(warnings)} warnings)")
+
+        return "\n".join(lines)
+
+    @classmethod
+    def standalone_check(cls, root_dir: str, output_json: bool = False,
+                         include_config_txt: bool = True,
+                         include_user_presets: bool = False,
+                         include_deprecated_user_path: bool = False) -> Tuple[ConfigDiagnostics, ConfigLoadResult]:
+        schema = cls(root_dir)
+        result = ConfigLoadResult()
+
+        builtin_preset_path = os.path.join(root_dir, 'presets', 'default.json')
+        try:
+            with open(builtin_preset_path, "r", encoding="utf-8") as f:
+                issues = schema.load_dict(result, json.load(f),
+                                          ConfigSource.BUILTIN_PRESET, 'preset:default.json')
+                result.issues.extend(issues)
+        except Exception as e:
+            from .config_schema import ConfigIssue, ConfigIssueType, ConfigSource
+            result.issues.append(ConfigIssue(
+                key='default_preset',
+                issue_type=ConfigIssueType.UNKNOWN_KEY,
+                message=f'Failed to load default preset: {e}',
+                source=ConfigSource.BUILTIN_PRESET,
+            ))
+
+        config_txt_path = os.path.join(root_dir, 'config.txt')
+        if include_config_txt and os.path.exists(config_txt_path):
+            try:
+                with open(config_txt_path, "r", encoding="utf-8") as f:
+                    issues = schema.load_dict(result, json.load(f),
+                                              ConfigSource.CONFIG_FILE,
+                                              f'config:{os.path.basename(config_txt_path)}')
+                    result.issues.extend(issues)
+            except json.JSONDecodeError as e:
+                from .config_schema import ConfigIssue, ConfigIssueType, ConfigSource
+                result.issues.append(ConfigIssue(
+                    key='config.txt',
+                    issue_type=ConfigIssueType.VALIDATION_ERROR,
+                    message=f'Invalid JSON in config.txt: {e}',
+                    source=ConfigSource.CONFIG_FILE,
+                ))
+
+        if include_deprecated_user_path:
+            upc = os.path.join(root_dir, 'user_path_config.txt')
+            if os.path.exists(upc):
+                try:
+                    with open(upc, "r", encoding="utf-8") as f:
+                        issues = schema.load_dict(result, json.load(f),
+                                                  ConfigSource.DEPRECATED_USER_PATH_CONFIG,
+                                                  'config:user_path_config.txt')
+                        result.issues.extend(issues)
+                except Exception:
+                    pass
+
+        if include_user_presets:
+            from .config_schema import ConfigSource
+            user_presets_dir = os.path.join(root_dir, 'presets', 'user')
+            if os.path.isdir(user_presets_dir):
+                for fname in os.listdir(user_presets_dir):
+                    if fname.endswith('.json'):
+                        fpath = os.path.join(user_presets_dir, fname)
+                        try:
+                            with open(fpath, "r", encoding="utf-8") as f:
+                                raw = json.load(f)
+                                cleaned, issues = schema.import_and_validate(
+                                    raw, ConfigSource.USER_PRESET, f'preset:user/{fname}')
+                                result.issues.extend(issues)
+                        except Exception as e:
+                            result.issues.append(ConfigIssue(
+                                key=f'user_preset:{fname}',
+                                issue_type=ConfigIssueType.VALIDATION_ERROR,
+                                message=f'Failed to parse user preset {fname}: {e}',
+                                source=ConfigSource.USER_PRESET,
+                            ))
+
+        schema.apply_defaults(result)
+        diagnostics = schema.build_diagnostics(result)
+        return diagnostics, result
 
     def format_summary(self, result: ConfigLoadResult) -> str:
         lines = []
@@ -1201,9 +1444,82 @@ def build_fooocus_schema(root_dir: str) -> ConfigSchema:
                     cli_arg='preset',
                     ui_default=False, save_to_config=False,
                     validator=lambda x: x is None or isinstance(x, str)),
+        ConfigField('cli_preflight_check', False, bool,
+                    category='cli', description='Run configuration preflight checks and exit',
+                    cli_arg='preflight-check', cli_action='store_true',
+                    ui_default=False, save_to_config=False,
+                    validator=lambda x: isinstance(x, bool)),
+        ConfigField('cli_preflight_json', False, bool,
+                    category='cli', description='Output preflight result as JSON (use with --preflight-check)',
+                    cli_arg='preflight-json', cli_action='store_true',
+                    ui_default=False, save_to_config=False,
+                    validator=lambda x: isinstance(x, bool)),
+        ConfigField('cli_preflight_strict', False, bool,
+                    category='cli', description='Treat warnings as errors in preflight (use with --preflight-check)',
+                    cli_arg='preflight-strict', cli_action='store_true',
+                    ui_default=False, save_to_config=False,
+                    validator=lambda x: isinstance(x, bool)),
     ]
 
     for f in cli_fields:
         schema.register_field(f)
 
     return schema
+
+
+def _cli_main(argv: Optional[List[str]] = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog='python -m modules.config_schema',
+        description='Fooocus configuration schema validator and diagnostics tool.'
+    )
+    parser.add_argument('--check', action='store_true',
+                        help='Run configuration diagnostics on config.txt, presets, and user_path_config.')
+    parser.add_argument('--json', dest='output_json', action='store_true',
+                        help='Output diagnostics as machine-readable JSON.')
+    parser.add_argument('--all', '-a', dest='include_all', action='store_true',
+                        help='Check all sources including user presets and deprecated user_path_config.txt.')
+    parser.add_argument('--user-presets', action='store_true',
+                        help='Also validate user presets in presets/user/.')
+    parser.add_argument('--user-path-config', action='store_true',
+                        help='Also validate deprecated user_path_config.txt.')
+    parser.add_argument('--root', type=str, default=None,
+                        help='Fooocus root directory (defaults to current working directory).')
+    parser.add_argument('--strict', action='store_true',
+                        help='Exit with non-zero code if warnings or errors exist.')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                        help='Suppress human-readable output (combine with --json).')
+
+    args = parser.parse_args(argv)
+
+    root_dir = args.root or os.getcwd()
+
+    if not args.check:
+        parser.print_help()
+        return 0
+
+    diagnostics, result = ConfigSchema.standalone_check(
+        root_dir=root_dir,
+        output_json=args.output_json,
+        include_config_txt=True,
+        include_user_presets=args.include_all or args.user_presets,
+        include_deprecated_user_path=args.include_all or args.user_path_config,
+    )
+
+    if args.output_json:
+        if not args.quiet:
+            sys.stderr.write(diagnostics.to_json())
+            sys.stderr.write("\n")
+        print(diagnostics.to_json())
+    elif not args.quiet:
+        schema = ConfigSchema(root_dir)
+        print(schema.format_diagnostics_terminal(result, show_warnings_only=False))
+
+    if diagnostics.has_errors or (args.strict and diagnostics.warn_count > 0):
+        return diagnostics.to_dict()['exit_code']
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(_cli_main())
