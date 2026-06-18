@@ -417,19 +417,58 @@ class ConfigSchema:
 
         for cli_arg, key in self._cli_args_to_keys.items():
             attr_name = cli_arg.lstrip('-').replace('-', '_')
-            if attr_name in args_dict and args_dict[attr_name] is not None:
+            field = self._fields.get(key)
+            if not field:
+                continue
+
+            if attr_name in args_dict:
                 value = args_dict[attr_name]
-                field = self._fields.get(key)
-                if field and field.cli_action == 'store_true':
-                    pass
-                issues = self.apply_value(
-                    result, key, value,
-                    ConfigSource.CLI_ARGUMENT,
-                    f"cli:{cli_arg}"
-                )
-                all_issues.extend(issues)
+                if field.cli_action == 'store_true':
+                    if value is True:
+                        issues = self.apply_value(
+                            result, key, value,
+                            ConfigSource.CLI_ARGUMENT,
+                            f"cli:{cli_arg}"
+                        )
+                        all_issues.extend(issues)
+                elif value is not None:
+                    issues = self.apply_value(
+                        result, key, value,
+                        ConfigSource.CLI_ARGUMENT,
+                        f"cli:{cli_arg}"
+                    )
+                    all_issues.extend(issues)
 
         return all_issues
+
+    def get_value(self, result: ConfigLoadResult, key: str, default: Any = None) -> Any:
+        val = result.get(key, None)
+        if val is not None:
+            return val
+        field = self.get_field(key)
+        if field:
+            return field.default_value
+        return default
+
+    def get_ui_default(self, result: ConfigLoadResult, key: str, default: Any = None) -> Any:
+        val = result.get(key, None)
+        if val is not None:
+            return val
+        field = self.get_field(key)
+        if field:
+            return field.default_value
+        return default
+
+    def get_source(self, result: ConfigLoadResult, key: str) -> Optional[ConfigSource]:
+        return result.get_source(key)
+
+    def get_source_detail(self, result: ConfigLoadResult, key: str) -> str:
+        if key in result.values:
+            return result.values[key].source_detail
+        return "schema_default"
+
+    def get_cli_fields(self) -> List[ConfigField]:
+        return [f for f in self._fields.values() if f.cli_arg is not None]
 
     def format_summary(self, result: ConfigLoadResult) -> str:
         lines = []
@@ -559,16 +598,14 @@ def build_fooocus_schema(root_dir: str) -> ConfigSchema:
         ConfigField('path_outputs', '../outputs/', str,
                     is_path=True, path_is_dir=True, path_auto_create=True,
                     category='paths', description='Outputs directory',
-                    validator=lambda x: isinstance(x, str),
-                    cli_arg='output-path'),
+                    validator=lambda x: isinstance(x, str)),
     ]
 
     default_temp_path = os.path.join(tempfile.gettempdir(), 'fooocus')
     path_fields.append(ConfigField('temp_path', default_temp_path, str,
                                    is_path=True, path_is_dir=True, path_auto_create=True,
                                    category='paths', description='Temp directory',
-                                   validator=lambda x: isinstance(x, str),
-                                   cli_arg='temp-path'))
+                                   validator=lambda x: isinstance(x, str)))
 
     for f in path_fields:
         schema.register_field(f)
@@ -647,8 +684,7 @@ def build_fooocus_schema(root_dir: str) -> ConfigSchema:
                     validator=lambda x: x in flags.scheduler_list),
         ConfigField('default_performance', flags.Performance.SPEED.value, str,
                     category='sampling', description='Performance mode',
-                    validator=lambda x: x in flags.Performance.values(),
-                    cli_arg='preset'),
+                    validator=lambda x: x in flags.Performance.values()),
         ConfigField('default_overwrite_step', -1, int,
                     category='sampling', description='Overwrite step count (-1 = auto)',
                     validator=lambda x: isinstance(x, int)),
@@ -896,6 +932,82 @@ def build_fooocus_schema(root_dir: str) -> ConfigSchema:
     ]
 
     for f in misc_fields:
+        schema.register_field(f)
+
+    cli_fields = [
+        ConfigField('cli_share', False, bool,
+                    category='cli', description='Set whether to share on Gradio',
+                    cli_arg='share', cli_action='store_true',
+                    ui_default=False, save_to_config=False,
+                    validator=lambda x: isinstance(x, bool)),
+        ConfigField('cli_disable_preset_selection', False, bool,
+                    category='cli', description='Disables preset selection in Gradio',
+                    cli_arg='disable-preset-selection', cli_action='store_true',
+                    ui_default=False, save_to_config=False,
+                    validator=lambda x: isinstance(x, bool)),
+        ConfigField('cli_language', 'default', str,
+                    category='cli', description='Translate UI using json files in language folder',
+                    cli_arg='language',
+                    ui_default=False, save_to_config=False,
+                    validator=lambda x: isinstance(x, str)),
+        ConfigField('cli_disable_offload_from_vram', False, bool,
+                    category='cli', description='Force loading models to vram when the unload can be avoided',
+                    cli_arg='disable-offload-from-vram', cli_action='store_true',
+                    ui_default=False, save_to_config=False,
+                    validator=lambda x: isinstance(x, bool)),
+        ConfigField('cli_theme', None, str,
+                    category='cli', description='Launches the UI with light or dark theme',
+                    cli_arg='theme',
+                    ui_default=False, save_to_config=False,
+                    validator=lambda x: x is None or isinstance(x, str)),
+        ConfigField('cli_disable_image_log', False, bool,
+                    category='cli', description='Prevent writing images and logs to the outputs folder',
+                    cli_arg='disable-image-log', cli_action='store_true',
+                    ui_default=False, save_to_config=False,
+                    validator=lambda x: isinstance(x, bool)),
+        ConfigField('cli_disable_analytics', False, bool,
+                    category='cli', description='Disables analytics for Gradio',
+                    cli_arg='disable-analytics', cli_action='store_true',
+                    ui_default=False, save_to_config=False,
+                    validator=lambda x: isinstance(x, bool)),
+        ConfigField('cli_disable_metadata', False, bool,
+                    category='cli', description='Disables saving metadata to images',
+                    cli_arg='disable-metadata', cli_action='store_true',
+                    ui_default=False, save_to_config=False,
+                    validator=lambda x: isinstance(x, bool)),
+        ConfigField('cli_disable_preset_download', False, bool,
+                    category='cli', description='Disables downloading models for presets',
+                    cli_arg='disable-preset-download', cli_action='store_true',
+                    ui_default=False, save_to_config=False,
+                    validator=lambda x: isinstance(x, bool)),
+        ConfigField('cli_disable_enhance_output_sorting', False, bool,
+                    category='cli', description='Disables enhance output sorting for final image gallery',
+                    cli_arg='disable-enhance-output-sorting', cli_action='store_true',
+                    ui_default=False, save_to_config=False,
+                    validator=lambda x: isinstance(x, bool)),
+        ConfigField('cli_enable_auto_describe_image', False, bool,
+                    category='cli', description='Enables automatic description of uov and enhance image when prompt is empty',
+                    cli_arg='enable-auto-describe-image', cli_action='store_true',
+                    ui_default=False, save_to_config=False,
+                    validator=lambda x: isinstance(x, bool)),
+        ConfigField('cli_always_download_new_model', False, bool,
+                    category='cli', description='Always download newer models',
+                    cli_arg='always-download-new-model', cli_action='store_true',
+                    ui_default=False, save_to_config=False,
+                    validator=lambda x: isinstance(x, bool)),
+        ConfigField('cli_rebuild_hash_cache', None, int,
+                    category='cli', description='Generates missing model and LoRA hashes',
+                    cli_arg='rebuild-hash-cache',
+                    ui_default=False, save_to_config=False,
+                    validator=lambda x: x is None or isinstance(x, int)),
+        ConfigField('cli_preset', None, str,
+                    category='cli', description='Apply specified UI preset',
+                    cli_arg='preset',
+                    ui_default=False, save_to_config=False,
+                    validator=lambda x: x is None or isinstance(x, str)),
+    ]
+
+    for f in cli_fields:
         schema.register_field(f)
 
     return schema
