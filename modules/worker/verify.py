@@ -10,6 +10,7 @@ MODULE_ORDER = [
     'modules.worker.tasks',
     'modules.worker.stages',
     'modules.worker.enhance',
+    'modules.worker.pipeline',
     'modules.worker.__init__',
     'modules.async_worker',
 ]
@@ -40,6 +41,16 @@ EXPECTED_EXPORTS = {
     'modules.worker.enhance': [
         'process_enhance', 'enhance_upscale', 'run_enhance_pipeline',
     ],
+    'modules.worker.pipeline': [
+        'PipelineState', 'StageResult',
+        'DEFAULT_PIPELINE', 'execute_pipeline',
+        'stage_build_context', 'stage_apply_patches', 'stage_process_image_input',
+        'stage_load_control_models', 'stage_expand_prompts', 'stage_apply_goals_prefix',
+        'stage_goal_vary', 'stage_goal_upscale', 'stage_goal_inpaint',
+        'stage_goal_controlnet', 'stage_apply_freeu_and_overrides',
+        'stage_prepare_enhance_input', 'stage_compute_total_steps',
+        'stage_finalize_preparation', 'stage_run_diffusion', 'stage_run_enhance',
+    ],
     'modules.worker': [
         'GenerationContext', 'SingleTaskContext', 'EnhanceCtrl', 'WorkerRuntime',
         'ProgressReporter', 'progressbar', 'yield_result',
@@ -54,6 +65,8 @@ EXPECTED_EXPORTS = {
         'apply_inpaint_to_context', 'apply_control_nets_from_context',
         'generate_enhance_mask', 'prepare_enhance_prompt',
         'process_enhance', 'enhance_upscale', 'run_enhance_pipeline',
+        'PipelineState', 'StageResult',
+        'DEFAULT_PIPELINE', 'execute_pipeline',
         'check_module_integrity',
     ],
     'modules.async_worker': [
