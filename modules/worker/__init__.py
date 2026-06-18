@@ -24,14 +24,21 @@ from .stages import (
 )
 from .enhance import process_enhance, enhance_upscale, run_enhance_pipeline
 from .pipeline import (
-    PipelineState, StageResult,
-    DEFAULT_PIPELINE, execute_pipeline,
+    PipelineState, StageResult, StageSpec, PipelineValidationError,
+    DEFAULT_PIPELINE, PIPELINE_STAGES,
+    execute_pipeline, validate_pipeline,
     stage_build_context, stage_apply_patches, stage_process_image_input,
     stage_load_control_models, stage_expand_prompts, stage_apply_goals_prefix,
     stage_goal_vary, stage_goal_upscale, stage_goal_inpaint,
     stage_goal_controlnet, stage_apply_freeu_and_overrides,
     stage_prepare_enhance_input, stage_compute_total_steps,
     stage_finalize_preparation, stage_run_diffusion, stage_run_enhance,
+    spec_build_context, spec_apply_patches, spec_process_image_input,
+    spec_load_control_models, spec_expand_prompts, spec_apply_goals_prefix,
+    spec_goal_vary, spec_goal_upscale, spec_goal_inpaint,
+    spec_goal_controlnet, spec_apply_freeu_and_overrides,
+    spec_prepare_enhance_input, spec_compute_total_steps,
+    spec_finalize_preparation, spec_run_diffusion, spec_run_enhance,
 )
 from .verify import check_module_integrity
 
@@ -49,13 +56,20 @@ __all__ = [
     'apply_inpaint_to_context', 'apply_control_nets_from_context',
     'generate_enhance_mask', 'prepare_enhance_prompt',
     'process_enhance', 'enhance_upscale', 'run_enhance_pipeline',
-    'PipelineState', 'StageResult',
-    'DEFAULT_PIPELINE', 'execute_pipeline',
+    'PipelineState', 'StageResult', 'StageSpec', 'PipelineValidationError',
+    'DEFAULT_PIPELINE', 'PIPELINE_STAGES',
+    'execute_pipeline', 'validate_pipeline',
     'stage_build_context', 'stage_apply_patches', 'stage_process_image_input',
     'stage_load_control_models', 'stage_expand_prompts', 'stage_apply_goals_prefix',
     'stage_goal_vary', 'stage_goal_upscale', 'stage_goal_inpaint',
     'stage_goal_controlnet', 'stage_apply_freeu_and_overrides',
     'stage_prepare_enhance_input', 'stage_compute_total_steps',
     'stage_finalize_preparation', 'stage_run_diffusion', 'stage_run_enhance',
+    'spec_build_context', 'spec_apply_patches', 'spec_process_image_input',
+    'spec_load_control_models', 'spec_expand_prompts', 'spec_apply_goals_prefix',
+    'spec_goal_vary', 'spec_goal_upscale', 'spec_goal_inpaint',
+    'spec_goal_controlnet', 'spec_apply_freeu_and_overrides',
+    'spec_prepare_enhance_input', 'spec_compute_total_steps',
+    'spec_finalize_preparation', 'spec_run_diffusion', 'spec_run_enhance',
     'check_module_integrity',
 ]

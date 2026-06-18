@@ -2,12 +2,13 @@ import threading
 import time
 import os
 import traceback
+from typing import List, Dict, Any
 
 from modules.patch import patch_all
 import modules.config
 
-from modules.worker.context import GenerationContext, SingleTaskContext, WorkerRuntime
-from modules.worker.pipeline import execute_pipeline, PipelineState, DEFAULT_PIPELINE
+from modules.worker.context import WorkerRuntime
+from modules.worker.pipeline import execute_pipeline, PIPELINE_STAGES
 from modules.worker.result_saver import build_image_wall_from_results
 
 patch_all()
@@ -227,7 +228,8 @@ def execute_handler(runtime: WorkerRuntime, async_task: AsyncTask):
     preparation_start_time = time.perf_counter()
     async_task.processing = True
 
-    state = execute_pipeline(runtime, async_task, DEFAULT_PIPELINE)
+    audit_log: List[Dict[str, Any]] = []
+    state = execute_pipeline(runtime, async_task, PIPELINE_STAGES, audit_log=audit_log)
 
     if state.processing_started:
         stop_processing(async_task, state.processing_start_time, time)
