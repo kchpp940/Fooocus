@@ -7,6 +7,19 @@ sys.path.append(root)
 os.chdir(root)
 
 
+def run_preflight_check(stage: str = "pre-update"):
+    try:
+        from modules.environment_preflight import run_preflight
+        print(f"\n[Preflight] Running {stage} environment check ...\n")
+        report = run_preflight(root_dir=root, exit_on_error=False, print_report=True)
+        return report
+    except Exception as e:
+        print(f"\n[Preflight] Warning: Could not run preflight check ({e})\n")
+        return None
+
+
+run_preflight_check(stage="pre-update")
+
 try:
     import pygit2
     pygit2.option(pygit2.GIT_OPT_SET_OWNER_VALIDATION, 0)

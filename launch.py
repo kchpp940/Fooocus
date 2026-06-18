@@ -15,6 +15,18 @@ if "GRADIO_SERVER_PORT" not in os.environ:
 
 ssl._create_default_https_context = ssl._create_unverified_context
 
+PREFLIGHT_ONLY = "--preflight-check" in sys.argv
+
+if PREFLIGHT_ONLY:
+    try:
+        from modules.environment_preflight import run_preflight
+        print("\n[Preflight] Running environment check (preflight-only mode) ...\n")
+        report = run_preflight(root_dir=root, exit_on_error=False, print_report=True)
+        sys.exit(1 if report.has_errors else 0)
+    except Exception as e:
+        print(f"\n[Preflight] Error: Could not run preflight check: {e}\n")
+        sys.exit(1)
+
 import platform
 import fooocus_version
 
@@ -24,6 +36,17 @@ from modules.model_loader import load_file_from_url
 
 REINSTALL_ALL = False
 TRY_INSTALL_XFORMERS = False
+
+
+def run_preflight_check(stage: str = "early"):
+    try:
+        from modules.environment_preflight import run_preflight
+        print(f"\n[Preflight] Running {stage} environment check ...\n")
+        report = run_preflight(root_dir=root, exit_on_error=False, print_report=True)
+        return report
+    except Exception as e:
+        print(f"\n[Preflight] Warning: Could not run preflight check ({e})\n")
+        return None
 
 
 def prepare_environment():
@@ -72,7 +95,12 @@ def ini_args():
     return args
 
 
+run_preflight_check(stage="early")
+
 prepare_environment()
+
+run_preflight_check(stage="post-install")
+
 build_launcher()
 args = ini_args()
 
