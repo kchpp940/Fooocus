@@ -664,18 +664,51 @@ def format_report(report: PreflightReport, use_colors: bool = True) -> str:
     return "\n".join(lines)
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+_RUN_CACHE: Dict[str, PreflightReport] = {}
+
+
 def run_preflight(root_dir: Optional[str] = None,
                   exit_on_error: bool = False,
                   print_report: bool = True,
-                  use_colors: bool = True) -> PreflightReport:
+                  use_colors: bool = True,
+                  as_json: bool = False,
+                  stage: Optional[str] = None) -> Optional[PreflightReport]:
+    skip = _env_flag("FOOOCUS_SKIP_PREFLIGHT", default=False)
+    if skip:
+        if print_report:
+            print("[Preflight] Skipped (FOOOCUS_SKIP_PREFLIGHT=1)")
+        return None
+
+    force_json = _env_flag("FOOOCUS_PREFLIGHT_JSON", default=False)
+    effective_json = force_json or as_json
+
+    cache_key = f"{os.path.abspath(root_dir or '.')}:{stage or 'all'}"
+    cached = _RUN_CACHE.get(cache_key)
+    if cached is not None and not effective_json:
+        if print_report:
+            print(f"[Preflight] Stage '{stage or 'all'}' skipped (cached from earlier run)")
+        return cached
+
     checker = PreflightChecker(root_dir=root_dir)
     report = checker.run_all()
+    _RUN_CACHE[cache_key] = report
 
     if print_report:
-        print(format_report(report, use_colors=use_colors))
+        if effective_json:
+            print(json.dumps(report.to_dict(), indent=2))
+        else:
+            print(format_report(report, use_colors=use_colors))
 
     if exit_on_error and report.has_errors:
-        print("Exiting due to preflight check failures.")
+        if not effective_json:
+            print("Exiting due to preflight check failures.", file=sys.stderr)
         sys.exit(1)
 
     return report
@@ -708,26 +741,25 @@ def _main():
         action="store_true",
         help="Output results as JSON instead of human-readable format"
     )
+    parser.add_argument(
+        "--stage",
+        type=str,
+        default=None,
+        help="Stage label for caching (e.g. 'early', 'post-install')"
+    )
 
     args = parser.parse_args()
 
-    if args.json:
-        report = run_preflight(
-            root_dir=args.root,
-            exit_on_error=False,
-            print_report=False,
-            use_colors=False
-        )
-        print(json.dumps(report.to_dict(), indent=2))
-        if args.exit_on_error and report.has_errors:
-            sys.exit(1)
-    else:
-        report = run_preflight(
-            root_dir=args.root,
-            exit_on_error=args.exit_on_error,
-            print_report=True,
-            use_colors=not args.no_colors
-        )
+    report = run_preflight(
+        root_dir=args.root,
+        exit_on_error=args.exit_on_error,
+        print_report=True,
+        use_colors=not args.no_colors and not args.json,
+        as_json=args.json,
+        stage=args.stage
+    )
+    if args.exit_on_error and report is not None and report.has_errors:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

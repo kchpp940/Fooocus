@@ -1,6 +1,7 @@
 FROM nvidia/cuda:12.4.1-base-ubuntu22.04
 ENV DEBIAN_FRONTEND noninteractive
 ENV CMDARGS --listen
+ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update -y && \
 	apt-get install -y curl libgl1 libglib2.0-0 python3-pip python-is-python3 git && \
@@ -18,12 +19,16 @@ RUN adduser --disabled-password --gecos '' user && \
 	mkdir -p /content/app /content/data
 
 COPY entrypoint.sh /content/
-RUN chown -R user:user /content
+RUN chmod +x /content/entrypoint.sh && \
+	chown -R user:user /content
 
 WORKDIR /content
 USER user
 
 COPY --chown=user:user . /content/app
 RUN mv /content/app/models /content/app/models.org
+
+HEALTHCHECK --interval=5m --timeout=30s --start-period=2m --retries=2 \
+	CMD /content/entrypoint.sh preflight --json --no-exit > /tmp/preflight.json 2>&1 || exit 1
 
 CMD [ "sh", "-c", "/content/entrypoint.sh ${CMDARGS}" ]

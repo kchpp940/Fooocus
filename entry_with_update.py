@@ -6,15 +6,35 @@ root = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(root)
 os.chdir(root)
 
+FOOOCUS_SKIP_PREFLIGHT = os.environ.get("FOOOCUS_SKIP_PREFLIGHT", "").strip().lower() in ("1", "true", "yes", "on")
+FORCE_JSON_ENV = os.environ.get("FOOOCUS_PREFLIGHT_JSON", "").strip().lower() in ("1", "true", "yes", "on")
+QUIET_MODE = FORCE_JSON_ENV
+
 
 def run_preflight_check(stage: str = "pre-update"):
+    if FOOOCUS_SKIP_PREFLIGHT:
+        if not QUIET_MODE:
+            print(f"\n[Preflight] Stage '{stage}' skipped (FOOOCUS_SKIP_PREFLIGHT=1)\n")
+        return None
     try:
         from modules.environment_preflight import run_preflight
-        print(f"\n[Preflight] Running {stage} environment check ...\n")
-        report = run_preflight(root_dir=root, exit_on_error=False, print_report=True)
+        if not QUIET_MODE:
+            print(f"\n[Preflight] Running {stage} environment check ...\n")
+        report = run_preflight(
+            root_dir=root,
+            exit_on_error=False,
+            print_report=True,
+            use_colors=not QUIET_MODE,
+            as_json=FORCE_JSON_ENV,
+            stage=stage
+        )
         return report
     except Exception as e:
-        print(f"\n[Preflight] Warning: Could not run preflight check ({e})\n")
+        msg = f"\n[Preflight] Warning: Could not run preflight check ({e})\n"
+        if FORCE_JSON_ENV:
+            print(msg, file=sys.stderr)
+        else:
+            print(msg)
         return None
 
 

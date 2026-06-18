@@ -2,7 +2,14 @@ import os
 import ssl
 import sys
 
-print('[System ARGV] ' + str(sys.argv))
+PREFLIGHT_ONLY = "--preflight-check" in sys.argv
+PREFLIGHT_JSON = PREFLIGHT_ONLY and "--json" in sys.argv
+FORCE_JSON_ENV = os.environ.get("FOOOCUS_PREFLIGHT_JSON", "").strip().lower() in ("1", "true", "yes", "on")
+QUIET_MODE = PREFLIGHT_JSON or FORCE_JSON_ENV
+FOOOCUS_SKIP_PREFLIGHT = os.environ.get("FOOOCUS_SKIP_PREFLIGHT", "").strip().lower() in ("1", "true", "yes", "on")
+
+if not QUIET_MODE:
+    print('[System ARGV] ' + str(sys.argv))
 
 root = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(root)
@@ -15,17 +22,54 @@ if "GRADIO_SERVER_PORT" not in os.environ:
 
 ssl._create_default_https_context = ssl._create_unverified_context
 
-PREFLIGHT_ONLY = "--preflight-check" in sys.argv
+
+def _strip_preflight_args(argv):
+    result = []
+    skip_next = False
+    for i, arg in enumerate(argv):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in ("--preflight-check", "--json"):
+            continue
+        result.append(arg)
+    return result
+
 
 if PREFLIGHT_ONLY:
     try:
         from modules.environment_preflight import run_preflight
-        print("\n[Preflight] Running environment check (preflight-only mode) ...\n")
-        report = run_preflight(root_dir=root, exit_on_error=False, print_report=True)
-        sys.exit(1 if report.has_errors else 0)
+        if not FOOOCUS_SKIP_PREFLIGHT:
+            if not QUIET_MODE:
+                print("\n[Preflight] Running environment check (preflight-only mode) ...\n", file=sys.stderr)
+            report = run_preflight(
+                root_dir=root,
+                exit_on_error=False,
+                print_report=True,
+                use_colors=not QUIET_MODE,
+                as_json=PREFLIGHT_JSON,
+                stage="preflight-only"
+            )
+            if report is not None:
+                sys.exit(1 if report.has_errors else 0)
+            else:
+                sys.exit(0)
+        else:
+            if not QUIET_MODE:
+                print("[Preflight] Skipped (FOOOCUS_SKIP_PREFLIGHT=1)", file=sys.stderr)
+            if PREFLIGHT_JSON:
+                import json
+                print(json.dumps({"skipped": True, "reason": "FOOOCUS_SKIP_PREFLIGHT=1"}, indent=2))
+            sys.exit(0)
     except Exception as e:
-        print(f"\n[Preflight] Error: Could not run preflight check: {e}\n")
-        sys.exit(1)
+        if PREFLIGHT_JSON:
+            import json as _json
+            print(_json.dumps({"error": str(e), "error_type": type(e).__name__}, indent=2))
+        else:
+            print(f"\n[Preflight] Error: Could not run preflight check: {e}\n", file=sys.stderr)
+        sys.exit(2)
+
+sys.argv = _strip_preflight_args(sys.argv)
 
 import platform
 import fooocus_version
@@ -39,13 +83,29 @@ TRY_INSTALL_XFORMERS = False
 
 
 def run_preflight_check(stage: str = "early"):
+    if FOOOCUS_SKIP_PREFLIGHT:
+        if not QUIET_MODE:
+            print(f"\n[Preflight] Stage '{stage}' skipped (FOOOCUS_SKIP_PREFLIGHT=1)\n")
+        return None
     try:
         from modules.environment_preflight import run_preflight
-        print(f"\n[Preflight] Running {stage} environment check ...\n")
-        report = run_preflight(root_dir=root, exit_on_error=False, print_report=True)
+        if not QUIET_MODE:
+            print(f"\n[Preflight] Running {stage} environment check ...\n")
+        report = run_preflight(
+            root_dir=root,
+            exit_on_error=False,
+            print_report=True,
+            use_colors=not QUIET_MODE,
+            as_json=FORCE_JSON_ENV,
+            stage=stage
+        )
         return report
     except Exception as e:
-        print(f"\n[Preflight] Warning: Could not run preflight check ({e})\n")
+        msg = f"\n[Preflight] Warning: Could not run preflight check ({e})\n"
+        if FORCE_JSON_ENV:
+            print(msg, file=sys.stderr)
+        else:
+            print(msg)
         return None
 
 
