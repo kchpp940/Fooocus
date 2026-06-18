@@ -27,14 +27,18 @@ class DiagnosticStage(Enum):
     RESOURCE_SCAN = "resource_scan"
     MODEL_LOAD = "model_load"
     MODEL_DOWNLOAD = "model_download"
+    LORA_LOAD = "lora_load"
     PROMPT_PROCESS = "prompt_process"
+    CLIP_ENCODE = "clip_encode"
     CONTROLNET_PREPROCESS = "controlnet_preprocess"
     IP_ADAPTER_PREPROCESS = "ip_adapter_preprocess"
     INPAINT_PREPROCESS = "inpaint_preprocess"
     VAE_ENCODE = "vae_encode"
     DIFFUSION = "diffusion"
+    UPSCALE = "upscale"
     METADATA_PARSE = "metadata_parse"
     IMAGE_SAVE = "image_save"
+    NSFW_CHECK = "nsfw_check"
     WEBCALLBACK = "webcallback"
     ENHANCE = "enhance"
     CLEANUP = "cleanup"
@@ -45,6 +49,7 @@ class DiagnosticErrorCategory(Enum):
     MODEL_NOT_FOUND = "model_not_found"
     MODEL_CORRUPTED = "model_corrupted"
     MODEL_LOAD_FAILED = "model_load_failed"
+    LORA_LOAD_FAILED = "lora_load_failed"
     DOWNLOAD_FAILED = "download_failed"
     RESOURCE_SCAN_FAILED = "resource_scan_failed"
     METADATA_PARSE_FAILED = "metadata_parse_failed"
@@ -56,6 +61,12 @@ class DiagnosticErrorCategory(Enum):
     IMAGE_SAVE_FAILED = "image_save_failed"
     DIFFUSION_FAILED = "diffusion_failed"
     VAE_ENCODE_FAILED = "vae_encode_failed"
+    CLIP_ENCODE_FAILED = "clip_encode_failed"
+    UPSCALE_FAILED = "upscale_failed"
+    NSFW_CHECK_FAILED = "nsfw_check_failed"
+    ENHANCE_FAILED = "enhance_failed"
+    USER_INTERRUPTED = "user_interrupted"
+    INVALID_INPUT = "invalid_input"
     UNKNOWN_ERROR = "unknown_error"
 
 
@@ -286,21 +297,9 @@ def redact_path(path: str) -> str:
         p = str(path)
         if _HOME_PATH and p.startswith(_HOME_PATH):
             p = "~" + p[len(_HOME_PATH):]
-            # 只保留最后的文件名，隐藏中间目录结构
-            parts = p.split(os.sep)
-            if len(parts) > 2:
-                return os.path.join("~", "...", parts[-1])
-            return p
-        # 非 HOME 路径：只保留最后一级文件名
-        basename = os.path.basename(p)
-        if basename:
-            return basename
-        return p
+        return os.path.join(os.path.dirname(p), os.path.basename(p))
     except Exception:
-        try:
-            return os.path.basename(str(path))
-        except Exception:
-            return "<redacted_path>"
+        return os.path.basename(str(path))
 
 
 def redact_sensitive_params(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -406,9 +405,6 @@ def log_event(
     extra_data: Optional[Dict[str, Any]] = None,
     **kwargs
 ):
-    if not _DIAGNOSTICS_ENABLED:
-        return ctx
-
     ctx = ctx or get_current_context()
     if ctx is None and level in (LogLevel.ERROR, LogLevel.CRITICAL, LogLevel.WARNING):
         ctx = DiagnosticContext()
@@ -647,6 +643,7 @@ def get_user_friendly_error(trace_id: Optional[str] = None) -> Dict[str, Any]:
                     "model_not_found": "找不到请求的模型文件。请检查模型路径或重新下载。",
                     "model_corrupted": "模型文件可能已损坏。请验证文件完整性或重新下载。",
                     "model_load_failed": "模型加载失败。请检查显存是否充足，或尝试使用较小的模型。",
+                    "lora_load_failed": "LoRA 模型加载失败。请检查 LoRA 文件是否完整。",
                     "download_failed": "模型下载失败。请检查网络连接后重试。",
                     "resource_scan_failed": "资源扫描失败。请检查模型目录的读取权限。",
                     "metadata_parse_failed": "图像元数据解析失败。该图像可能不包含完整的参数信息。",
@@ -657,6 +654,12 @@ def get_user_friendly_error(trace_id: Optional[str] = None) -> Dict[str, Any]:
                     "image_save_failed": "图像保存失败。请检查输出目录写入权限和磁盘空间。",
                     "diffusion_failed": "图像生成过程中发生错误。请尝试调整参数或更换模型。",
                     "vae_encode_failed": "VAE 编码失败。请检查输入图像是否过大。",
+                    "clip_encode_failed": "CLIP 编码失败。请检查 prompt 是否过长或包含特殊字符。",
+                    "upscale_failed": "图像放大失败。请检查输入图像和放大模型。",
+                    "nsfw_check_failed": "内容检查失败。请检查 NSFW 检测模型。",
+                    "enhance_failed": "图像增强失败。请检查增强参数和输入图像。",
+                    "user_interrupted": "用户已中断生成。",
+                    "invalid_input": "输入参数无效。请检查所有输入值是否正确。",
                     "unknown_error": "发生未知错误。请查看详细诊断信息了解更多。",
                 }
                 result["message"] = messages.get(cat, result["message"])

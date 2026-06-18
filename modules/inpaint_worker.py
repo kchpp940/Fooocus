@@ -5,6 +5,11 @@ from PIL import Image, ImageFilter
 from modules.util import resample_image, set_image_shape_ceil, get_image_shape_ceil
 from modules.upscaler import perform_upscale
 import cv2
+import modules.diagnostics as diagnostics
+from modules.diagnostics import (
+    DiagnosticStage, DiagnosticErrorCategory, get_current_context,
+    log_info, log_error, log_warning,
+)
 
 
 inpaint_head_model = None
@@ -149,40 +154,89 @@ def fooocus_fill(image, mask):
 
 class InpaintWorker:
     def __init__(self, image, mask, use_fill=True, k=0.618):
-        a, b, c, d = compute_initial_abcd(mask > 0)
-        a, b, c, d = solve_abcd(mask, a, b, c, d, k=k)
+        ctx = get_current_context()
+        try:
+            if ctx:
+                ctx.start_stage(DiagnosticStage.INPAINT_PREPROCESS)
+                log_info(
+                    DiagnosticStage.INPAINT_PREPROCESS,
+                    "开始图像修复预处理",
+                    ctx=ctx,
+                    extra_data={
+                        "image_shape": image.shape if hasattr(image, 'shape') else None,
+                        "mask_shape": mask.shape if hasattr(mask, 'shape') else None,
+                        "use_fill": use_fill,
+                        "k": k,
+                    }
+                )
 
-        # interested area
-        self.interested_area = (a, b, c, d)
-        self.interested_mask = mask[a:b, c:d]
-        self.interested_image = image[a:b, c:d]
+            a, b, c, d = compute_initial_abcd(mask > 0)
+            a, b, c, d = solve_abcd(mask, a, b, c, d, k=k)
 
-        # super resolution
-        if get_image_shape_ceil(self.interested_image) < 1024:
-            self.interested_image = perform_upscale(self.interested_image)
+            # interested area
+            self.interested_area = (a, b, c, d)
+            self.interested_mask = mask[a:b, c:d]
+            self.interested_image = image[a:b, c:d]
 
-        # resize to make images ready for diffusion
-        self.interested_image = set_image_shape_ceil(self.interested_image, 1024)
-        self.interested_fill = self.interested_image.copy()
-        H, W, C = self.interested_image.shape
+            # super resolution
+            if get_image_shape_ceil(self.interested_image) < 1024:
+                self.interested_image = perform_upscale(self.interested_image)
 
-        # process mask
-        self.interested_mask = up255(resample_image(self.interested_mask, W, H), t=127)
+            # resize to make images ready for diffusion
+            self.interested_image = set_image_shape_ceil(self.interested_image, 1024)
+            self.interested_fill = self.interested_image.copy()
+            H, W, C = self.interested_image.shape
 
-        # compute filling
-        if use_fill:
-            self.interested_fill = fooocus_fill(self.interested_image, self.interested_mask)
+            # process mask
+            self.interested_mask = up255(resample_image(self.interested_mask, W, H), t=127)
 
-        # soft pixels
-        self.mask = morphological_open(mask)
-        self.image = image
+            # compute filling
+            if use_fill:
+                self.interested_fill = fooocus_fill(self.interested_image, self.interested_mask)
 
-        # ending
-        self.latent = None
-        self.latent_after_swap = None
-        self.swapped = False
-        self.latent_mask = None
-        self.inpaint_head_feature = None
+            # soft pixels
+            self.mask = morphological_open(mask)
+            self.image = image
+
+            # ending
+            self.latent = None
+            self.latent_after_swap = None
+            self.swapped = False
+            self.latent_mask = None
+            self.inpaint_head_feature = None
+
+            if ctx:
+                log_info(
+                    DiagnosticStage.INPAINT_PREPROCESS,
+                    f"图像修复预处理完成，感兴趣区域: {self.interested_area}",
+                    ctx=ctx,
+                    extra_data={
+                        "interested_area": self.interested_area,
+                        "output_shape": self.interested_image.shape,
+                    }
+                )
+                ctx.end_stage(DiagnosticStage.INPAINT_PREPROCESS, "completed")
+        except Exception as e:
+            log_error(
+                DiagnosticStage.INPAINT_PREPROCESS,
+                "图像修复预处理失败",
+                exception=e,
+                category=DiagnosticErrorCategory.INPAINT_PREPROCESS_FAILED,
+                ctx=ctx,
+                extra_data={
+                    "use_fill": use_fill,
+                    "k": k,
+                }
+            )
+            if ctx:
+                ctx.end_stage(DiagnosticStage.INPAINT_PREPROCESS, "failed")
+            raise diagnostics.DiagnosticsError(
+                human_message="图像修复预处理失败",
+                category=DiagnosticErrorCategory.INPAINT_PREPROCESS_FAILED,
+                stage=DiagnosticStage.INPAINT_PREPROCESS,
+                ctx=ctx,
+                cause=e,
+            )
         return
 
     def load_latent(self, latent_fill, latent_mask, latent_swap=None):
@@ -193,28 +247,66 @@ class InpaintWorker:
 
     def patch(self, inpaint_head_model_path, inpaint_latent, inpaint_latent_mask, model):
         global inpaint_head_model
+        ctx = get_current_context()
 
-        if inpaint_head_model is None:
-            inpaint_head_model = InpaintHead()
-            sd = torch.load(inpaint_head_model_path, map_location='cpu', weights_only=True)
-            inpaint_head_model.load_state_dict(sd)
+        try:
+            if inpaint_head_model is None:
+                log_info(
+                    DiagnosticStage.MODEL_LOAD,
+                    "开始加载 Inpaint Head 模型",
+                    ctx=ctx,
+                    extra_data={"model_path": inpaint_head_model_path},
+                )
+                if ctx:
+                    ctx.start_stage(DiagnosticStage.MODEL_LOAD)
+                inpaint_head_model = InpaintHead()
+                sd = torch.load(inpaint_head_model_path, map_location='cpu', weights_only=True)
+                inpaint_head_model.load_state_dict(sd)
+                if ctx:
+                    ctx.add_model_loaded(inpaint_head_model_path)
+                    log_info(
+                        DiagnosticStage.MODEL_LOAD,
+                        "Inpaint Head 模型加载完成",
+                        ctx=ctx,
+                        extra_data={"model_path": inpaint_head_model_path},
+                    )
+                    ctx.end_stage(DiagnosticStage.MODEL_LOAD, "completed")
 
-        feed = torch.cat([
-            inpaint_latent_mask,
-            model.model.process_latent_in(inpaint_latent)
-        ], dim=1)
+            feed = torch.cat([
+                inpaint_latent_mask,
+                model.model.process_latent_in(inpaint_latent)
+            ], dim=1)
 
-        inpaint_head_model.to(device=feed.device, dtype=feed.dtype)
-        inpaint_head_feature = inpaint_head_model(feed)
+            inpaint_head_model.to(device=feed.device, dtype=feed.dtype)
+            inpaint_head_feature = inpaint_head_model(feed)
 
-        def input_block_patch(h, transformer_options):
-            if transformer_options["block"][1] == 0:
-                h = h + inpaint_head_feature.to(h)
-            return h
+            def input_block_patch(h, transformer_options):
+                if transformer_options["block"][1] == 0:
+                    h = h + inpaint_head_feature.to(h)
+                return h
 
-        m = model.clone()
-        m.set_model_input_block_patch(input_block_patch)
-        return m
+            m = model.clone()
+            m.set_model_input_block_patch(input_block_patch)
+            return m
+        except Exception as e:
+            log_error(
+                DiagnosticStage.MODEL_LOAD,
+                "Inpaint Head 模型加载或应用失败",
+                exception=e,
+                category=DiagnosticErrorCategory.MODEL_LOAD_FAILED,
+                ctx=ctx,
+                extra_data={"model_path": inpaint_head_model_path},
+            )
+            if ctx:
+                ctx.end_stage(DiagnosticStage.MODEL_LOAD, "failed")
+            raise diagnostics.DiagnosticsError(
+                human_message="Inpaint Head 模型加载失败",
+                category=DiagnosticErrorCategory.MODEL_LOAD_FAILED,
+                stage=DiagnosticStage.MODEL_LOAD,
+                ctx=ctx,
+                extra_data={"model_path": inpaint_head_model_path},
+                cause=e,
+            )
 
     def swap(self):
         if self.swapped:
