@@ -87,9 +87,12 @@ if PREFLIGHT_ONLY:
 
         if not FOOOCUS_SKIP_PREFLIGHT:
             if not QUIET_MODE:
+                from modules.environment_preflight import PreflightPolicy
                 label = resolved_policy if resolved_policy else f"mode={PREFLIGHT_MODE_CLI}"
+                policies = ", ".join(sorted(PreflightPolicy.all_policies().keys()))
                 print(
-                    f"\n[Preflight] Running environment check (preflight-only, {label}) ...\n",
+                    f"\n[Preflight] Running environment check (preflight-only, {label}) ...\n"
+                    f"[Preflight] Available policies: {policies}\n",
                     file=sys.stderr
                 )
             report = run_preflight(

@@ -192,38 +192,114 @@ PreflightPolicy.register(
 )
 
 
-def _resolve_policy(policy_name, mode, stage, exit_on_error_deprecated):
+@dataclass
+class _PolicyResolution:
+    effective_policy: PreflightPolicy
+    requested_policy: Optional[str]
+    deprecated_args: List[str]
+
+
+def _resolve_policy(policy_name, mode, stage, exit_on_error_deprecated, no_exit_deprecated=False):
     """
-    根据传入参数解析最终 policy。优先级：
+    根据传入参数解析最终 policy。**不使用任何动态合成**，全部映射到已注册标准 policy。
+
+    优先级：
     1. 显式 policy= 名称（最推荐）
-    2. 显式 mode=（次选，stage 可选）
-    3. exit_on_error=True → 等价于 strict 模式（废弃）
-    4. 都没有 → 默认为 report 模式（内嵌安全默认值）
+    2. 显式 mode= / stage= / --no-exit / --exit-on-error → 映射到已有 policy
+
+    返回 _PolicyResolution 对象，包含 effective_policy、requested_policy 名称和
+    deprecated_args 列表（记录使用了哪些废弃参数）。
     """
     import warnings
 
+    requested_policy = policy_name
+    deprecated_args: List[str] = []
+
+    # 1. 显式 policy=（推荐路径）
     if policy_name is not None:
-        return PreflightPolicy.get(policy_name)
-
-    # 旧参数兼容：exit_on_error → strict
-    if exit_on_error_deprecated:
-        warnings.warn(
-            "'exit_on_error' 参数已废弃，请使用 policy='strict' 或 mode='strict'。",
-            DeprecationWarning,
-            stacklevel=3
+        # 记录是否同时传了废弃参数（虽然会被忽略）
+        if mode is not None:
+            deprecated_args.append(f"mode={mode!r} (ignored, policy= takes precedence)")
+        if stage is not None:
+            deprecated_args.append(f"stage={stage!r} (ignored, policy= takes precedence)")
+        if exit_on_error_deprecated:
+            deprecated_args.append("exit_on_error=True (ignored, policy= takes precedence)")
+        return _PolicyResolution(
+            effective_policy=PreflightPolicy.get(policy_name),
+            requested_policy=policy_name,
+            deprecated_args=deprecated_args
         )
-        mode = mode or CheckMode.STRICT
 
-    resolved_mode = mode if mode is not None else CheckMode.REPORT
-    resolved_stage = stage if stage is not None else resolved_mode
+    # 2. 废弃参数处理
+    if no_exit_deprecated:
+        deprecated_args.append("--no-exit (deprecated, use --policy report)")
+    if exit_on_error_deprecated:
+        deprecated_args.append("--exit-on-error (deprecated, use --policy strict)")
+        warnings.warn(
+            "'exit_on_error' parameter is deprecated, use policy='strict' instead.",
+            DeprecationWarning,
+            stacklevel=4
+        )
+    if mode is not None:
+        deprecated_args.append(f"--mode {mode} (deprecated, use --policy instead)")
+    if stage is not None:
+        deprecated_args.append(f"--stage {stage} (deprecated, use --policy instead)")
 
-    # 用 mode+stage 构造一个动态 policy（无需注册）
-    return PreflightPolicy(
-        name=f"dynamic:{resolved_mode}/{resolved_stage}",
-        mode=resolved_mode,
-        stage=resolved_stage,
-        description="由 mode/stage 动态合成的策略",
-    )
+    # 全部映射到已有标准 policy，不允许 dynamic 合成
+    if no_exit_deprecated:
+        # --no-exit → report 模式（忽略 --exit-on-error）
+        target_mode = CheckMode.REPORT
+    elif exit_on_error_deprecated:
+        target_mode = CheckMode.STRICT
+    else:
+        target_mode = mode if mode is not None else CheckMode.REPORT
+
+    if target_mode == CheckMode.REPORT:
+        # 如果用户指定了 stage=early / post-install / pre-update / healthcheck / ci，
+        # 映射到相应的 policy 而不是通用 report，这样缓存也能正确命中
+        if stage == "early":
+            mapped = PreflightPolicy.get("launch_early")
+        elif stage == "post-install":
+            mapped = PreflightPolicy.get("launch_post_install")
+        elif stage == "pre-update":
+            mapped = PreflightPolicy.get("pre_update")
+        elif stage == "healthcheck":
+            mapped = PreflightPolicy.get("healthcheck")
+        elif stage == "ci":
+            mapped = PreflightPolicy.get("ci")
+        elif stage == "preflight-only":
+            mapped = PreflightPolicy.get("cli_default")
+        else:
+            mapped = PreflightPolicy.get("report")
+        return _PolicyResolution(
+            effective_policy=mapped,
+            requested_policy=None,
+            deprecated_args=deprecated_args
+        )
+
+    if target_mode == CheckMode.HEALTHCHECK:
+        mapped = PreflightPolicy.get("healthcheck")
+        return _PolicyResolution(
+            effective_policy=mapped,
+            requested_policy=None,
+            deprecated_args=deprecated_args
+        )
+
+    if target_mode == CheckMode.STRICT:
+        if stage == "ci":
+            mapped = PreflightPolicy.get("ci")
+        elif stage == "preflight-only":
+            mapped = PreflightPolicy.get("cli_default")
+        else:
+            mapped = PreflightPolicy.get("strict")
+        return _PolicyResolution(
+            effective_policy=mapped,
+            requested_policy=None,
+            deprecated_args=deprecated_args
+        )
+
+    # 兜底，不可能到达这里，因为 target_mode 只有 3 种可能
+    raise ValueError(f"Unexpected mode: {target_mode!r}")
 
 
 def _get_package_version(package_name: str) -> Optional[str]:
@@ -819,7 +895,8 @@ def run_preflight(root_dir: Optional[str] = None,
                   use_colors: bool = True,
                   as_json: bool = False,
                   stage: Optional[str] = None,
-                  call_exit: bool = True) -> Optional[PreflightReport]:
+                  call_exit: bool = True,
+                  no_exit: bool = False) -> Optional[PreflightReport]:
     """
     运行环境预检。
 
@@ -831,19 +908,24 @@ def run_preflight(root_dir: Optional[str] = None,
     ----------
     policy : str or None
         标准策略名称，如 ``launch_early`` / ``healthcheck`` / ``ci`` / ``cli_default``。
-        优先于 mode / stage / exit_on_error 参数。
+        优先于 mode / stage / exit_on_error / no_exit 参数。
         可用列表： ``PreflightPolicy.all_policies().keys()``
     mode : {"report", "healthcheck", "strict"} or None
-        兼容参数。未指定 policy 时有效。
+        **已废弃**，请改用 policy=。会映射到相应标准 policy。
     exit_on_error : bool
-        **已废弃**，等价于 ``mode='strict'``。会打印 deprecation warning。
+        **已废弃**，等价于 ``policy='strict'``。会打印 deprecation warning。
+    no_exit : bool
+        **已废弃**，等价于 ``policy='report'``。用于 CLI 的 --no-exit 兼容。
     stage : str or None
-        兼容参数。用于缓存键，未指定 policy 时有效。
+        **已废弃**，请改用 policy=。
     call_exit : bool
         是否在内部调用 sys.exit。False 时仅将退出码写入 ``report._exit_code``。
     """
     try:
-        effective_policy = _resolve_policy(policy, mode, stage, exit_on_error)
+        resolution = _resolve_policy(policy, mode, stage, exit_on_error, no_exit)
+        effective_policy = resolution.effective_policy
+        deprecated_args = resolution.deprecated_args
+        requested_policy = resolution.requested_policy
     except ValueError as e:
         print(f"[Preflight] Error: {e}", file=sys.stderr)
         if call_exit:
@@ -860,15 +942,23 @@ def run_preflight(root_dir: Optional[str] = None,
                 payload = {
                     "skipped": True,
                     "reason": "FOOOCUS_SKIP_PREFLIGHT=1",
-                    "policy": effective_policy.name,
+                    "requested_policy": requested_policy,
+                    "effective_policy": effective_policy.name,
                     "mode": effective_policy.mode,
+                    "deprecated_args": deprecated_args,
                 }
                 print(json.dumps(payload, indent=2))
             else:
                 print(
                     f"[Preflight] Skipped (FOOOCUS_SKIP_PREFLIGHT=1, "
-                    f"policy={effective_policy.name}, mode={effective_policy.mode})"
+                    f"effective_policy={effective_policy.name}, mode={effective_policy.mode})"
                 )
+                if deprecated_args:
+                    print(
+                        f"[Preflight] Deprecated args used (mapped to {effective_policy.name}): "
+                        + ", ".join(deprecated_args),
+                        file=sys.stderr
+                    )
         if call_exit:
             sys.exit(0)
         return None
@@ -882,6 +972,12 @@ def run_preflight(root_dir: Optional[str] = None,
                 f"[Preflight] policy={effective_policy.name} "
                 f"(stage={effective_policy.stage}) skipped (cached from earlier run)"
             )
+            if deprecated_args:
+                print(
+                    f"[Preflight] Deprecated args used (mapped to {effective_policy.name}): "
+                    + ", ".join(deprecated_args),
+                    file=sys.stderr
+                )
         cached._exit_code = _mode_exit_code(effective_policy.mode, cached)
         cached._policy = effective_policy.name
         if call_exit and cached._exit_code != 0:
@@ -893,22 +989,45 @@ def run_preflight(root_dir: Optional[str] = None,
     _RUN_CACHE[cache_key] = report
     report._exit_code = _mode_exit_code(effective_policy.mode, report)
     report._policy = effective_policy.name
+    report._requested_policy = requested_policy
+    report._deprecated_args = deprecated_args
 
     if print_report:
         if effective_json:
             payload = report.to_dict()
-            payload["policy"] = effective_policy.name
+            payload["requested_policy"] = requested_policy
+            payload["effective_policy"] = effective_policy.name
+            payload["deprecated_args"] = deprecated_args
             payload["mode"] = effective_policy.mode
             payload["stage"] = effective_policy.stage
             payload["exit_code"] = report._exit_code
             print(json.dumps(payload, indent=2))
+            if deprecated_args:
+                print(
+                    f"[Preflight] Deprecated args used (mapped to {effective_policy.name}): "
+                    + ", ".join(deprecated_args),
+                    file=sys.stderr
+                )
         else:
             print(format_report(report, use_colors=use_colors))
+            if deprecated_args:
+                print(
+                    f"[Preflight] Deprecated args used (mapped to {effective_policy.name}): "
+                    + ", ".join(deprecated_args),
+                    file=sys.stderr
+                )
             if effective_policy.mode != CheckMode.REPORT and report._exit_code != 0:
                 print(
                     f"[Preflight] policy={effective_policy.name} (mode={effective_policy.mode}): "
                     f"exit code {report._exit_code} will be returned "
                     f"({len(report.failed)} failures detected).",
+                    file=sys.stderr
+                )
+            # 在 human-readable 模式下，列出所有可用 policy 供参考（首次运行时显示一次）
+            if stage is None and not policy and not mode and not exit_on_error and not no_exit:
+                print(
+                    f"[Preflight] Available policies: "
+                    + ", ".join(sorted(PreflightPolicy.all_policies().keys())),
                     file=sys.stderr
                 )
 
@@ -920,17 +1039,26 @@ def run_preflight(root_dir: Optional[str] = None,
 
 def _main():
     import argparse
-    import warnings
+
+    policies = PreflightPolicy.all_policies()
+    policy_help_lines = [
+        f"  {name:22s} - {p.description} [{p.mode}, stage={p.stage}]"
+        for name, p in sorted(policies.items())
+    ]
+    policy_help = "\n".join(policy_help_lines)
 
     parser = argparse.ArgumentParser(
         description="Fooocus Environment Preflight Check",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Available policies:\n"
-            + "\n".join(
-                f"  {name:20s} - {p.description}"
-                for name, p in sorted(PreflightPolicy.all_policies().items())
-            )
+            "Available policies (use --policy <name>):\n"
+            + policy_help
+            + "\n\n"
+            + "Deprecated args (all map to above policies):\n"
+            + "  --no-exit          -> --policy report\n"
+            + "  --exit-on-error    -> --policy strict\n"
+            + "  --mode <mode>      -> mapped to corresponding policy\n"
+            + "  --stage <stage>    -> refines the mapped policy for cache reuse"
         )
     )
     parser.add_argument(
@@ -950,23 +1078,23 @@ def _main():
         type=str,
         choices=list(CheckMode._ALL),
         default=None,
-        help="运行模式 (兼容参数，推荐改用 --policy)。"
+        help="运行模式 [DEPRECATED]。请改用 --policy。"
     )
     parser.add_argument(
         "--stage",
         type=str,
         default=None,
-        help="阶段标签，用于缓存键 (兼容参数，推荐改用 --policy)。"
+        help="阶段标签 [DEPRECATED]。请改用 --policy。"
     )
     parser.add_argument(
         "--exit-on-error",
         action="store_true",
-        help="[已废弃] 有 FAIL 就非零退出。等价于 --policy strict。"
+        help="[DEPRECATED] 有 FAIL 就非零退出。等价于 --policy strict。"
     )
     parser.add_argument(
         "--no-exit",
         action="store_true",
-        help="[已废弃] 无论是否有错误退出码都为 0。等价于 --policy report。将打印 deprecation warning。"
+        help="[DEPRECATED] 无论是否有错误退出码都为 0。等价于 --policy report。"
     )
     parser.add_argument(
         "--no-colors",
@@ -981,32 +1109,14 @@ def _main():
 
     args = parser.parse_args()
 
-    # 解析最终 policy
-    if args.policy is not None:
-        resolved_policy = args.policy
-    elif args.no_exit:
-        # --no-exit → report 模式
-        if not args.json:
-            print(
-                "[Preflight] Warning: --no-exit is deprecated, "
-                "use --policy report instead.",
-                file=sys.stderr
-            )
-        resolved_policy = "report"
-    elif args.exit_on_error or args.mode or args.stage:
-        # 使用兼容参数走 _resolve_policy 动态合成
-        resolved_policy = None
-    else:
-        # 独立 CLI 默认严格模式
-        resolved_policy = "cli_default"
-
     try:
         report = run_preflight(
             root_dir=args.root,
-            policy=resolved_policy,
-            mode=args.mode if resolved_policy is None else None,
-            stage=args.stage if resolved_policy is None else None,
-            exit_on_error=args.exit_on_error if resolved_policy is None else False,
+            policy=args.policy,
+            mode=args.mode,
+            stage=args.stage,
+            exit_on_error=args.exit_on_error,
+            no_exit=args.no_exit,
             print_report=True,
             use_colors=not args.no_colors and not args.json,
             as_json=args.json,
