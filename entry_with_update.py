@@ -6,43 +6,6 @@ root = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(root)
 os.chdir(root)
 
-FOOOCUS_SKIP_PREFLIGHT = os.environ.get("FOOOCUS_SKIP_PREFLIGHT", "").strip().lower() in ("1", "true", "yes", "on")
-FORCE_JSON_ENV = os.environ.get("FOOOCUS_PREFLIGHT_JSON", "").strip().lower() in ("1", "true", "yes", "on")
-QUIET_MODE = FORCE_JSON_ENV
-
-
-def run_preflight_check(policy: str = "pre_update"):
-    """
-    git 更新前的预检。使用 pre_update 策略（非阻塞，只出报告）。
-    所有规则由 PreflightPolicy 集中定义，调用方只需传 policy 名称。
-    """
-    if FOOOCUS_SKIP_PREFLIGHT:
-        if not QUIET_MODE:
-            print(f"\n[Preflight] policy={policy} skipped (FOOOCUS_SKIP_PREFLIGHT=1)\n")
-        return None
-    try:
-        from modules.environment_preflight import run_preflight
-        if not QUIET_MODE:
-            print(f"\n[Preflight] Running {policy} environment check (non-blocking) ...\n")
-        report = run_preflight(
-            root_dir=root,
-            policy=policy,
-            print_report=True,
-            use_colors=not QUIET_MODE,
-            as_json=FORCE_JSON_ENV,
-            call_exit=True
-        )
-        return report
-    except Exception as e:
-        msg = f"\n[Preflight] Warning: Could not run preflight check ({e})\n"
-        if FORCE_JSON_ENV:
-            print(msg, file=sys.stderr)
-        else:
-            print(msg)
-        return None
-
-
-run_preflight_check(policy="pre_update")
 
 try:
     import pygit2
