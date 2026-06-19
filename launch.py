@@ -86,6 +86,11 @@ if args.hf_mirror is not None:
 
 from modules import config
 from modules.hash_cache import init_cache
+from modules.manifest import (
+    load_manifest, check_manifest_resources, print_manifest_report,
+    build_default_manifest, save_manifest, get_manifest_path,
+    sha256_file
+)
 
 os.environ["U2NET_HOME"] = config.path_inpaint
 
@@ -98,6 +103,89 @@ if config.temp_path_cleanup_on_launch:
         print("[Cleanup] Cleanup successful")
     else:
         print(f"[Cleanup] Failed to delete content of temp dir.")
+
+
+def get_manifest_to_use():
+    manifest_path = getattr(args, 'manifest_path', None)
+    if manifest_path and os.path.exists(manifest_path):
+        print(f'[Manifest] Using manifest from: {manifest_path}')
+        return load_manifest(manifest_path)
+
+    default_manifest_path = get_manifest_path(config.get_data_dir())
+    if os.path.exists(default_manifest_path):
+        print(f'[Manifest] Using default manifest from: {default_manifest_path}')
+        return load_manifest(default_manifest_path)
+
+    print('[Manifest] No manifest file found, generating from default config...')
+    manifest = build_default_manifest(
+        config.checkpoint_downloads,
+        config.lora_downloads,
+        config.embeddings_downloads,
+        config.vae_downloads,
+        vae_approx_filenames,
+        'https://huggingface.co/lllyasviel/misc/resolve/main/fooocus_expansion.bin',
+        fooocus_version=fooocus_version.version,
+    )
+    return manifest
+
+
+def run_manifest_check():
+    if not getattr(args, 'manifest_check', False) and not getattr(args, 'manifest_strict', False):
+        return True
+
+    manifest = get_manifest_to_use()
+    if not manifest.resources:
+        print('[Manifest] No resources defined in manifest, skipping check.')
+        return True
+
+    check_hash = getattr(args, 'manifest_check_hash', False)
+    models_root = config.get_models_dir()
+    result = check_manifest_resources(manifest, models_root, check_hash=check_hash)
+    ok = print_manifest_report(result, manifest)
+
+    if not ok and getattr(args, 'manifest_strict', False):
+        print()
+        print('[ERROR] Manifest check failed in strict mode. Aborting launch.')
+        print(f'[ERROR] Models directory: {models_root}')
+        print('[ERROR] Please download the required models and place them in the correct directories,')
+        print('[ERROR] or disable strict mode with --no-manifest-strict.')
+        return False
+
+    return True
+
+
+def handle_generate_manifest():
+    output_path = getattr(args, 'generate_manifest', None)
+    if not output_path:
+        return
+
+    print(f'[Manifest] Generating manifest to: {output_path}')
+    manifest = build_default_manifest(
+        config.checkpoint_downloads,
+        config.lora_downloads,
+        config.embeddings_downloads,
+        config.vae_downloads,
+        vae_approx_filenames,
+        'https://huggingface.co/lllyasviel/misc/resolve/main/fooocus_expansion.bin',
+        fooocus_version=fooocus_version.version,
+    )
+
+    if getattr(args, 'manifest_check_hash', False):
+        models_root = config.get_models_dir()
+        print('[Manifest] Computing file hashes...')
+        for item in manifest.resources.values():
+            from modules.manifest import resolve_resource_path
+            file_path = resolve_resource_path(item, models_root)
+            if os.path.exists(file_path):
+                try:
+                    item.sha256 = sha256_file(file_path)
+                    print(f'  [OK] {item.name}: {item.sha256[:16]}...')
+                except Exception as e:
+                    print(f'  [!!] {item.name}: failed to hash - {e}')
+
+    save_manifest(manifest, output_path)
+    print(f'[Manifest] Manifest generated successfully.')
+    sys.exit(0)
 
 
 def download_models(default_model, previous_default_models, checkpoint_downloads, embeddings_downloads, lora_downloads, vae_downloads):
@@ -142,11 +230,18 @@ def download_models(default_model, previous_default_models, checkpoint_downloads
     return default_model, checkpoint_downloads
 
 
+handle_generate_manifest()
+
+if not run_manifest_check():
+    print()
+    print('[FATAL] Launch aborted due to manifest check failure.')
+    sys.exit(1)
+
 config.default_base_model_name, config.checkpoint_downloads = download_models(
     config.default_base_model_name, config.previous_default_models, config.checkpoint_downloads,
     config.embeddings_downloads, config.lora_downloads, config.vae_downloads)
 
-config.update_files_bootstrap()
+config.update_files()
 init_cache(config.model_filenames, config.paths_checkpoints, config.lora_filenames, config.paths_loras)
 
 from modules import diagnostics as _diagnostics

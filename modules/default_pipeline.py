@@ -13,9 +13,10 @@ from extras.expansion import FooocusExpansion
 from ldm_patched.modules.model_base import SDXL, SDXLRefiner
 from modules.sample_hijack import clip_separate
 from modules.util import get_file_from_folder_list, get_enabled_loras
+import modules.diagnostics as diagnostics
 from modules.diagnostics import (
-    DiagnosticJob, DiagnosticJobKind, DiagnosticJobError, DiagnosticStage,
-    DiagnosticErrorCategory, LogLevel,
+    DiagnosticStage, DiagnosticErrorCategory, get_current_context,
+    log_info, log_error,
 )
 
 
@@ -34,120 +35,156 @@ loaded_ControlNets = {}
 
 @torch.no_grad()
 @torch.inference_mode()
-def refresh_controlnets(model_paths, job: DiagnosticJob):
+def refresh_controlnets(model_paths):
     global loaded_ControlNets
+    ctx = get_current_context()
     cache = {}
     for p in model_paths:
         if p is not None:
             if p in loaded_ControlNets:
                 cache[p] = loaded_ControlNets[p]
             else:
-                with job.scope(DiagnosticStage.MODEL_LOAD, DiagnosticErrorCategory.MODEL_LOAD_FAILED):
+                try:
+                    if ctx:
+                        ctx.start_stage(DiagnosticStage.MODEL_LOAD)
                     cache[p] = core.load_controlnet(p)
-                    job.add_model_loaded(p)
-                    job.record_event(
-                        LogLevel.INFO,
+                    if ctx:
+                        ctx.add_model_loaded(p)
+                        log_info(
+                            DiagnosticStage.MODEL_LOAD,
+                            f"ControlNet 模型已加载: {os.path.basename(p)}",
+                            ctx=ctx,
+                            extra_data={"model_path": p},
+                        )
+                        ctx.end_stage(DiagnosticStage.MODEL_LOAD, "completed")
+                except Exception as e:
+                    log_error(
                         DiagnosticStage.MODEL_LOAD,
-                        f"ControlNet 模型已加载: {os.path.basename(p)}",
+                        f"ControlNet 模型加载失败: {os.path.basename(p)}",
+                        exception=e,
+                        category=DiagnosticErrorCategory.MODEL_LOAD_FAILED,
+                        ctx=ctx,
                         extra_data={"model_path": p},
                     )
+                    raise
     loaded_ControlNets = cache
     return
 
 
-def refresh_controlnets_bootstrap(model_paths):
-    return refresh_controlnets(model_paths, DiagnosticJob(kind=DiagnosticJobKind.STARTUP))
-
-
 @torch.no_grad()
 @torch.inference_mode()
-def assert_model_integrity(job: DiagnosticJob):
+def assert_model_integrity():
     error_message = None
 
     if not isinstance(model_base.unet_with_lora.model, SDXL):
         error_message = 'You have selected base model other than SDXL. This is not supported yet.'
 
     if error_message is not None:
-        job.record_error(
+        ctx = get_current_context()
+        log_error(
             DiagnosticStage.MODEL_LOAD,
             error_message,
             category=DiagnosticErrorCategory.MODEL_LOAD_FAILED,
+            ctx=ctx,
         )
         raise NotImplementedError(error_message)
 
     return True
 
 
-def assert_model_integrity_bootstrap():
-    return assert_model_integrity(DiagnosticJob(kind=DiagnosticJobKind.STARTUP))
-
-
 @torch.no_grad()
 @torch.inference_mode()
-def refresh_base_model(name, job: DiagnosticJob, vae_name=None):
+def refresh_base_model(name, vae_name=None):
     global model_base
+    ctx = get_current_context()
 
     filename = get_file_from_folder_list(name, modules.config.paths_checkpoints)
     if filename is None:
-        raise DiagnosticJobError(
+        log_error(
+            DiagnosticStage.MODEL_LOAD,
+            f"找不到基础模型文件: {name}",
+            category=DiagnosticErrorCategory.MODEL_NOT_FOUND,
+            ctx=ctx,
+            extra_data={"model_name": name, "search_paths": modules.config.paths_checkpoints},
+        )
+        raise diagnostics.DiagnosticsError(
             human_message=f"找不到基础模型: {name}",
             category=DiagnosticErrorCategory.MODEL_NOT_FOUND,
             stage=DiagnosticStage.MODEL_LOAD,
-            job=job,
-            extra_data={"model_name": name, "search_paths": modules.config.paths_checkpoints},
+            ctx=ctx,
+            extra_data={"model_name": name},
         )
 
     vae_filename = None
     if vae_name is not None and vae_name != modules.flags.default_vae:
         vae_filename = get_file_from_folder_list(vae_name, modules.config.path_vae)
         if vae_filename is None and vae_name != modules.flags.default_vae:
-            job.record_error(
+            log_error(
                 DiagnosticStage.MODEL_LOAD,
                 f"找不到 VAE 文件: {vae_name}",
                 category=DiagnosticErrorCategory.MODEL_NOT_FOUND,
+                ctx=ctx,
                 extra_data={"vae_name": vae_name},
             )
 
     if model_base.filename == filename and model_base.vae_filename == vae_filename:
         return
 
-    with job.scope(DiagnosticStage.MODEL_LOAD, DiagnosticErrorCategory.MODEL_LOAD_FAILED):
+    try:
+        if ctx:
+            ctx.start_stage(DiagnosticStage.MODEL_LOAD)
         model_base = core.load_model(filename, vae_filename)
-        job.add_model_loaded(filename)
-        if vae_filename:
-            job.add_model_loaded(vae_filename)
-        job.record_event(
-            LogLevel.INFO,
+        if ctx:
+            ctx.add_model_loaded(filename)
+            if vae_filename:
+                ctx.add_model_loaded(vae_filename)
+            log_info(
+                DiagnosticStage.MODEL_LOAD,
+                f"基础模型已加载: {os.path.basename(filename)}",
+                ctx=ctx,
+                extra_data={
+                    "base_model": filename,
+                    "vae": vae_filename,
+                },
+            )
+            ctx.end_stage(DiagnosticStage.MODEL_LOAD, "completed")
+    except Exception as e:
+        log_error(
             DiagnosticStage.MODEL_LOAD,
-            f"基础模型已加载: {os.path.basename(filename)}",
-            extra_data={
-                "base_model": filename,
-                "vae": vae_filename,
-            },
+            f"基础模型加载失败: {os.path.basename(filename)}",
+            exception=e,
+            category=DiagnosticErrorCategory.MODEL_LOAD_FAILED,
+            ctx=ctx,
+            extra_data={"model_path": filename, "vae_path": vae_filename},
         )
+        raise
     print(f'Base model loaded: {model_base.filename}')
     print(f'VAE loaded: {model_base.vae_filename}')
     return
 
 
-def refresh_base_model_bootstrap(name, vae_name=None):
-    return refresh_base_model(name, DiagnosticJob(kind=DiagnosticJobKind.STARTUP), vae_name)
-
-
 @torch.no_grad()
 @torch.inference_mode()
-def refresh_refiner_model(name, job: DiagnosticJob):
+def refresh_refiner_model(name):
     global model_refiner
+    ctx = get_current_context()
 
     filename = None
     if name != 'None':
         filename = get_file_from_folder_list(name, modules.config.paths_checkpoints)
         if filename is None:
-            raise DiagnosticJobError(
+            log_error(
+                DiagnosticStage.MODEL_LOAD,
+                f"找不到 Refiner 模型文件: {name}",
+                category=DiagnosticErrorCategory.MODEL_NOT_FOUND,
+                ctx=ctx,
+                extra_data={"model_name": name},
+            )
+            raise diagnostics.DiagnosticsError(
                 human_message=f"找不到 Refiner 模型: {name}",
                 category=DiagnosticErrorCategory.MODEL_NOT_FOUND,
                 stage=DiagnosticStage.MODEL_LOAD,
-                job=job,
+                ctx=ctx,
                 extra_data={"model_name": name},
             )
 
@@ -160,15 +197,29 @@ def refresh_refiner_model(name, job: DiagnosticJob):
         print(f'Refiner unloaded.')
         return
 
-    with job.scope(DiagnosticStage.MODEL_LOAD, DiagnosticErrorCategory.MODEL_LOAD_FAILED):
+    try:
+        if ctx:
+            ctx.start_stage(DiagnosticStage.MODEL_LOAD)
         model_refiner = core.load_model(filename)
-        job.add_model_loaded(filename)
-        job.record_event(
-            LogLevel.INFO,
+        if ctx:
+            ctx.add_model_loaded(filename)
+            log_info(
+                DiagnosticStage.MODEL_LOAD,
+                f"Refiner 模型已加载: {os.path.basename(filename)}",
+                ctx=ctx,
+                extra_data={"refiner_model": filename},
+            )
+            ctx.end_stage(DiagnosticStage.MODEL_LOAD, "completed")
+    except Exception as e:
+        log_error(
             DiagnosticStage.MODEL_LOAD,
-            f"Refiner 模型已加载: {os.path.basename(filename)}",
-            extra_data={"refiner_model": filename},
+            f"Refiner 模型加载失败: {os.path.basename(filename)}",
+            exception=e,
+            category=DiagnosticErrorCategory.MODEL_LOAD_FAILED,
+            ctx=ctx,
+            extra_data={"model_path": filename},
         )
+        raise
     print(f'Refiner model loaded: {model_refiner.filename}')
 
     if isinstance(model_refiner.unet.model, SDXL):
@@ -181,10 +232,6 @@ def refresh_refiner_model(name, job: DiagnosticJob):
         model_refiner.clip = None
 
     return
-
-
-def refresh_refiner_model_bootstrap(name):
-    return refresh_refiner_model(name, DiagnosticJob(kind=DiagnosticJobKind.STARTUP))
 
 
 @torch.no_grad()
@@ -209,20 +256,16 @@ def synthesize_refiner_model():
 
 @torch.no_grad()
 @torch.inference_mode()
-def refresh_loras(loras, *, base_model_additional_loras=None, job: DiagnosticJob):
+def refresh_loras(loras, base_model_additional_loras=None):
     global model_base, model_refiner
 
     if not isinstance(base_model_additional_loras, list):
         base_model_additional_loras = []
 
-    model_base.refresh_loras(loras + base_model_additional_loras, job=job)
-    model_refiner.refresh_loras(loras, job=job)
+    model_base.refresh_loras(loras + base_model_additional_loras)
+    model_refiner.refresh_loras(loras)
 
     return
-
-
-def refresh_loras_bootstrap(loras, base_model_additional_loras=None):
-    return refresh_loras(loras, base_model_additional_loras=base_model_additional_loras, job=DiagnosticJob(kind=DiagnosticJobKind.STARTUP))
 
 
 @torch.no_grad()
@@ -305,8 +348,9 @@ def clear_all_caches():
 @torch.inference_mode()
 def prepare_text_encoder(async_call=True):
     if async_call:
+        # TODO: make sure that this is always called in an async way so that users cannot feel it.
         pass
-    assert_model_integrity(DiagnosticJob(kind=DiagnosticJobKind.STARTUP))
+    assert_model_integrity()
     ldm_patched.modules.model_management.load_models_gpu([final_clip.patcher, final_expansion.patcher])
     return
 
@@ -314,7 +358,7 @@ def prepare_text_encoder(async_call=True):
 @torch.no_grad()
 @torch.inference_mode()
 def refresh_everything(refiner_model_name, base_model_name, loras,
-                       *, base_model_additional_loras=None, use_synthetic_refiner=False, vae_name=None, job: DiagnosticJob):
+                       base_model_additional_loras=None, use_synthetic_refiner=False, vae_name=None):
     global final_unet, final_clip, final_vae, final_refiner_unet, final_refiner_vae, final_expansion
 
     final_unet = None
@@ -325,14 +369,14 @@ def refresh_everything(refiner_model_name, base_model_name, loras,
 
     if use_synthetic_refiner and refiner_model_name == 'None':
         print('Synthetic Refiner Activated')
-        refresh_base_model(base_model_name, job, vae_name)
+        refresh_base_model(base_model_name, vae_name)
         synthesize_refiner_model()
     else:
-        refresh_refiner_model(refiner_model_name, job)
-        refresh_base_model(base_model_name, job, vae_name)
+        refresh_refiner_model(refiner_model_name)
+        refresh_base_model(base_model_name, vae_name)
 
-    refresh_loras(loras, base_model_additional_loras=base_model_additional_loras, job=job)
-    assert_model_integrity(job)
+    refresh_loras(loras, base_model_additional_loras=base_model_additional_loras)
+    assert_model_integrity()
 
     final_unet = model_base.unet_with_lora
     final_clip = model_base.clip_with_lora
@@ -349,16 +393,7 @@ def refresh_everything(refiner_model_name, base_model_name, loras,
     return
 
 
-def refresh_everything_bootstrap(refiner_model_name, base_model_name, loras,
-                                 base_model_additional_loras=None, use_synthetic_refiner=False, vae_name=None):
-    return refresh_everything(refiner_model_name, base_model_name, loras,
-                              base_model_additional_loras=base_model_additional_loras,
-                              use_synthetic_refiner=use_synthetic_refiner,
-                              vae_name=vae_name,
-                              job=DiagnosticJob(kind=DiagnosticJobKind.STARTUP))
-
-
-refresh_everything_bootstrap(
+refresh_everything(
     refiner_model_name=modules.config.default_refiner_model_name,
     base_model_name=modules.config.default_base_model_name,
     loras=get_enabled_loras(modules.config.default_loras),

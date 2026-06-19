@@ -8,26 +8,35 @@ services:
     ports:
      - "7865:7865"
     environment:
-      - CMDARGS=--listen    # Arguments for launch.py.
-      - DATADIR=/content/data   # Directory which stores models, outputs dir
-      - FOOOCUS_USER_DATA_DIR=/content/data   # Directory which stores user presets and other user data
-      - config_path=/content/data/config.txt
-      - config_example_path=/content/data/config_modification_tutorial.txt
-      - path_checkpoints=/content/data/models/checkpoints/
-      - path_loras=/content/data/models/loras/
-      - path_embeddings=/content/data/models/embeddings/
-      - path_vae_approx=/content/data/models/vae_approx/
-      - path_upscale_models=/content/data/models/upscale_models/
-      - path_inpaint=/content/data/models/inpaint/
-      - path_controlnet=/content/data/models/controlnet/
-      - path_clip_vision=/content/data/models/clip_vision/
-      - path_fooocus_expansion=/content/data/models/prompt_expansion/fooocus_expansion/
-      - sorted_styles_path=/content/data/sorted_styles.json
-      - path_outputs=/content/app/outputs/    # Warning: If it is not located under '/content/app', you can't see history log!
+      - CMDARGS=--listen
+      - DATADIR=/data
+      - FOOOCUS_DATA_DIR=/data
+      - FOOOCUS_USER_DATA_DIR=/data
+      - config_path=/data/config.txt
+      - config_example_path=/data/config_modification_tutorial.txt
+      - sorted_styles_path=/data/sorted_styles.json
+      - path_checkpoints=/data/models/checkpoints/
+      - path_loras=/data/models/loras/
+      - path_embeddings=/data/models/embeddings/
+      - path_vae=/data/models/vae/
+      - path_vae_approx=/data/models/vae_approx/
+      - path_upscale_models=/data/models/upscale_models/
+      - path_inpaint=/data/models/inpaint/
+      - path_controlnet=/data/models/controlnet/
+      - path_clip_vision=/data/models/clip_vision/
+      - path_fooocus_expansion=/data/models/prompt_expansion/fooocus_expansion/
+      - path_safety_checker=/data/models/safety_checker/
+      - path_sam=/data/models/sam/
+      - path_outputs=/data/outputs/
+      - temp_path=/data/cache/temp/
+      - MANIFEST_CHECK=1
+      - MANIFEST_STRICT=0
+      - MANIFEST_CHECK_HASH=0
     volumes:
-      - fooocus-data:/content/data
+      - fooocus-data:/data
       #- ./models:/import/models   # Once you import files, you don't need to mount again.
       #- ./outputs:/import/outputs  # Once you import files, you don't need to mount again.
+      #- ./manifest.json:/import/manifest.json  # Import a custom manifest
     tty: true
     deploy:
       resources:

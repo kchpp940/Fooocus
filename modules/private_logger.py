@@ -9,10 +9,6 @@ from PIL.PngImagePlugin import PngInfo
 from modules.flags import OutputFormat
 from modules.meta_parser import MetadataParser, get_exif
 from modules.util import generate_temp_filename
-from modules.diagnostics import (
-    DiagnosticJob, DiagnosticStage,
-    DiagnosticErrorCategory, LogLevel,
-)
 
 log_cache = {}
 
@@ -25,55 +21,29 @@ def get_current_html_path(output_format=None):
     return html_name
 
 
-def log(img, metadata, metadata_parser: MetadataParser | None = None, output_format=None, task=None, persist_image=True, *, job: DiagnosticJob) -> str:
+def log(img, metadata, metadata_parser: MetadataParser | None = None, output_format=None, task=None, persist_image=True) -> str:
     path_outputs = modules.config.temp_path if args_manager.args.disable_image_log or not persist_image else modules.config.path_outputs
     output_format = output_format if output_format else modules.config.default_output_format
     date_string, local_temp_filename, only_name = generate_temp_filename(folder=path_outputs, extension=output_format)
     os.makedirs(os.path.dirname(local_temp_filename), exist_ok=True)
 
-    try:
-        parsed_parameters = metadata_parser.to_string(metadata.copy()) if metadata_parser is not None else ''
-        image = Image.fromarray(img)
+    parsed_parameters = metadata_parser.to_string(metadata.copy()) if metadata_parser is not None else ''
+    image = Image.fromarray(img)
 
-        if output_format == OutputFormat.PNG.value:
-            if parsed_parameters != '':
-                pnginfo = PngInfo()
-                pnginfo.add_text('parameters', parsed_parameters)
-                pnginfo.add_text('fooocus_scheme', metadata_parser.get_scheme().value)
-            else:
-                pnginfo = None
-            image.save(local_temp_filename, pnginfo=pnginfo)
-        elif output_format == OutputFormat.JPEG.value:
-            image.save(local_temp_filename, quality=95, optimize=True, progressive=True, exif=get_exif(parsed_parameters, metadata_parser.get_scheme().value) if metadata_parser else Image.Exif())
-        elif output_format == OutputFormat.WEBP.value:
-            image.save(local_temp_filename, quality=95, lossless=False, exif=get_exif(parsed_parameters, metadata_parser.get_scheme().value) if metadata_parser else Image.Exif())
+    if output_format == OutputFormat.PNG.value:
+        if parsed_parameters != '':
+            pnginfo = PngInfo()
+            pnginfo.add_text('parameters', parsed_parameters)
+            pnginfo.add_text('fooocus_scheme', metadata_parser.get_scheme().value)
         else:
-            image.save(local_temp_filename)
-
-        job.record_event(
-            LogLevel.INFO,
-            DiagnosticStage.IMAGE_SAVE,
-            f"图像保存成功: {only_name}",
-            extra_data={
-                "filename": only_name,
-                "format": output_format,
-                "size": os.path.getsize(local_temp_filename) if os.path.exists(local_temp_filename) else None,
-                "has_metadata": parsed_parameters != '',
-            }
-        )
-
-    except Exception as e:
-        job.record_error(
-            DiagnosticStage.IMAGE_SAVE,
-            "图像保存失败",
-            category=DiagnosticErrorCategory.IMAGE_SAVE_FAILED,
-            exception=e,
-            extra_data={
-                "output_format": output_format,
-                "target_path": local_temp_filename,
-                "has_metadata_parser": metadata_parser is not None,
-            }
-        )
+            pnginfo = None
+        image.save(local_temp_filename, pnginfo=pnginfo)
+    elif output_format == OutputFormat.JPEG.value:
+        image.save(local_temp_filename, quality=95, optimize=True, progressive=True, exif=get_exif(parsed_parameters, metadata_parser.get_scheme().value) if metadata_parser else Image.Exif())
+    elif output_format == OutputFormat.WEBP.value:
+        image.save(local_temp_filename, quality=95, lossless=False, exif=get_exif(parsed_parameters, metadata_parser.get_scheme().value) if metadata_parser else Image.Exif())
+    else:
+        image.save(local_temp_filename)
 
     if args_manager.args.disable_image_log:
         return local_temp_filename
@@ -157,29 +127,11 @@ def log(img, metadata, metadata_parser: MetadataParser | None = None, output_for
 
     middle_part = item + middle_part
 
-    try:
-        with open(html_name, 'w', encoding='utf-8') as f:
-            f.write(begin_part + middle_part + end_part)
+    with open(html_name, 'w', encoding='utf-8') as f:
+        f.write(begin_part + middle_part + end_part)
 
-        job.record_event(
-            LogLevel.INFO,
-            DiagnosticStage.IMAGE_SAVE,
-            f"HTML 日志已更新: {os.path.basename(html_name)}",
-            extra_data={"html_log_path": html_name},
-        )
+    print(f'Image generated with private log at: {html_name}')
 
-        print(f'Image generated with private log at: {html_name}')
-
-        log_cache[html_name] = middle_part
-    except Exception as e:
-        job.record_event(
-            LogLevel.WARNING,
-            DiagnosticStage.IMAGE_SAVE,
-            "HTML 日志写入失败，图像已保存但日志未更新",
-            extra_data={
-                "html_log_path": html_name,
-                "error": str(e),
-            },
-        )
+    log_cache[html_name] = middle_part
 
     return local_temp_filename

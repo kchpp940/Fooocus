@@ -23,7 +23,8 @@ from modules.private_logger import get_current_html_path
 from modules.ui_gradio_extensions import reload_javascript
 from modules.auth import auth_enabled, check_auth
 from modules.util import is_json
-from modules.diagnostics import DiagnosticJob, DiagnosticJobKind, DiagnosticStage, LogLevel, get_job
+import modules.diagnostics as diagnostics
+from modules.diagnostics import get_user_friendly_error
 
 
 def build_preset_data_from_ui(*args):
@@ -126,15 +127,7 @@ def get_task(*args):
     args = list(args)
     args.pop(0)
 
-    job = DiagnosticJob()
-    with job.scope(DiagnosticStage.QUEUE_WAIT):
-        job.record_event(
-            LogLevel.INFO,
-            DiagnosticStage.QUEUE_WAIT,
-            "任务已入队，等待处理",
-            extra_data={"task_args_length": len(args)},
-        )
-    return worker.AsyncTask(args=args, job=job)
+    return worker.AsyncTask(args=args)
 
 def generate_clicked(task: worker.AsyncTask):
     import ldm_patched.modules.model_management as model_management
@@ -196,15 +189,7 @@ def generate_clicked(task: worker.AsyncTask):
 
                 if error_info is not None:
                     trace_id = error_info.get('trace_id') if isinstance(error_info, dict) else None
-                    job = get_job(trace_id) if trace_id else None
-                    friendly_error = job.to_public_error() if job else {
-                        'title': '生成遇到问题',
-                        'message': '处理您的请求时发生错误。',
-                        'trace_id': trace_id,
-                        'kind': 'unknown',
-                        'show_diagnostics_button': False,
-                        'diagnostics_summary': f'Trace ID: {trace_id}',
-                    }
+                    friendly_error = get_user_friendly_error(trace_id)
                     error_html = f'''
                     <div style="padding: 16px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; margin-bottom: 12px;">
                         <div style="font-weight: 600; color: #991b1b; font-size: 15px; margin-bottom: 4px;">
@@ -307,7 +292,7 @@ if isinstance(args_manager.args.preset, str):
 shared.gradio_root = gr.Blocks(title=title).queue()
 
 with shared.gradio_root:
-    currentTask = gr.State(worker.AsyncTask(args=[], job=DiagnosticJob(kind=DiagnosticJobKind.STARTUP)))
+    currentTask = gr.State(worker.AsyncTask(args=[]))
     inpaint_engine_state = gr.State('empty')
     with gr.Row():
         with gr.Column(scale=2):
@@ -529,7 +514,7 @@ with shared.gradio_root:
                             metadata_import_button = gr.Button(value='Apply Metadata')
 
                         def trigger_metadata_preview(file):
-                            parameters, metadata_scheme = modules.meta_parser.read_info_from_image_bootstrap(file)
+                            parameters, metadata_scheme = modules.meta_parser.read_info_from_image(file)
 
                             results = {}
                             if parameters is not None:
@@ -1073,7 +1058,7 @@ with shared.gradio_root:
                                 queue=False, show_progress=False)
 
                 def refresh_files_clicked():
-                    modules.config.update_files_bootstrap()
+                    modules.config.update_files()
                     results = [gr.update(choices=modules.config.model_filenames)]
                     results += [gr.update(choices=['None'] + modules.config.model_filenames)]
                     results += [gr.update(choices=[flags.default_vae] + modules.config.vae_filenames)]
@@ -1240,7 +1225,7 @@ with shared.gradio_root:
         load_parameter_button.click(modules.meta_parser.load_parameter_button_click, inputs=[prompt, state_is_generating, inpaint_mode], outputs=load_data_outputs, queue=False, show_progress=False)
 
         def trigger_metadata_import(file, state_is_generating):
-            parameters, metadata_scheme = modules.meta_parser.read_info_from_image_bootstrap(file)
+            parameters, metadata_scheme = modules.meta_parser.read_info_from_image(file)
             if parameters is None:
                 print('Could not find metadata in the image!')
                 parsed_parameters = {}
@@ -1263,7 +1248,7 @@ with shared.gradio_root:
             .then(fn=update_history_link, outputs=history_link) \
             .then(fn=lambda: None, _js='playNotification').then(fn=lambda: None, _js='refresh_grid_delayed')
 
-        reset_button.click(lambda: [worker.AsyncTask(args=[], job=DiagnosticJob(kind=DiagnosticJobKind.STARTUP)), False, gr.update(visible=True, interactive=True)] +
+        reset_button.click(lambda: [worker.AsyncTask(args=[]), False, gr.update(visible=True, interactive=True)] +
                                    [gr.update(visible=False)] * 8 +
                                    [gr.update(visible=True, value=[])],
                            outputs=[currentTask, state_is_generating, generate_button,
@@ -1334,7 +1319,7 @@ with shared.gradio_root:
                     preset_data = build_preset_data_from_ui(*ui_args)
                     success, result = modules.config.save_user_preset(new_name.strip(), preset_data)
                     if success:
-                        modules.config.update_files_bootstrap()
+                        modules.config.update_files()
                         return (
                             gr.update(choices=modules.config.available_presets, value=result),
                             format_preset_details_html(result),
@@ -1370,7 +1355,7 @@ with shared.gradio_root:
                     return gr.update(), gr.update(), '⚠️  Error: Cannot duplicate "initial", use "Save Current as Preset" instead'
                 success, result = modules.config.duplicate_user_preset(current_preset, new_name.strip())
                 if success:
-                    modules.config.update_files_bootstrap()
+                    modules.config.update_files()
                     return (
                         gr.update(choices=modules.config.available_presets, value=result),
                         format_preset_details_html(result),
@@ -1394,7 +1379,7 @@ with shared.gradio_root:
                     return gr.update(), gr.update(), '⚠️  Error: New preset name cannot be empty'
                 success, result = modules.config.rename_user_preset(current_preset, new_name.strip())
                 if success:
-                    modules.config.update_files_bootstrap()
+                    modules.config.update_files()
                     return (
                         gr.update(choices=modules.config.available_presets, value=result),
                         format_preset_details_html(result),
@@ -1416,7 +1401,7 @@ with shared.gradio_root:
                     return gr.update(), gr.update(), '⚠️  Error: Can only delete user presets (marked with [User] prefix)'
                 success, result = modules.config.delete_user_preset(current_preset)
                 if success:
-                    modules.config.update_files_bootstrap()
+                    modules.config.update_files()
                     return (
                         gr.update(choices=modules.config.available_presets, value='initial'),
                         format_preset_details_html('initial'),

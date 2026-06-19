@@ -2,12 +2,10 @@ import os
 import gradio as gr
 import modules.localization as localization
 import json
+import modules.config as config
 
 
-_sorted_styles_path = os.environ.get(
-    'sorted_styles_path',
-    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'sorted_styles.json')
-)
+_sorted_styles_path = config.get_sorted_styles_path()
 
 all_styles = []
 

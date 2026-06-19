@@ -11,33 +11,97 @@ import modules.sdxl_styles
 from modules.model_loader import load_file_from_url
 from modules.extra_utils import makedirs_with_log, get_files_from_folder, try_eval_env_var
 from modules.flags import OutputFormat, Performance, MetadataScheme
+import modules.diagnostics as diagnostics
 from modules.diagnostics import (
-    DiagnosticJob, DiagnosticJobKind, DiagnosticJobError, DiagnosticStage,
-    DiagnosticErrorCategory, LogLevel,
+    DiagnosticStage, DiagnosticErrorCategory, get_current_context,
+    log_error, log_warning, log_info,
 )
 
 _root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+_user_data_dir_cache = None
 
-def get_user_data_dir():
-    env_dir = os.getenv('FOOOCUS_USER_DATA_DIR')
+
+def get_data_dir() -> str:
+    global _user_data_dir_cache
+    if _user_data_dir_cache is not None:
+        return _user_data_dir_cache
+
+    env_dir = (os.getenv('FOOOCUS_DATA_DIR')
+               or os.getenv('FOOOCUS_USER_DATA_DIR')
+               or os.getenv('path_user_data'))
     if env_dir:
-        user_dir = os.path.abspath(env_dir)
+        data_dir = os.path.abspath(env_dir)
     else:
         config_path_val = os.getenv('config_path')
         if config_path_val:
-            user_dir = os.path.dirname(os.path.abspath(config_path_val))
+            data_dir = os.path.dirname(os.path.abspath(config_path_val))
         else:
             home = os.path.expanduser('~')
-            user_dir = os.path.join(home, '.fooocus')
-    os.makedirs(user_dir, exist_ok=True)
-    return user_dir
+            data_dir = os.path.join(home, '.fooocus')
+
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+    except OSError:
+        pass
+    _user_data_dir_cache = data_dir
+    return data_dir
 
 
-def get_user_presets_dir():
-    user_presets_dir = os.path.join(get_user_data_dir(), 'user_presets')
-    os.makedirs(user_presets_dir, exist_ok=True)
+def get_user_data_dir() -> str:
+    return get_data_dir()
+
+
+def get_models_dir() -> str:
+    path = os.path.join(get_data_dir(), 'models')
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        pass
+    return path
+
+
+def get_cache_dir() -> str:
+    path = os.path.join(get_data_dir(), 'cache')
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        pass
+    return path
+
+
+def get_outputs_dir() -> str:
+    path = os.path.join(get_data_dir(), 'outputs')
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        pass
+    return path
+
+
+def get_config_dir() -> str:
+    path = os.path.join(get_data_dir(), 'config')
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        pass
+    return path
+
+
+def get_user_presets_dir() -> str:
+    user_presets_dir = os.path.join(get_data_dir(), 'user_presets')
+    try:
+        os.makedirs(user_presets_dir, exist_ok=True)
+    except OSError:
+        pass
     return user_presets_dir
+
+
+def get_sorted_styles_path() -> str:
+    env_path = os.getenv('sorted_styles_path')
+    if env_path:
+        return os.path.abspath(env_path)
+    return os.path.join(get_data_dir(), 'sorted_styles.json')
 
 
 def get_config_path(key, default_value):
@@ -49,8 +113,27 @@ def get_config_path(key, default_value):
         return os.path.abspath(default_value)
 
 wildcards_max_bfs_depth = 64
-config_path = get_config_path('config_path', os.path.join(_root_dir, 'config.txt'))
-config_example_path = get_config_path('config_example_path', os.path.join(_root_dir, 'config_modification_tutorial.txt'))
+
+
+def _resolve_default_config_path():
+    env_val = os.getenv('config_path')
+    if env_val:
+        return os.path.abspath(env_val)
+    root_config = os.path.join(_root_dir, 'config.txt')
+    if os.path.exists(root_config):
+        return root_config
+    return os.path.join(get_data_dir(), 'config.txt')
+
+
+def _resolve_default_config_example_path():
+    env_val = os.getenv('config_example_path')
+    if env_val:
+        return os.path.abspath(env_val)
+    return os.path.join(get_data_dir(), 'config_modification_tutorial.txt')
+
+
+config_path = _resolve_default_config_path()
+config_example_path = _resolve_default_config_example_path()
 config_dict = {}
 always_save_keys = []
 visited_keys = []
@@ -59,6 +142,13 @@ try:
     with open(os.path.join(_root_dir, 'presets', 'default.json'), "r", encoding="utf-8") as json_file:
         config_dict.update(json.load(json_file))
 except Exception as e:
+    log_error(
+        DiagnosticStage.RESOURCE_SCAN,
+        "默认预设加载失败",
+        exception=e,
+        category=DiagnosticErrorCategory.RESOURCE_SCAN_FAILED,
+        extra_data={"preset_path": os.path.join(_root_dir, 'presets', 'default.json')},
+    )
     print(f'Load default preset failed.')
     print(e)
 
@@ -68,6 +158,13 @@ try:
             config_dict.update(json.load(json_file))
             always_save_keys = list(config_dict.keys())
 except Exception as e:
+    log_error(
+        DiagnosticStage.RESOURCE_SCAN,
+        f"配置文件加载失败: {os.path.basename(config_path)}",
+        exception=e,
+        category=DiagnosticErrorCategory.RESOURCE_SCAN_FAILED,
+        extra_data={"config_path": config_path},
+    )
     print(f'Failed to load config file "{config_path}" . The reason is: {str(e)}')
     print('Please make sure that:')
     print(f'1. The file "{config_path}" is a valid text file, and you have access to read it.')
@@ -356,16 +453,51 @@ available_presets = get_presets()
 preset = args_manager.args.preset
 config_dict.update(try_get_preset_content(preset))
 
-def get_path_output() -> str:
-    """
-    Checking output path argument and overriding default path.
-    """
-    global config_dict
-    path_output = get_dir_or_set_default('path_outputs', '../outputs/', make_directory=True)
-    if args_manager.args.output_path:
-        print(f'Overriding config value path_outputs with {args_manager.args.output_path}')
-        config_dict['path_outputs'] = path_output = args_manager.args.output_path
-    return path_output
+_MODEL_SUBDIRS = {
+    'path_checkpoints': 'checkpoints',
+    'path_loras': 'loras',
+    'path_embeddings': 'embeddings',
+    'path_vae': 'vae',
+    'path_vae_approx': 'vae_approx',
+    'path_upscale_models': 'upscale_models',
+    'path_inpaint': 'inpaint',
+    'path_controlnet': 'controlnet',
+    'path_clip_vision': 'clip_vision',
+    'path_fooocus_expansion': 'prompt_expansion/fooocus_expansion',
+    'path_safety_checker': 'safety_checker',
+    'path_sam': 'sam',
+    'path_configs': 'configs',
+    'path_unet': 'unet',
+    'path_gligen': 'gligen',
+    'path_hypernetworks': 'hypernetworks',
+    'path_clip': 'clip',
+    'path_diffusers': 'diffusers',
+    'path_style_models': 'style_models',
+}
+
+
+def _get_default_model_dir(key: str) -> str:
+    subdir = _MODEL_SUBDIRS.get(key)
+    if subdir:
+        return os.path.join(get_models_dir(), subdir)
+    return os.path.join(get_models_dir(), key.replace('path_', ''))
+
+
+def _path_has_models(path: str) -> bool:
+    if not os.path.isdir(path):
+        return False
+    try:
+        for entry in os.listdir(path):
+            full_path = os.path.join(path, entry)
+            if os.path.isfile(full_path) and entry.lower().endswith(
+                ('.safetensors', '.ckpt', '.pth', '.bin', '.pt')
+            ):
+                return True
+            if os.path.isdir(full_path) and _path_has_models(full_path):
+                return True
+    except (OSError, PermissionError):
+        return False
+    return False
 
 
 def get_dir_or_set_default(key, default_value, as_array=False, make_directory=False):
@@ -398,19 +530,50 @@ def get_dir_or_set_default(key, default_value, as_array=False, make_directory=Fa
 
     if v is not None:
         print(f'Failed to load config key: {json.dumps({key:v})} is invalid or does not exist; will use {json.dumps({key:default_value})} instead.')
-    if isinstance(default_value, list):
-        dp = []
-        for path in default_value:
-            abs_path = os.path.abspath(os.path.join(os.path.dirname(__file__), path))
-            dp.append(abs_path)
-            os.makedirs(abs_path, exist_ok=True)
+
+    unified_dir = _get_default_model_dir(key)
+    legacy_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), default_value if isinstance(default_value, str) else default_value[0]))
+
+    use_unified = False
+    if os.path.exists(unified_dir) and _path_has_models(unified_dir):
+        use_unified = True
+    elif os.path.exists(legacy_dir) and _path_has_models(legacy_dir):
+        use_unified = False
     else:
-        dp = os.path.abspath(os.path.join(os.path.dirname(__file__), default_value))
+        use_unified = True
+
+    if use_unified:
+        dp = unified_dir
         os.makedirs(dp, exist_ok=True)
         if as_array:
             dp = [dp]
+    else:
+        if isinstance(default_value, list):
+            dp = []
+            for path in default_value:
+                abs_path = os.path.abspath(os.path.join(os.path.dirname(__file__), path))
+                dp.append(abs_path)
+                os.makedirs(abs_path, exist_ok=True)
+        else:
+            dp = os.path.abspath(os.path.join(os.path.dirname(__file__), default_value))
+            os.makedirs(dp, exist_ok=True)
+            if as_array:
+                dp = [dp]
+
     config_dict[key] = dp
     return dp
+
+
+def get_path_output() -> str:
+    """
+    Checking output path argument and overriding default path.
+    """
+    global config_dict
+    path_output = get_dir_or_set_default('path_outputs', '../outputs/', make_directory=True)
+    if args_manager.args.output_path:
+        print(f'Overriding config value path_outputs with {args_manager.args.output_path}')
+        config_dict['path_outputs'] = path_output = args_manager.args.output_path
+    return path_output
 
 
 paths_checkpoints = get_dir_or_set_default('path_checkpoints', ['../models/checkpoints/'], True)
@@ -427,6 +590,8 @@ path_wildcards = get_dir_or_set_default('path_wildcards', '../wildcards/')
 path_safety_checker = get_dir_or_set_default('path_safety_checker', '../models/safety_checker/')
 path_sam = get_dir_or_set_default('path_sam', '../models/sam/')
 path_outputs = get_path_output()
+
+config_dict['path_user_data'] = get_data_dir()
 
 
 def get_config_item_or_set_default(key, default_value, validator, disable_empty_as_none=False, expected_type=None):
@@ -473,11 +638,18 @@ def init_temp_path(path: str | None, default_path: str) -> str:
             print(f'Could not create temp path {path}. Reason: {e}')
             print(f'Using default temp path {default_path} instead.')
 
-    os.makedirs(default_path, exist_ok=True)
-    return default_path
+    try:
+        os.makedirs(default_path, exist_ok=True)
+        return default_path
+    except Exception as e:
+        fallback = os.path.join(tempfile.gettempdir(), 'fooocus')
+        print(f'Could not create default temp path {default_path}. Reason: {e}')
+        print(f'Falling back to system temp path {fallback}')
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
 
 
-default_temp_path = os.path.join(tempfile.gettempdir(), 'fooocus')
+default_temp_path = os.path.join(get_cache_dir(), 'temp')
 temp_path = init_temp_path(get_config_item_or_set_default(
     key='temp_path',
     default_value=default_temp_path,
@@ -1022,7 +1194,7 @@ vae_filenames = []
 wildcard_filenames = []
 
 
-def get_model_filenames(folder_paths, extensions=None, name_filter=None, *, job: DiagnosticJob):
+def get_model_filenames(folder_paths, extensions=None, name_filter=None):
     if extensions is None:
         extensions = ['.pth', '.ckpt', '.bin', '.safetensors', '.fooocus.patch']
     files = []
@@ -1033,8 +1205,7 @@ def get_model_filenames(folder_paths, extensions=None, name_filter=None, *, job:
         try:
             files += get_files_from_folder(folder, extensions, name_filter)
         except Exception as e:
-            job.record_event(
-                LogLevel.WARNING,
+            log_warning(
                 DiagnosticStage.RESOURCE_SCAN,
                 f"扫描模型目录失败: {os.path.basename(folder) if folder else folder}",
                 extra_data={"folder_path": folder, "error": str(e)},
@@ -1044,43 +1215,40 @@ def get_model_filenames(folder_paths, extensions=None, name_filter=None, *, job:
     return files
 
 
-def update_files(job: DiagnosticJob):
+def update_files():
     global model_filenames, lora_filenames, vae_filenames, wildcard_filenames, available_presets
+    ctx = get_current_context()
     try:
-        with job.scope(DiagnosticStage.RESOURCE_SCAN):
-            model_filenames = get_model_filenames(paths_checkpoints, job=job)
-            lora_filenames = get_model_filenames(paths_loras, job=job)
-            vae_filenames = get_model_filenames(path_vae, job=job)
-            wildcard_filenames = get_files_from_folder(path_wildcards, ['.txt'])
-            available_presets = get_presets()
-            job.record_event(
-                LogLevel.INFO,
-                DiagnosticStage.RESOURCE_SCAN,
-                f"资源扫描完成: {len(model_filenames)} 个模型, {len(lora_filenames)} 个LoRA, {len(vae_filenames)} 个VAE",
-                extra_data={
-                    "checkpoints_count": len(model_filenames),
-                    "loras_count": len(lora_filenames),
-                    "vaes_count": len(vae_filenames),
-                    "wildcards_count": len(wildcard_filenames),
-                },
-            )
+        if ctx:
+            ctx.start_stage(DiagnosticStage.RESOURCE_SCAN)
+        model_filenames = get_model_filenames(paths_checkpoints)
+        lora_filenames = get_model_filenames(paths_loras)
+        vae_filenames = get_model_filenames(path_vae)
+        wildcard_filenames = get_files_from_folder(path_wildcards, ['.txt'])
+        available_presets = get_presets()
+        log_info(
+            DiagnosticStage.RESOURCE_SCAN,
+            f"资源扫描完成: {len(model_filenames)} 个模型, {len(lora_filenames)} 个LoRA, {len(vae_filenames)} 个VAE",
+            ctx=ctx,
+            extra_data={
+                "checkpoints_count": len(model_filenames),
+                "loras_count": len(lora_filenames),
+                "vaes_count": len(vae_filenames),
+                "wildcards_count": len(wildcard_filenames),
+            },
+        )
+        if ctx:
+            ctx.end_stage(DiagnosticStage.RESOURCE_SCAN, "completed")
     except Exception as e:
-        job.record_error(
+        log_error(
             DiagnosticStage.RESOURCE_SCAN,
             "资源扫描失败",
-            category=DiagnosticErrorCategory.RESOURCE_SCAN_FAILED,
             exception=e,
+            category=DiagnosticErrorCategory.RESOURCE_SCAN_FAILED,
+            ctx=ctx,
         )
         raise
     return
-
-
-def get_model_filenames_bootstrap(folder_paths, extensions=None, name_filter=None):
-    return get_model_filenames(folder_paths, extensions, name_filter, job=DiagnosticJob(kind=DiagnosticJobKind.STARTUP))
-
-
-def update_files_bootstrap():
-    return update_files(DiagnosticJob(kind=DiagnosticJobKind.STARTUP))
 
 
 def downloading_inpaint_models(v):
@@ -1258,6 +1426,3 @@ def downloading_sam_vit_h():
         file_name='sam_vit_h_4b8939.pth'
     )
     return os.path.join(path_sam, 'sam_vit_h_4b8939.pth')
-
-
-update_files_bootstrap()

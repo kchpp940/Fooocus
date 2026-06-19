@@ -5,10 +5,6 @@ from PIL import Image, ImageFilter
 from modules.util import resample_image, set_image_shape_ceil, get_image_shape_ceil
 from modules.upscaler import perform_upscale
 import cv2
-from modules.diagnostics import (
-    DiagnosticJob, DiagnosticJobError, DiagnosticStage,
-    DiagnosticErrorCategory, LogLevel,
-)
 
 
 inpaint_head_model = None
@@ -152,64 +148,41 @@ def fooocus_fill(image, mask):
 
 
 class InpaintWorker:
-    def __init__(self, image, mask, use_fill=True, k=0.618, *, job: DiagnosticJob):
-        with job.scope(DiagnosticStage.INPAINT_PREPROCESS, DiagnosticErrorCategory.INPAINT_PREPROCESS_FAILED):
-            job.record_event(
-                LogLevel.INFO,
-                DiagnosticStage.INPAINT_PREPROCESS,
-                "开始图像修复预处理",
-                extra_data={
-                    "image_shape": image.shape if hasattr(image, 'shape') else None,
-                    "mask_shape": mask.shape if hasattr(mask, 'shape') else None,
-                    "use_fill": use_fill,
-                    "k": k,
-                },
-            )
+    def __init__(self, image, mask, use_fill=True, k=0.618):
+        a, b, c, d = compute_initial_abcd(mask > 0)
+        a, b, c, d = solve_abcd(mask, a, b, c, d, k=k)
 
-            a, b, c, d = compute_initial_abcd(mask > 0)
-            a, b, c, d = solve_abcd(mask, a, b, c, d, k=k)
+        # interested area
+        self.interested_area = (a, b, c, d)
+        self.interested_mask = mask[a:b, c:d]
+        self.interested_image = image[a:b, c:d]
 
-            # interested area
-            self.interested_area = (a, b, c, d)
-            self.interested_mask = mask[a:b, c:d]
-            self.interested_image = image[a:b, c:d]
+        # super resolution
+        if get_image_shape_ceil(self.interested_image) < 1024:
+            self.interested_image = perform_upscale(self.interested_image)
 
-            # super resolution
-            if get_image_shape_ceil(self.interested_image) < 1024:
-                self.interested_image = perform_upscale(self.interested_image)
+        # resize to make images ready for diffusion
+        self.interested_image = set_image_shape_ceil(self.interested_image, 1024)
+        self.interested_fill = self.interested_image.copy()
+        H, W, C = self.interested_image.shape
 
-            # resize to make images ready for diffusion
-            self.interested_image = set_image_shape_ceil(self.interested_image, 1024)
-            self.interested_fill = self.interested_image.copy()
-            H, W, C = self.interested_image.shape
+        # process mask
+        self.interested_mask = up255(resample_image(self.interested_mask, W, H), t=127)
 
-            # process mask
-            self.interested_mask = up255(resample_image(self.interested_mask, W, H), t=127)
+        # compute filling
+        if use_fill:
+            self.interested_fill = fooocus_fill(self.interested_image, self.interested_mask)
 
-            # compute filling
-            if use_fill:
-                self.interested_fill = fooocus_fill(self.interested_image, self.interested_mask)
+        # soft pixels
+        self.mask = morphological_open(mask)
+        self.image = image
 
-            # soft pixels
-            self.mask = morphological_open(mask)
-            self.image = image
-
-            # ending
-            self.latent = None
-            self.latent_after_swap = None
-            self.swapped = False
-            self.latent_mask = None
-            self.inpaint_head_feature = None
-
-            job.record_event(
-                LogLevel.INFO,
-                DiagnosticStage.INPAINT_PREPROCESS,
-                f"图像修复预处理完成，感兴趣区域: {self.interested_area}",
-                extra_data={
-                    "interested_area": self.interested_area,
-                    "output_shape": self.interested_image.shape,
-                },
-            )
+        # ending
+        self.latent = None
+        self.latent_after_swap = None
+        self.swapped = False
+        self.latent_mask = None
+        self.inpaint_head_feature = None
         return
 
     def load_latent(self, latent_fill, latent_mask, latent_swap=None):
@@ -218,44 +191,30 @@ class InpaintWorker:
         self.latent_after_swap = latent_swap
         return
 
-    def patch(self, inpaint_head_model_path, inpaint_latent, inpaint_latent_mask, model, *, job: DiagnosticJob):
+    def patch(self, inpaint_head_model_path, inpaint_latent, inpaint_latent_mask, model):
         global inpaint_head_model
 
-        with job.scope(DiagnosticStage.MODEL_LOAD, DiagnosticErrorCategory.MODEL_LOAD_FAILED):
-            if inpaint_head_model is None:
-                job.record_event(
-                    LogLevel.INFO,
-                    DiagnosticStage.MODEL_LOAD,
-                    "开始加载 Inpaint Head 模型",
-                    extra_data={"model_path": inpaint_head_model_path},
-                )
-                inpaint_head_model = InpaintHead()
-                sd = torch.load(inpaint_head_model_path, map_location='cpu', weights_only=True)
-                inpaint_head_model.load_state_dict(sd)
-                job.add_model_loaded(inpaint_head_model_path)
-                job.record_event(
-                    LogLevel.INFO,
-                    DiagnosticStage.MODEL_LOAD,
-                    "Inpaint Head 模型加载完成",
-                    extra_data={"model_path": inpaint_head_model_path},
-                )
+        if inpaint_head_model is None:
+            inpaint_head_model = InpaintHead()
+            sd = torch.load(inpaint_head_model_path, map_location='cpu', weights_only=True)
+            inpaint_head_model.load_state_dict(sd)
 
-            feed = torch.cat([
-                inpaint_latent_mask,
-                model.model.process_latent_in(inpaint_latent)
-            ], dim=1)
+        feed = torch.cat([
+            inpaint_latent_mask,
+            model.model.process_latent_in(inpaint_latent)
+        ], dim=1)
 
-            inpaint_head_model.to(device=feed.device, dtype=feed.dtype)
-            inpaint_head_feature = inpaint_head_model(feed)
+        inpaint_head_model.to(device=feed.device, dtype=feed.dtype)
+        inpaint_head_feature = inpaint_head_model(feed)
 
-            def input_block_patch(h, transformer_options):
-                if transformer_options["block"][1] == 0:
-                    h = h + inpaint_head_feature.to(h)
-                return h
+        def input_block_patch(h, transformer_options):
+            if transformer_options["block"][1] == 0:
+                h = h + inpaint_head_feature.to(h)
+            return h
 
-            m = model.clone()
-            m.set_model_input_block_patch(input_block_patch)
-            return m
+        m = model.clone()
+        m.set_model_input_block_patch(input_block_patch)
+        return m
 
     def swap(self):
         if self.swapped:
