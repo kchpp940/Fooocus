@@ -5,14 +5,20 @@ from PIL import Image, ImageFilter
 from modules.util import resample_image, set_image_shape_ceil, get_image_shape_ceil
 from modules.upscaler import perform_upscale
 import cv2
-import modules.diagnostics as diagnostics
 from modules.diagnostics import (
-    DiagnosticStage, DiagnosticErrorCategory, get_current_context,
-    log_info, log_error, log_warning,
+    DiagnosticJob, DiagnosticJobError, DiagnosticStage,
+    DiagnosticErrorCategory, LogLevel,
 )
 
 
 inpaint_head_model = None
+
+
+class _null_scope:
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        return False
 
 
 class InpaintHead(torch.nn.Module):
@@ -153,21 +159,19 @@ def fooocus_fill(image, mask):
 
 
 class InpaintWorker:
-    def __init__(self, image, mask, use_fill=True, k=0.618):
-        ctx = get_current_context()
-        try:
-            if ctx:
-                ctx.start_stage(DiagnosticStage.INPAINT_PREPROCESS)
-                log_info(
+    def __init__(self, image, mask, use_fill=True, k=0.618, job: DiagnosticJob = None):
+        with job.scope(DiagnosticStage.INPAINT_PREPROCESS, DiagnosticErrorCategory.INPAINT_PREPROCESS_FAILED) if job else _null_scope():
+            if job:
+                job.record_event(
+                    LogLevel.INFO,
                     DiagnosticStage.INPAINT_PREPROCESS,
                     "开始图像修复预处理",
-                    ctx=ctx,
                     extra_data={
                         "image_shape": image.shape if hasattr(image, 'shape') else None,
                         "mask_shape": mask.shape if hasattr(mask, 'shape') else None,
                         "use_fill": use_fill,
                         "k": k,
-                    }
+                    },
                 )
 
             a, b, c, d = compute_initial_abcd(mask > 0)
@@ -205,38 +209,16 @@ class InpaintWorker:
             self.latent_mask = None
             self.inpaint_head_feature = None
 
-            if ctx:
-                log_info(
+            if job:
+                job.record_event(
+                    LogLevel.INFO,
                     DiagnosticStage.INPAINT_PREPROCESS,
                     f"图像修复预处理完成，感兴趣区域: {self.interested_area}",
-                    ctx=ctx,
                     extra_data={
                         "interested_area": self.interested_area,
                         "output_shape": self.interested_image.shape,
-                    }
+                    },
                 )
-                ctx.end_stage(DiagnosticStage.INPAINT_PREPROCESS, "completed")
-        except Exception as e:
-            log_error(
-                DiagnosticStage.INPAINT_PREPROCESS,
-                "图像修复预处理失败",
-                exception=e,
-                category=DiagnosticErrorCategory.INPAINT_PREPROCESS_FAILED,
-                ctx=ctx,
-                extra_data={
-                    "use_fill": use_fill,
-                    "k": k,
-                }
-            )
-            if ctx:
-                ctx.end_stage(DiagnosticStage.INPAINT_PREPROCESS, "failed")
-            raise diagnostics.DiagnosticsError(
-                human_message="图像修复预处理失败",
-                category=DiagnosticErrorCategory.INPAINT_PREPROCESS_FAILED,
-                stage=DiagnosticStage.INPAINT_PREPROCESS,
-                ctx=ctx,
-                cause=e,
-            )
         return
 
     def load_latent(self, latent_fill, latent_mask, latent_swap=None):
@@ -245,32 +227,29 @@ class InpaintWorker:
         self.latent_after_swap = latent_swap
         return
 
-    def patch(self, inpaint_head_model_path, inpaint_latent, inpaint_latent_mask, model):
+    def patch(self, inpaint_head_model_path, inpaint_latent, inpaint_latent_mask, model, job: DiagnosticJob = None):
         global inpaint_head_model
-        ctx = get_current_context()
 
-        try:
+        with job.scope(DiagnosticStage.MODEL_LOAD, DiagnosticErrorCategory.MODEL_LOAD_FAILED) if job else _null_scope():
             if inpaint_head_model is None:
-                log_info(
-                    DiagnosticStage.MODEL_LOAD,
-                    "开始加载 Inpaint Head 模型",
-                    ctx=ctx,
-                    extra_data={"model_path": inpaint_head_model_path},
-                )
-                if ctx:
-                    ctx.start_stage(DiagnosticStage.MODEL_LOAD)
+                if job:
+                    job.record_event(
+                        LogLevel.INFO,
+                        DiagnosticStage.MODEL_LOAD,
+                        "开始加载 Inpaint Head 模型",
+                        extra_data={"model_path": inpaint_head_model_path},
+                    )
                 inpaint_head_model = InpaintHead()
                 sd = torch.load(inpaint_head_model_path, map_location='cpu', weights_only=True)
                 inpaint_head_model.load_state_dict(sd)
-                if ctx:
-                    ctx.add_model_loaded(inpaint_head_model_path)
-                    log_info(
+                if job:
+                    job.add_model_loaded(inpaint_head_model_path)
+                    job.record_event(
+                        LogLevel.INFO,
                         DiagnosticStage.MODEL_LOAD,
                         "Inpaint Head 模型加载完成",
-                        ctx=ctx,
                         extra_data={"model_path": inpaint_head_model_path},
                     )
-                    ctx.end_stage(DiagnosticStage.MODEL_LOAD, "completed")
 
             feed = torch.cat([
                 inpaint_latent_mask,
@@ -288,25 +267,6 @@ class InpaintWorker:
             m = model.clone()
             m.set_model_input_block_patch(input_block_patch)
             return m
-        except Exception as e:
-            log_error(
-                DiagnosticStage.MODEL_LOAD,
-                "Inpaint Head 模型加载或应用失败",
-                exception=e,
-                category=DiagnosticErrorCategory.MODEL_LOAD_FAILED,
-                ctx=ctx,
-                extra_data={"model_path": inpaint_head_model_path},
-            )
-            if ctx:
-                ctx.end_stage(DiagnosticStage.MODEL_LOAD, "failed")
-            raise diagnostics.DiagnosticsError(
-                human_message="Inpaint Head 模型加载失败",
-                category=DiagnosticErrorCategory.MODEL_LOAD_FAILED,
-                stage=DiagnosticStage.MODEL_LOAD,
-                ctx=ctx,
-                extra_data={"model_path": inpaint_head_model_path},
-                cause=e,
-            )
 
     def swap(self):
         if self.swapped:

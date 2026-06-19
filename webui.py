@@ -23,8 +23,7 @@ from modules.private_logger import get_current_html_path
 from modules.ui_gradio_extensions import reload_javascript
 from modules.auth import auth_enabled, check_auth
 from modules.util import is_json
-import modules.diagnostics as diagnostics
-from modules.diagnostics import get_user_friendly_error
+from modules.diagnostics import DiagnosticJob, get_job
 
 
 def build_preset_data_from_ui(*args):
@@ -189,7 +188,14 @@ def generate_clicked(task: worker.AsyncTask):
 
                 if error_info is not None:
                     trace_id = error_info.get('trace_id') if isinstance(error_info, dict) else None
-                    friendly_error = get_user_friendly_error(trace_id)
+                    job = get_job(trace_id) if trace_id else None
+                    friendly_error = job.to_public_error() if job else {
+                        'title': '生成遇到问题',
+                        'message': '处理您的请求时发生错误。',
+                        'trace_id': trace_id,
+                        'show_diagnostics_button': False,
+                        'diagnostics_summary': f'Trace ID: {trace_id}',
+                    }
                     error_html = f'''
                     <div style="padding: 16px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; margin-bottom: 12px;">
                         <div style="font-weight: 600; color: #991b1b; font-size: 15px; margin-bottom: 4px;">

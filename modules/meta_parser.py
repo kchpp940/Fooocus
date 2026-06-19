@@ -1,6 +1,7 @@
 import json
 import re
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from pathlib import Path
 
 import gradio as gr
@@ -13,10 +14,9 @@ from modules.flags import MetadataScheme, Performance, Steps
 from modules.flags import SAMPLERS, CIVITAI_NO_KARRAS
 from modules.hash_cache import sha256_from_cache
 from modules.util import quote, unquote, extract_styles_from_prompt, is_json, get_file_from_folder_list
-import modules.diagnostics as diagnostics
 from modules.diagnostics import (
-    DiagnosticStage, DiagnosticErrorCategory, get_current_context,
-    log_error, log_warning, log_info,
+    DiagnosticJob, DiagnosticJobError, DiagnosticStage,
+    DiagnosticErrorCategory, LogLevel,
 )
 
 re_param_code = r'\s*(\w[\w \-/]+):\s*("(?:\\.|[^\\"])+"|[^,]*)(?:,|$)'
@@ -405,14 +405,7 @@ class A1111MetadataParser(MetadataParser):
                     data['resolution'] = str((m.group(1), m.group(2)))
                 else:
                     data[list(self.fooocus_to_a1111.keys())[list(self.fooocus_to_a1111.values()).index(k)]] = v
-            except Exception as parse_err:
-                ctx = get_current_context()
-                log_warning(
-                    DiagnosticStage.METADATA_PARSE,
-                    f"A1111 metadata 字段解析失败: {k}",
-                    ctx=ctx,
-                    extra_data={"field": k, "value": v, "error": str(parse_err)},
-                )
+            except Exception:
                 print(f"Error parsing \"{k}: {v}\"")
 
         # workaround for multiline prompts
@@ -616,76 +609,67 @@ def get_metadata_parser(metadata_scheme: MetadataScheme) -> MetadataParser:
             raise NotImplementedError
 
 
-def read_info_from_image(file) -> tuple[str | None, MetadataScheme | None]:
-    ctx = get_current_context()
-    try:
-        if ctx:
-            ctx.start_stage(DiagnosticStage.METADATA_PARSE)
-        items = (file.info or {}).copy()
-
-        parameters = items.pop('parameters', None)
-        metadata_scheme = items.pop('fooocus_scheme', None)
-        exif = items.pop('exif', None)
-
-        if parameters is not None and is_json(parameters):
-            parameters = json.loads(parameters)
-        elif exif is not None:
-            exif = file.getexif()
-            # 0x9286 = UserComment
-            parameters = exif.get(0x9286, None)
-            # 0x927C = MakerNote
-            metadata_scheme = exif.get(0x927C, None)
-
-            if is_json(parameters):
-                parameters = json.loads(parameters)
-
-        scheme_determined = False
+def read_info_from_image(file, job: DiagnosticJob = None) -> tuple[str | None, MetadataScheme | None]:
+    _scope = job.scope(DiagnosticStage.METADATA_PARSE, DiagnosticErrorCategory.METADATA_PARSE_FAILED) if job is not None else nullcontext()
+    with _scope:
         try:
-            metadata_scheme = MetadataScheme(metadata_scheme)
-            scheme_determined = True
-        except ValueError:
-            metadata_scheme = None
+            items = (file.info or {}).copy()
 
-            # broad fallback
-            if isinstance(parameters, dict):
-                metadata_scheme = MetadataScheme.FOOOCUS
+            parameters = items.pop('parameters', None)
+            metadata_scheme = items.pop('fooocus_scheme', None)
+            exif = items.pop('exif', None)
+
+            if parameters is not None and is_json(parameters):
+                parameters = json.loads(parameters)
+            elif exif is not None:
+                exif = file.getexif()
+                # 0x9286 = UserComment
+                parameters = exif.get(0x9286, None)
+                # 0x927C = MakerNote
+                metadata_scheme = exif.get(0x927C, None)
+
+                if is_json(parameters):
+                    parameters = json.loads(parameters)
+
+            scheme_determined = False
+            try:
+                metadata_scheme = MetadataScheme(metadata_scheme)
                 scheme_determined = True
+            except ValueError:
+                metadata_scheme = None
 
-            if isinstance(parameters, str):
-                metadata_scheme = MetadataScheme.A1111
-                scheme_determined = True
+                # broad fallback
+                if isinstance(parameters, dict):
+                    metadata_scheme = MetadataScheme.FOOOCUS
+                    scheme_determined = True
 
-        if not scheme_determined and parameters is None:
-            log_warning(
-                DiagnosticStage.METADATA_PARSE,
-                "图像中未找到可识别的元数据",
-                ctx=ctx,
-            )
-        elif scheme_determined:
-            log_info(
-                DiagnosticStage.METADATA_PARSE,
-                f"元数据解析成功，格式: {metadata_scheme.value if metadata_scheme else 'unknown'}",
-                ctx=ctx,
-                extra_data={
-                    "scheme": metadata_scheme.value if metadata_scheme else None,
-                    "has_parameters": parameters is not None,
-                },
-            )
+                if isinstance(parameters, str):
+                    metadata_scheme = MetadataScheme.A1111
+                    scheme_determined = True
 
-        if ctx:
-            ctx.end_stage(DiagnosticStage.METADATA_PARSE, "completed")
-        return parameters, metadata_scheme
-    except Exception as e:
-        log_error(
-            DiagnosticStage.METADATA_PARSE,
-            "图像元数据读取失败",
-            exception=e,
-            category=DiagnosticErrorCategory.METADATA_PARSE_FAILED,
-            ctx=ctx,
-        )
-        if ctx:
-            ctx.end_stage(DiagnosticStage.METADATA_PARSE, "failed")
-        return None, None
+            if not scheme_determined and parameters is None:
+                if job is not None:
+                    job.record_event(LogLevel.WARNING, DiagnosticStage.METADATA_PARSE, "图像中未找到可识别的元数据")
+            elif scheme_determined:
+                if job is not None:
+                    job.record_event(
+                        LogLevel.INFO, DiagnosticStage.METADATA_PARSE,
+                        f"元数据解析成功，格式: {metadata_scheme.value if metadata_scheme else 'unknown'}",
+                        extra_data={
+                            "scheme": metadata_scheme.value if metadata_scheme else None,
+                            "has_parameters": parameters is not None,
+                        },
+                    )
+
+            return parameters, metadata_scheme
+        except Exception as e:
+            if job is not None:
+                job.record_error(
+                    DiagnosticStage.METADATA_PARSE, "图像元数据读取失败",
+                    category=DiagnosticErrorCategory.METADATA_PARSE_FAILED,
+                    exception=e,
+                )
+            return None, None
 
 
 def get_exif(metadata: str | None, metadata_scheme: str):

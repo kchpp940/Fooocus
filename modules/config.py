@@ -2,6 +2,7 @@ import os
 import json
 import math
 import numbers
+import contextlib
 
 import args_manager
 import tempfile
@@ -11,10 +12,9 @@ import modules.sdxl_styles
 from modules.model_loader import load_file_from_url
 from modules.extra_utils import makedirs_with_log, get_files_from_folder, try_eval_env_var
 from modules.flags import OutputFormat, Performance, MetadataScheme
-import modules.diagnostics as diagnostics
 from modules.diagnostics import (
-    DiagnosticStage, DiagnosticErrorCategory, get_current_context,
-    log_error, log_warning, log_info,
+    DiagnosticJob, DiagnosticJobError, DiagnosticStage,
+    DiagnosticErrorCategory, LogLevel,
 )
 
 _root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -60,13 +60,6 @@ try:
     with open(os.path.join(_root_dir, 'presets', 'default.json'), "r", encoding="utf-8") as json_file:
         config_dict.update(json.load(json_file))
 except Exception as e:
-    log_error(
-        DiagnosticStage.RESOURCE_SCAN,
-        "默认预设加载失败",
-        exception=e,
-        category=DiagnosticErrorCategory.RESOURCE_SCAN_FAILED,
-        extra_data={"preset_path": os.path.join(_root_dir, 'presets', 'default.json')},
-    )
     print(f'Load default preset failed.')
     print(e)
 
@@ -76,13 +69,6 @@ try:
             config_dict.update(json.load(json_file))
             always_save_keys = list(config_dict.keys())
 except Exception as e:
-    log_error(
-        DiagnosticStage.RESOURCE_SCAN,
-        f"配置文件加载失败: {os.path.basename(config_path)}",
-        exception=e,
-        category=DiagnosticErrorCategory.RESOURCE_SCAN_FAILED,
-        extra_data={"config_path": config_path},
-    )
     print(f'Failed to load config file "{config_path}" . The reason is: {str(e)}')
     print('Please make sure that:')
     print(f'1. The file "{config_path}" is a valid text file, and you have access to read it.')
@@ -1037,7 +1023,7 @@ vae_filenames = []
 wildcard_filenames = []
 
 
-def get_model_filenames(folder_paths, extensions=None, name_filter=None):
+def get_model_filenames(folder_paths, extensions=None, name_filter=None, job: DiagnosticJob = None):
     if extensions is None:
         extensions = ['.pth', '.ckpt', '.bin', '.safetensors', '.fooocus.patch']
     files = []
@@ -1048,48 +1034,47 @@ def get_model_filenames(folder_paths, extensions=None, name_filter=None):
         try:
             files += get_files_from_folder(folder, extensions, name_filter)
         except Exception as e:
-            log_warning(
-                DiagnosticStage.RESOURCE_SCAN,
-                f"扫描模型目录失败: {os.path.basename(folder) if folder else folder}",
-                extra_data={"folder_path": folder, "error": str(e)},
-            )
+            if job:
+                job.record_event(
+                    LogLevel.WARNING,
+                    DiagnosticStage.RESOURCE_SCAN,
+                    f"扫描模型目录失败: {os.path.basename(folder) if folder else folder}",
+                    extra_data={"folder_path": folder, "error": str(e)},
+                )
             print(f"Warning: failed to scan folder {folder}: {str(e)}")
 
     return files
 
 
-def update_files():
+def update_files(job: DiagnosticJob = None):
     global model_filenames, lora_filenames, vae_filenames, wildcard_filenames, available_presets
-    ctx = get_current_context()
     try:
-        if ctx:
-            ctx.start_stage(DiagnosticStage.RESOURCE_SCAN)
-        model_filenames = get_model_filenames(paths_checkpoints)
-        lora_filenames = get_model_filenames(paths_loras)
-        vae_filenames = get_model_filenames(path_vae)
-        wildcard_filenames = get_files_from_folder(path_wildcards, ['.txt'])
-        available_presets = get_presets()
-        log_info(
-            DiagnosticStage.RESOURCE_SCAN,
-            f"资源扫描完成: {len(model_filenames)} 个模型, {len(lora_filenames)} 个LoRA, {len(vae_filenames)} 个VAE",
-            ctx=ctx,
-            extra_data={
-                "checkpoints_count": len(model_filenames),
-                "loras_count": len(lora_filenames),
-                "vaes_count": len(vae_filenames),
-                "wildcards_count": len(wildcard_filenames),
-            },
-        )
-        if ctx:
-            ctx.end_stage(DiagnosticStage.RESOURCE_SCAN, "completed")
+        with job.scope(DiagnosticStage.RESOURCE_SCAN) if job else contextlib.nullcontext():
+            model_filenames = get_model_filenames(paths_checkpoints, job=job)
+            lora_filenames = get_model_filenames(paths_loras, job=job)
+            vae_filenames = get_model_filenames(path_vae, job=job)
+            wildcard_filenames = get_files_from_folder(path_wildcards, ['.txt'])
+            available_presets = get_presets()
+            if job:
+                job.record_event(
+                    LogLevel.INFO,
+                    DiagnosticStage.RESOURCE_SCAN,
+                    f"资源扫描完成: {len(model_filenames)} 个模型, {len(lora_filenames)} 个LoRA, {len(vae_filenames)} 个VAE",
+                    extra_data={
+                        "checkpoints_count": len(model_filenames),
+                        "loras_count": len(lora_filenames),
+                        "vaes_count": len(vae_filenames),
+                        "wildcards_count": len(wildcard_filenames),
+                    },
+                )
     except Exception as e:
-        log_error(
-            DiagnosticStage.RESOURCE_SCAN,
-            "资源扫描失败",
-            exception=e,
-            category=DiagnosticErrorCategory.RESOURCE_SCAN_FAILED,
-            ctx=ctx,
-        )
+        if job:
+            job.record_error(
+                DiagnosticStage.RESOURCE_SCAN,
+                "资源扫描失败",
+                category=DiagnosticErrorCategory.RESOURCE_SCAN_FAILED,
+                exception=e,
+            )
         raise
     return
 
