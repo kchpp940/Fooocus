@@ -59,24 +59,12 @@ def img2tensor(imgs, bgr2rgb=True, float32=True):
 def load_file_from_url(url, model_dir=None, progress=True, file_name=None, save_dir=None):
     """Ref:https://github.com/1adrianb/face-alignment/blob/master/face_alignment/utils.py
     """
-    try:
-        from modules.manifest import ManifestResolver, ManifestResolutionError
-        resolver = ManifestResolver.get()
-    except Exception:
-        resolver = None
-
     if model_dir is None:
         hub_dir = get_dir()
         model_dir = os.path.join(hub_dir, 'checkpoints')
 
     if save_dir is None:
         save_dir = os.path.join(ROOT_DIR, model_dir)
-
-    if resolver:
-        resolved_dir, resolved_name, item = resolver.resolve_download(url, save_dir, file_name)
-        save_dir = resolved_dir
-        file_name = resolved_name
-
     os.makedirs(save_dir, exist_ok=True)
 
     parts = urlparse(url)
@@ -85,12 +73,6 @@ def load_file_from_url(url, model_dir=None, progress=True, file_name=None, save_
         filename = file_name
     cached_file = os.path.abspath(os.path.join(save_dir, filename))
     if not os.path.exists(cached_file):
-        if resolver and resolver.strict:
-            block_msg = resolver.check_before_download(url, cached_file, item if resolver else None)
-            if block_msg:
-                print(block_msg)
-                raise ManifestResolutionError(block_msg, item=item if resolver else None, url=url)
-
         print(f'Downloading: "{url}" to {cached_file}\n')
         download_url_to_file(url, cached_file, hash_prefix=None, progress=progress)
     return cached_file

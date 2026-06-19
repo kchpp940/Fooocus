@@ -40,16 +40,6 @@ args_parser.parser.add_argument("--always-download-new-model", action='store_tru
 args_parser.parser.add_argument("--rebuild-hash-cache", help="Generates missing model and LoRA hashes.",
                                 type=int, nargs="?", metavar="CPU_NUM_THREADS", const=-1)
 
-args_parser.parser.add_argument("--manifest-path", type=str, default=None,
-                                help="Path to resource manifest JSON file for offline deployment.")
-args_parser.parser.add_argument("--manifest-check", action='store_true',
-                                help="Check resources against manifest before starting.")
-args_parser.parser.add_argument("--manifest-strict", action='store_true',
-                                help="Fail and exit if required resources are missing (offline mode).")
-args_parser.parser.add_argument("--manifest-check-hash", action='store_true',
-                                help="Verify file hashes when checking manifest.")
-args_parser.parser.add_argument("--generate-manifest", type=str, default=None,
-                                help="Generate a manifest JSON file at the specified path, then exit.")
 args_parser.parser.add_argument("--disable-diagnostics", action='store_true',
                                 help="Disables the unified diagnostic logging system.")
 

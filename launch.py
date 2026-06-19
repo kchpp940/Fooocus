@@ -86,13 +86,6 @@ if args.hf_mirror is not None:
 
 from modules import config
 from modules.hash_cache import init_cache
-from modules.manifest import (
-    load_manifest, check_manifest_resources, print_manifest_report,
-    build_default_manifest, save_manifest, get_manifest_path,
-    sha256_file, ManifestResolver, ManifestResolutionError,
-    build_active_resource_plan, check_active_resources,
-    print_active_resource_report,
-)
 
 os.environ["U2NET_HOME"] = config.path_inpaint
 
@@ -105,161 +98,6 @@ if config.temp_path_cleanup_on_launch:
         print("[Cleanup] Cleanup successful")
     else:
         print(f"[Cleanup] Failed to delete content of temp dir.")
-
-
-def get_manifest_to_use():
-    manifest_path = getattr(args, 'manifest_path', None)
-    if manifest_path and os.path.exists(manifest_path):
-        print(f'[Manifest] Using manifest from: {manifest_path}')
-        return load_manifest(manifest_path)
-
-    default_manifest_path = get_manifest_path(config.get_data_dir())
-    if os.path.exists(default_manifest_path):
-        print(f'[Manifest] Using default manifest from: {default_manifest_path}')
-        return load_manifest(default_manifest_path)
-
-    print('[Manifest] No manifest file found, generating from default config...')
-    manifest = build_default_manifest(
-        config.checkpoint_downloads,
-        config.lora_downloads,
-        config.embeddings_downloads,
-        config.vae_downloads,
-        vae_approx_filenames,
-        'https://huggingface.co/lllyasviel/misc/resolve/main/fooocus_expansion.bin',
-        fooocus_version=fooocus_version.version,
-    )
-    return manifest
-
-
-def get_active_loras():
-    loras = []
-    if hasattr(config, 'default_loras') and isinstance(config.default_loras, list):
-        for entry in config.default_loras:
-            if len(entry) == 3:
-                enabled, name, weight = entry
-            elif len(entry) == 2:
-                enabled = True
-                name, weight = entry
-            else:
-                continue
-            if enabled and name and name != 'None':
-                loras.append((name, weight))
-    return loras
-
-
-def build_active_plan_from_config(manifest):
-    loras = get_active_loras()
-
-    return build_active_resource_plan(
-        manifest=manifest,
-        base_model=config.default_base_model_name,
-        refiner_model=config.default_refiner_model_name,
-        loras=loras,
-        performance=config.default_performance,
-        inpaint_engine=config.default_inpaint_engine_version if hasattr(config, 'default_inpaint_engine_version') else None,
-        styles=config.default_styles if hasattr(config, 'default_styles') else None,
-        enable_upscale=False,
-        enable_controlnet=False,
-        enable_ip_adapter=False,
-        enable_sam=False,
-        enable_safety_checker=False,
-    )
-
-
-def run_manifest_check():
-    if not getattr(args, 'manifest_check', False) and not getattr(args, 'manifest_strict', False):
-        return True
-
-    manifest = get_manifest_to_use()
-    if not manifest.resources:
-        print('[Manifest] No resources defined in manifest, skipping check.')
-        return True
-
-    check_hash = getattr(args, 'manifest_check_hash', False)
-    models_root = config.get_models_dir()
-    is_strict = getattr(args, 'manifest_strict', False)
-
-    result = check_manifest_resources(manifest, models_root, check_hash=check_hash)
-    full_ok = print_manifest_report(result, manifest)
-
-    active_plan = build_active_plan_from_config(manifest)
-    active_result = check_active_resources(
-        active_plan, models_root,
-        check_hash=check_hash,
-        check_optional_features=False,
-        strict_manifest=is_strict,
-    )
-    active_ok = print_active_resource_report(active_result, active_plan, models_root)
-
-    if is_strict:
-        if not full_ok:
-            print()
-            print('[ERROR] Full manifest check failed in strict mode. Aborting launch.')
-            print(f'[ERROR] Models directory: {models_root}')
-            print('[ERROR] Please download the required models and place them in the correct directories,')
-            print('[ERROR] or disable strict mode with --no-manifest-strict.')
-            return False
-
-        if active_plan.has_unregistered:
-            print()
-            print('[ERROR] Strict mode: active resource plan has unregistered resources.')
-            print('[ERROR] Every resource required by your preset/config must be declared in manifest.json.')
-            print(f'[ERROR] Unregistered count: {len(active_plan.unregistered)}')
-            print()
-            print('[ERROR] To fix, add the following entries to your manifest.json:')
-            for plan_key, unreg in active_plan.unregistered.items():
-                print(f'[ERROR]   - {unreg.filename} ({unreg.category.value})')
-                print(f'[ERROR]     {unreg.to_manifest_entry()}')
-            print()
-            print('[ERROR] Or run with --generate-manifest to produce a complete manifest,')
-            print('[ERROR] then review and customize it before deploying offline.')
-            return False
-
-        if not active_result.is_ok_ignoring_unregistered:
-            print()
-            print('[ERROR] Active resource plan check failed in strict mode.')
-            print('[ERROR] The resources required by your current preset/config are missing local files.')
-            print(f'[ERROR] Models directory: {models_root}')
-            print('[ERROR] Either:')
-            print('[ERROR]   1. Download missing resources and place them at the expected paths')
-            print('[ERROR]   2. Or use a different preset/config that does not need them')
-            return False
-
-    return True
-
-
-def handle_generate_manifest():
-    output_path = getattr(args, 'generate_manifest', None)
-    if not output_path:
-        return
-
-    print(f'[Manifest] Generating manifest to: {output_path}')
-    manifest = build_default_manifest(
-        config.checkpoint_downloads,
-        config.lora_downloads,
-        config.embeddings_downloads,
-        config.vae_downloads,
-        vae_approx_filenames,
-        'https://huggingface.co/lllyasviel/misc/resolve/main/fooocus_expansion.bin',
-        fooocus_version=fooocus_version.version,
-    )
-
-    if getattr(args, 'manifest_check_hash', False):
-        models_root = config.get_models_dir()
-        print('[Manifest] Computing file hashes...')
-        for item in manifest.resources.values():
-            from modules.manifest import resolve_resource_path
-            file_path = resolve_resource_path(item, models_root)
-            if os.path.exists(file_path):
-                try:
-                    item.sha256 = sha256_file(file_path)
-                    print(f'  [OK] {item.name}: {item.sha256[:16]}...')
-                except Exception as e:
-                    print(f'  [!!] {item.name}: failed to hash - {e}')
-
-    save_manifest(manifest, output_path)
-    print(f'[Manifest] Manifest generated successfully.')
-    sys.exit(0)
 
 
 def download_models(default_model, previous_default_models, checkpoint_downloads, embeddings_downloads, lora_downloads, vae_downloads):
@@ -304,44 +142,9 @@ def download_models(default_model, previous_default_models, checkpoint_downloads
     return default_model, checkpoint_downloads
 
 
-handle_generate_manifest()
-
-if not run_manifest_check():
-    print()
-    print('[FATAL] Launch aborted due to manifest check failure.')
-    sys.exit(1)
-
-_manifest = get_manifest_to_use()
-_strict_mode = getattr(args, 'manifest_strict', False)
-_check_hash = getattr(args, 'manifest_check_hash', False)
-ManifestResolver.initialize(_manifest, config.get_models_dir(), strict=_strict_mode, check_hash=_check_hash)
-print(f'[Manifest] Resolver initialized (strict={_strict_mode}, check_hash={_check_hash}, resources={len(_manifest.resources)})')
-
-try:
-    config.default_base_model_name, config.checkpoint_downloads = download_models(
-        config.default_base_model_name, config.previous_default_models, config.checkpoint_downloads,
-        config.embeddings_downloads, config.lora_downloads, config.vae_downloads)
-except ManifestResolutionError as e:
-    print()
-    print('=' * 70)
-    print('  FATAL: Offline/Strict Mode - Required Resource Missing')
-    print('=' * 70)
-    print()
-    print(str(e))
-    print()
-    print('  The application cannot start because a required resource is missing')
-    print('  and network downloads are blocked in strict/offline mode.')
-    print()
-    print('  To resolve this:')
-    print('  1. Download the file manually and place it at the expected path above')
-    print('  2. Or add it to your manifest.json with the correct category and URL')
-    print('  3. Or run without --manifest-strict to allow automatic downloads')
-    print()
-    print(f'  Data directory: {config.get_data_dir()}')
-    print(f'  Models directory: {config.get_models_dir()}')
-    print(f'  Manifest file: {getattr(args, "manifest_path", None) or get_manifest_path(config.get_data_dir())}')
-    print()
-    sys.exit(1)
+config.default_base_model_name, config.checkpoint_downloads = download_models(
+    config.default_base_model_name, config.previous_default_models, config.checkpoint_downloads,
+    config.embeddings_downloads, config.lora_downloads, config.vae_downloads)
 
 config.update_files()
 init_cache(config.model_filenames, config.paths_checkpoints, config.lora_filenames, config.paths_loras)
