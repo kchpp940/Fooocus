@@ -164,9 +164,16 @@ class CheckResult:
         self.missing_optional: List[ResourceItem] = []
         self.hash_mismatch: List[Tuple[ResourceItem, str, str]] = []
         self.errors: List[str] = []
+        self.unregistered_resources: List[Tuple[str, ResourceCategory, Optional[str]]] = []
 
     @property
     def is_ok(self) -> bool:
+        return (len(self.missing_required) == 0
+                and len(self.errors) == 0
+                and len(self.unregistered_resources) == 0)
+
+    @property
+    def is_ok_ignoring_unregistered(self) -> bool:
         return len(self.missing_required) == 0 and len(self.errors) == 0
 
     def summary(self) -> str:
@@ -179,6 +186,8 @@ class CheckResult:
             parts.append(f"missing_optional={len(self.missing_optional)}")
         if self.hash_mismatch:
             parts.append(f"hash_mismatch={len(self.hash_mismatch)}")
+        if self.unregistered_resources:
+            parts.append(f"unregistered={len(self.unregistered_resources)}")
         return ", ".join(parts) if parts else "empty"
 
 
@@ -750,11 +759,33 @@ class ManifestResolver:
 
 
 @dataclass
+class UnregisteredResource:
+    plan_key: str
+    filename: str
+    category: ResourceCategory
+    url: str = ""
+    description: str = ""
+
+    def to_manifest_entry(self) -> str:
+        name = f"{self.category.value}:{self.filename}"
+        return (
+            f'  "{name}": {{\n'
+            f'    "category": "{self.category.value}",\n'
+            f'    "url": "{self.url}",\n'
+            f'    "required": true,\n'
+            f'    "description": "{self.description}",\n'
+            f'    "file_name": "{self.filename}"\n'
+            f'  }}'
+        )
+
+
+@dataclass
 class ActiveResourcePlan:
     manifest: Manifest
     active_resources: Dict[str, ResourceItem] = field(default_factory=dict)
     base_resources: Dict[str, ResourceItem] = field(default_factory=dict)
     optional_feature_resources: Dict[str, List[ResourceItem]] = field(default_factory=dict)
+    unregistered: Dict[str, UnregisteredResource] = field(default_factory=dict)
 
     @property
     def all_active(self) -> Dict[str, ResourceItem]:
@@ -764,6 +795,10 @@ class ActiveResourcePlan:
             for item in feature_resources:
                 result[item.name] = item
         return result
+
+    @property
+    def has_unregistered(self) -> bool:
+        return len(self.unregistered) > 0
 
     def mark_required(self, names: List[str]):
         for name in names:
@@ -799,7 +834,6 @@ def build_active_resource_plan(
     enable_safety_checker: bool = False,
 ) -> ActiveResourcePlan:
     plan = ActiveResourcePlan(manifest=manifest)
-    models_root = ""
 
     def _find_in_manifest(**kwargs) -> Optional[ResourceItem]:
         if 'filename' in kwargs:
@@ -827,58 +861,50 @@ def build_active_resource_plan(
             plan.optional_feature_resources[feature] = []
         plan.optional_feature_resources[feature].append(item)
 
-    def _ensure_manifest_item(name: str, category: ResourceCategory, url: str = "", filename: Optional[str] = None, description: str = "") -> ResourceItem:
-        if name in manifest.resources:
-            return manifest.resources[name]
-        item = ResourceItem(
-            name=name,
+    def _track_unregistered(plan_key: str, filename: str, category: ResourceCategory, url: str = "", description: str = ""):
+        plan.unregistered[plan_key] = UnregisteredResource(
+            plan_key=plan_key,
+            filename=filename,
             category=category,
             url=url,
-            required=False,
             description=description,
-            file_name=filename,
         )
-        manifest.add_resource(item)
-        return item
 
     if base_model and base_model != "None":
         item = _find_in_manifest(filename=base_model)
-        if item is None:
-            item = _ensure_manifest_item(
-                name=f"checkpoint:{base_model}",
-                category=ResourceCategory.CHECKPOINTS,
-                filename=base_model,
-                description=f"Base checkpoint: {base_model}",
+        if item is not None:
+            item.required = True
+            _add_base("base_model", item)
+        else:
+            _track_unregistered(
+                "base_model", base_model, ResourceCategory.CHECKPOINTS,
+                url="", description=f"Base checkpoint: {base_model}",
             )
-        item.required = True
-        _add_base("base_model", item)
 
     if refiner_model and refiner_model != "None":
         item = _find_in_manifest(filename=refiner_model)
-        if item is None:
-            item = _ensure_manifest_item(
-                name=f"refiner:{refiner_model}",
-                category=ResourceCategory.CHECKPOINTS,
-                filename=refiner_model,
-                description=f"Refiner checkpoint: {refiner_model}",
+        if item is not None:
+            item.required = True
+            _add_base("refiner_model", item)
+        else:
+            _track_unregistered(
+                "refiner_model", refiner_model, ResourceCategory.CHECKPOINTS,
+                url="", description=f"Refiner checkpoint: {refiner_model}",
             )
-        item.required = True
-        _add_base("refiner_model", item)
 
     if loras:
         for i, (lora_name, weight) in enumerate(loras):
             if not lora_name or lora_name == "None":
                 continue
             item = _find_in_manifest(filename=lora_name)
-            if item is None:
-                item = _ensure_manifest_item(
-                    name=f"lora:{lora_name}",
-                    category=ResourceCategory.LORAS,
-                    filename=lora_name,
-                    description=f"LoRA: {lora_name} (weight={weight})",
+            if item is not None:
+                item.required = True
+                _add_active(f"lora_{i}_{lora_name}", item)
+            else:
+                _track_unregistered(
+                    f"lora_{i}_{lora_name}", lora_name, ResourceCategory.LORAS,
+                    url="", description=f"LoRA: {lora_name} (weight={weight})",
                 )
-            item.required = True
-            _add_active(f"lora_{i}_{lora_name}", item)
 
     perf_lora_filename = None
     perf_name = None
@@ -899,15 +925,14 @@ def build_active_resource_plan(
 
     if perf_lora_filename:
         item = _find_in_manifest(filename=perf_lora_filename)
-        if item is None:
-            item = _ensure_manifest_item(
-                name=f"performance_lora:{perf_name}",
-                category=ResourceCategory.LORAS,
-                filename=perf_lora_filename,
-                description=f"Performance LoRA: {performance}",
+        if item is not None:
+            item.required = True
+            _add_active("performance_lora", item)
+        else:
+            _track_unregistered(
+                "performance_lora", perf_lora_filename, ResourceCategory.LORAS,
+                url="", description=f"Performance LoRA: {performance}",
             )
-        item.required = True
-        _add_active(f"performance_lora", item)
 
     vae_approx_items = manifest.get_resources_by_category(ResourceCategory.VAE_APPROX)
     for item in vae_approx_items:
@@ -930,36 +955,87 @@ def build_active_resource_plan(
         if head_item:
             head_item.required = True
             _add_feature("inpaint", head_item)
+        else:
+            _track_unregistered(
+                "inpaint_head", "fooocus_inpaint_head.pth", ResourceCategory.INPAINT,
+                url="https://huggingface.co/lllyasviel/fooocus_inpaint/resolve/main/fooocus_inpaint_head.pth",
+                description="Fooocus inpaint head model",
+            )
 
         patch_name = f"fooocus_inpaint_patch_{inpaint_engine}"
         patch_item = _find_in_manifest(name=patch_name)
         if patch_item:
             patch_item.required = True
             _add_feature("inpaint", patch_item)
+        else:
+            patch_files = {
+                "v1": "inpaint.fooocus.patch",
+                "v2.5": "inpaint_v25.fooocus.patch",
+                "v2.6": "inpaint_v26.fooocus.patch",
+            }
+            patch_fn = patch_files.get(inpaint_engine, f"inpaint_{inpaint_engine}.fooocus.patch")
+            _track_unregistered(
+                f"inpaint_patch_{inpaint_engine}", patch_fn, ResourceCategory.INPAINT,
+                url=f"https://huggingface.co/lllyasviel/fooocus_inpaint/resolve/main/{patch_fn}",
+                description=f"Fooocus inpaint patch ({inpaint_engine})",
+            )
 
     if enable_controlnet:
         canny_item = _find_in_manifest(name="control_lora_canny_rank128")
         if canny_item:
             canny_item.required = True
             _add_feature("controlnet", canny_item)
+        else:
+            _track_unregistered(
+                "controlnet_canny", "control-lora-canny-rank128.safetensors", ResourceCategory.CONTROLNET,
+                url="https://huggingface.co/lllyasviel/misc/resolve/main/control-lora-canny-rank128.safetensors",
+                description="ControlNet canny model",
+            )
+
         cpds_item = _find_in_manifest(name="fooocus_xl_cpds_128")
         if cpds_item:
             cpds_item.required = True
             _add_feature("controlnet", cpds_item)
+        else:
+            _track_unregistered(
+                "controlnet_cpds", "fooocus_xl_cpds_128.safetensors", ResourceCategory.CONTROLNET,
+                url="https://huggingface.co/lllyasviel/misc/resolve/main/fooocus_xl_cpds_128.safetensors",
+                description="Fooocus XL CPDS controlnet",
+            )
 
     if enable_ip_adapter:
         clip_vision_item = _find_in_manifest(name="clip_vision_vit_h")
         if clip_vision_item:
             clip_vision_item.required = True
             _add_feature("ip_adapter", clip_vision_item)
+        else:
+            _track_unregistered(
+                "ip_adapter_clip_vision", "clip_vision_vit_h.safetensors", ResourceCategory.CLIP_VISION,
+                url="https://huggingface.co/lllyasviel/misc/resolve/main/clip_vision_vit_h.safetensors",
+                description="CLIP Vision ViT-H model for IP-Adapter",
+            )
+
         ip_neg_item = _find_in_manifest(name="fooocus_ip_negative")
         if ip_neg_item:
             ip_neg_item.required = True
             _add_feature("ip_adapter", ip_neg_item)
+        else:
+            _track_unregistered(
+                "ip_adapter_negative", "fooocus_ip_negative.safetensors", ResourceCategory.CONTROLNET,
+                url="https://huggingface.co/lllyasviel/misc/resolve/main/fooocus_ip_negative.safetensors",
+                description="Fooocus IP negative model",
+            )
+
         ip_plus_item = _find_in_manifest(name="ip_adapter_plus_sdxl_vit_h")
         if ip_plus_item:
             ip_plus_item.required = True
             _add_feature("ip_adapter", ip_plus_item)
+        else:
+            _track_unregistered(
+                "ip_adapter_plus", "ip-adapter-plus_sdxl_vit-h.bin", ResourceCategory.CONTROLNET,
+                url="https://huggingface.co/lllyasviel/misc/resolve/main/ip-adapter-plus_sdxl_vit-h.bin",
+                description="IP-Adapter Plus SDXL ViT-H",
+            )
 
     if enable_sam:
         sam_name_map = {
@@ -967,23 +1043,51 @@ def build_active_resource_plan(
             "vit_l": "sam_vit_l",
             "vit_h": "sam_vit_h",
         }
+        sam_fn_map = {
+            "vit_b": "sam_vit_b_01ec64.pth",
+            "vit_l": "sam_vit_l_0b3195.pth",
+            "vit_h": "sam_vit_h_4b8939.pth",
+        }
+        sam_url_map = {
+            "vit_b": "https://huggingface.co/mashb1t/misc/resolve/main/sam_vit_b_01ec64.pth",
+            "vit_l": "https://huggingface.co/mashb1t/misc/resolve/main/sam_vit_l_0b3195.pth",
+            "vit_h": "https://huggingface.co/mashb1t/misc/resolve/main/sam_vit_h_4b8939.pth",
+        }
         sam_key = sam_name_map.get(sam_model, "sam_vit_b")
         sam_item = _find_in_manifest(name=sam_key)
         if sam_item:
             sam_item.required = True
             _add_feature("sam", sam_item)
+        else:
+            _track_unregistered(
+                f"sam_{sam_model}", sam_fn_map.get(sam_model, ""), ResourceCategory.SAM,
+                url=sam_url_map.get(sam_model, ""),
+                description=f"SAM {sam_model} model",
+            )
 
     if enable_safety_checker:
         sc_item = _find_in_manifest(name="safety_checker")
         if sc_item:
             sc_item.required = True
             _add_feature("safety_checker", sc_item)
+        else:
+            _track_unregistered(
+                "safety_checker", "stable-diffusion-safety-checker.bin", ResourceCategory.SAFETY_CHECKER,
+                url="https://huggingface.co/mashb1t/misc/resolve/main/stable-diffusion-safety-checker.bin",
+                description="Stable diffusion safety checker model",
+            )
 
     if enable_upscale:
         up_item = _find_in_manifest(name="fooocus_upscaler")
         if up_item:
             up_item.required = True
             _add_feature("upscale", up_item)
+        else:
+            _track_unregistered(
+                "upscaler", "fooocus_upscaler_s409985e5.bin", ResourceCategory.UPSCALE_MODELS,
+                url="https://huggingface.co/lllyasviel/misc/resolve/main/fooocus_upscaler_s409985e5.bin",
+                description="Fooocus upscaler model",
+            )
 
     return plan
 
@@ -993,24 +1097,43 @@ def check_active_resources(
     models_root: str,
     check_hash: bool = False,
     check_optional_features: bool = False,
+    strict_manifest: bool = False,
 ) -> CheckResult:
     result = CheckResult()
     ctx = get_current_context()
+
+    if plan.has_unregistered:
+        for plan_key, unreg in plan.unregistered.items():
+            result.unregistered_resources.append((unreg.filename, unreg.category, unreg.url))
+            log_warning(
+                DiagnosticStage.RESOURCE_SCAN,
+                f"资源未在 manifest 中登记: {unreg.filename}",
+                extra_data={
+                    "plan_key": plan_key,
+                    "filename": unreg.filename,
+                    "category": unreg.category.value,
+                    "url": unreg.url,
+                    "description": unreg.description,
+                },
+            )
 
     items_to_check = list(plan.base_resources.values()) + list(plan.active_resources.values())
     if check_optional_features:
         for feature_items in plan.optional_feature_resources.values():
             items_to_check.extend(feature_items)
 
-    if not items_to_check:
+    if not items_to_check and not plan.has_unregistered:
         print("[Manifest] No active resources to check.")
         return result
 
     log_info(
         DiagnosticStage.RESOURCE_SCAN,
-        f"开始校验活动资源计划 (共 {len(items_to_check)} 个)",
+        f"开始校验活动资源计划 (共 {len(items_to_check)} 个已登记, {len(plan.unregistered)} 个未登记)",
         ctx=ctx,
-        extra_data={"resources_total": len(items_to_check)},
+        extra_data={
+            "registered_count": len(items_to_check),
+            "unregistered_count": len(plan.unregistered),
+        },
     )
 
     for item in items_to_check:
@@ -1063,6 +1186,7 @@ def check_active_resources(
             "missing_required_count": len(result.missing_required),
             "missing_optional_count": len(result.missing_optional),
             "hash_mismatch_count": len(result.hash_mismatch),
+            "unregistered_count": len(result.unregistered_resources),
         },
     )
 
@@ -1079,19 +1203,34 @@ def print_active_resource_report(
     print("  Active Resource Plan Check")
     print("=" * 70)
 
+    if plan.unregistered:
+        print(f"\n  Unregistered in Manifest ({len(plan.unregistered)}):")
+        print("  These resources are required by your config/preset but not")
+        print("  declared in the manifest. Add them to manifest.json:")
+        print()
+        for plan_key, unreg in plan.unregistered.items():
+            print(f"    [??] {unreg.filename} ({unreg.category.value})")
+            if unreg.description:
+                print(f"         {unreg.description}")
+            if unreg.url:
+                print(f"         URL: {unreg.url}")
+            print(f"         Add to manifest:")
+            print(unreg.to_manifest_entry())
+            print()
+
     print(f"\n  Base resources ({len(plan.base_resources)}):")
     for name, item in plan.base_resources.items():
         path = resolve_resource_path(item, models_root)
-        status = "OK" if os.path.exists(path) else "MISSING"
-        marker = "[OK]" if status == "OK" else "[!!]" if item.required else "[--]"
+        exists = os.path.exists(path)
+        marker = "[OK]" if exists else ("[!!]" if item.required else "[--]")
         print(f"    {marker} {name}: {item.get_filename()}")
 
     if plan.active_resources:
         print(f"\n  Active resources ({len(plan.active_resources)}):")
         for name, item in plan.active_resources.items():
             path = resolve_resource_path(item, models_root)
-            status = "OK" if os.path.exists(path) else "MISSING"
-            marker = "[OK]" if status == "OK" else "[!!]" if item.required else "[--]"
+            exists = os.path.exists(path)
+            marker = "[OK]" if exists else ("[!!]" if item.required else "[--]")
             print(f"    {marker} {name}: {item.get_filename()}")
 
     if plan.optional_feature_resources:
@@ -1100,12 +1239,13 @@ def print_active_resource_report(
             print(f"    [{feature}] ({len(items)}):")
             for item in items:
                 path = resolve_resource_path(item, models_root)
-                status = "OK" if os.path.exists(path) else "MISSING"
-                marker = "[OK]" if status == "OK" else "[!!]" if item.required else "[--]"
+                exists = os.path.exists(path)
+                marker = "[OK]" if exists else ("[!!]" if item.required else "[--]")
                 print(f"        {marker} {item.name}")
 
     if result.missing_required:
-        print(f"\n  Missing Required ({len(result.missing_required)}):")
+        print(f"\n  Missing Local Files ({len(result.missing_required)}):")
+        print("  These resources are registered in manifest but files are missing:")
         for item in result.missing_required:
             path = resolve_resource_path(item, models_root)
             print(f"    [!!] {item.name} ({item.category.value})")
@@ -1126,10 +1266,22 @@ def print_active_resource_report(
     print("=" * 70)
 
     if result.is_ok:
-        print("  Status: PASSED - All active required resources are present.")
+        print("  Status: PASSED - All active required resources are present and registered.")
         print("=" * 70)
         return True
     else:
-        print("  Status: FAILED - Missing active required resources!")
+        parts = []
+        if result.unregistered_resources:
+            parts.append(f"{len(result.unregistered_resources)} unregistered")
+        if result.missing_required:
+            parts.append(f"{len(result.missing_required)} missing files")
+        if result.hash_mismatch:
+            parts.append(f"{len(result.hash_mismatch)} hash mismatches")
+        detail = ", ".join(parts)
+        print(f"  Status: FAILED - {detail}")
+        if result.unregistered_resources:
+            print("  Fix: Add the missing entries to your manifest.json file.")
+        if result.missing_required:
+            print("  Fix: Download missing files and place them at the expected paths.")
         print("=" * 70)
         return False

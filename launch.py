@@ -183,7 +183,12 @@ def run_manifest_check():
     full_ok = print_manifest_report(result, manifest)
 
     active_plan = build_active_plan_from_config(manifest)
-    active_result = check_active_resources(active_plan, models_root, check_hash=check_hash, check_optional_features=False)
+    active_result = check_active_resources(
+        active_plan, models_root,
+        check_hash=check_hash,
+        check_optional_features=False,
+        strict_manifest=is_strict,
+    )
     active_ok = print_active_resource_report(active_result, active_plan, models_root)
 
     if is_strict:
@@ -195,15 +200,29 @@ def run_manifest_check():
             print('[ERROR] or disable strict mode with --no-manifest-strict.')
             return False
 
-        if not active_ok:
+        if active_plan.has_unregistered:
+            print()
+            print('[ERROR] Strict mode: active resource plan has unregistered resources.')
+            print('[ERROR] Every resource required by your preset/config must be declared in manifest.json.')
+            print(f'[ERROR] Unregistered count: {len(active_plan.unregistered)}')
+            print()
+            print('[ERROR] To fix, add the following entries to your manifest.json:')
+            for plan_key, unreg in active_plan.unregistered.items():
+                print(f'[ERROR]   - {unreg.filename} ({unreg.category.value})')
+                print(f'[ERROR]     {unreg.to_manifest_entry()}')
+            print()
+            print('[ERROR] Or run with --generate-manifest to produce a complete manifest,')
+            print('[ERROR] then review and customize it before deploying offline.')
+            return False
+
+        if not active_result.is_ok_ignoring_unregistered:
             print()
             print('[ERROR] Active resource plan check failed in strict mode.')
-            print('[ERROR] The resources required by your current preset/config are missing.')
+            print('[ERROR] The resources required by your current preset/config are missing local files.')
             print(f'[ERROR] Models directory: {models_root}')
             print('[ERROR] Either:')
-            print('[ERROR]   1. Download missing resources and place them in the correct paths')
-            print('[ERROR]   2. Add their URLs to your manifest.json')
-            print('[ERROR]   3. Or use a different preset/config that does not need them')
+            print('[ERROR]   1. Download missing resources and place them at the expected paths')
+            print('[ERROR]   2. Or use a different preset/config that does not need them')
             return False
 
     return True
