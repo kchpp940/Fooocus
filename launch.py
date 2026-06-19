@@ -89,7 +89,7 @@ from modules.hash_cache import init_cache
 from modules.manifest import (
     load_manifest, check_manifest_resources, print_manifest_report,
     build_default_manifest, save_manifest, get_manifest_path,
-    sha256_file
+    sha256_file, ManifestResolver, ManifestResolutionError,
 )
 
 os.environ["U2NET_HOME"] = config.path_inpaint
@@ -237,9 +237,37 @@ if not run_manifest_check():
     print('[FATAL] Launch aborted due to manifest check failure.')
     sys.exit(1)
 
-config.default_base_model_name, config.checkpoint_downloads = download_models(
-    config.default_base_model_name, config.previous_default_models, config.checkpoint_downloads,
-    config.embeddings_downloads, config.lora_downloads, config.vae_downloads)
+_manifest = get_manifest_to_use()
+_strict_mode = getattr(args, 'manifest_strict', False)
+_check_hash = getattr(args, 'manifest_check_hash', False)
+ManifestResolver.initialize(_manifest, config.get_models_dir(), strict=_strict_mode, check_hash=_check_hash)
+print(f'[Manifest] Resolver initialized (strict={_strict_mode}, check_hash={_check_hash}, resources={len(_manifest.resources)})')
+
+try:
+    config.default_base_model_name, config.checkpoint_downloads = download_models(
+        config.default_base_model_name, config.previous_default_models, config.checkpoint_downloads,
+        config.embeddings_downloads, config.lora_downloads, config.vae_downloads)
+except ManifestResolutionError as e:
+    print()
+    print('=' * 70)
+    print('  FATAL: Offline/Strict Mode - Required Resource Missing')
+    print('=' * 70)
+    print()
+    print(str(e))
+    print()
+    print('  The application cannot start because a required resource is missing')
+    print('  and network downloads are blocked in strict/offline mode.')
+    print()
+    print('  To resolve this:')
+    print('  1. Download the file manually and place it at the expected path above')
+    print('  2. Or add it to your manifest.json with the correct category and URL')
+    print('  3. Or run without --manifest-strict to allow automatic downloads')
+    print()
+    print(f'  Data directory: {config.get_data_dir()}')
+    print(f'  Models directory: {config.get_models_dir()}')
+    print(f'  Manifest file: {getattr(args, "manifest_path", None) or get_manifest_path(config.get_data_dir())}')
+    print()
+    sys.exit(1)
 
 config.update_files()
 init_cache(config.model_filenames, config.paths_checkpoints, config.lora_filenames, config.paths_loras)

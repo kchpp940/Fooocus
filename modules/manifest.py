@@ -598,3 +598,152 @@ def build_default_manifest(
 
 def get_manifest_path(user_data_dir: str) -> str:
     return os.path.join(user_data_dir, "manifest.json")
+
+
+class ManifestResolutionError(Exception):
+    def __init__(self, message: str, item: Optional[ResourceItem] = None, url: str = ""):
+        super().__init__(message)
+        self.item = item
+        self.url = url
+
+
+class ManifestResolver:
+    _instance: Optional['ManifestResolver'] = None
+
+    def __init__(self, manifest: Manifest, models_root: str, strict: bool = False, check_hash: bool = False):
+        self.manifest = manifest
+        self.models_root = models_root
+        self.strict = strict
+        self.check_hash = check_hash
+        self._url_index: Dict[str, ResourceItem] = {}
+        self._name_index: Dict[str, ResourceItem] = {}
+        self._path_index: Dict[str, ResourceItem] = {}
+        self._resolved_cache: Dict[str, str] = {}
+        self._build_indices()
+
+    def _build_indices(self):
+        for item in self.manifest.resources.values():
+            if item.url:
+                self._url_index[item.url] = item
+            self._name_index[item.name] = item
+            resolved = resolve_resource_path(item, self.models_root)
+            self._path_index[resolved] = item
+
+    @classmethod
+    def initialize(cls, manifest: Manifest, models_root: str, strict: bool = False, check_hash: bool = False):
+        cls._instance = cls(manifest, models_root, strict, check_hash)
+
+    @classmethod
+    def get(cls) -> Optional['ManifestResolver']:
+        return cls._instance
+
+    def lookup_by_url(self, url: str) -> Optional[ResourceItem]:
+        return self._url_index.get(url)
+
+    def lookup_by_name(self, name: str) -> Optional[ResourceItem]:
+        return self._name_index.get(name)
+
+    def lookup_by_path(self, path: str) -> Optional[ResourceItem]:
+        return self._path_index.get(os.path.abspath(path))
+
+    def resolve_download(
+        self,
+        url: str,
+        model_dir: str,
+        file_name: Optional[str] = None,
+    ) -> Tuple[str, str, Optional[ResourceItem]]:
+        if file_name:
+            cached_file = os.path.abspath(os.path.join(model_dir, file_name))
+        else:
+            from urllib.parse import urlparse
+            parts = urlparse(url)
+            fn = os.path.basename(parts.path)
+            cached_file = os.path.abspath(os.path.join(model_dir, fn))
+
+        item = self.lookup_by_url(url)
+
+        if item:
+            manifest_path = resolve_resource_path(item, self.models_root)
+            if cached_file != manifest_path:
+                if not os.path.exists(cached_file) or os.path.exists(manifest_path):
+                    cached_file = manifest_path
+                    model_dir = os.path.dirname(manifest_path)
+                    file_name = file_name or item.get_filename()
+
+        return model_dir, file_name or os.path.basename(cached_file), item
+
+    def check_before_download(self, url: str, target_path: str, item: Optional[ResourceItem] = None) -> Optional[str]:
+        if not self.strict:
+            return None
+
+        if os.path.exists(target_path):
+            return None
+
+        domain = os.environ.get("HF_MIRROR", "https://huggingface.co").rstrip('/')
+        manifest_url = url.replace(domain, "https://huggingface.co", 1) if domain != "https://huggingface.co" else url
+
+        lookup_item = item or self.lookup_by_url(manifest_url) or self.lookup_by_url(url)
+        if lookup_item is None:
+            lookup_item = self.lookup_by_path(target_path)
+
+        if lookup_item:
+            name = lookup_item.name
+            category = lookup_item.category.value
+            manifest_url = lookup_item.url
+        else:
+            name = os.path.basename(target_path)
+            category = "unknown"
+            manifest_url = url
+
+        msg = (
+            f"[Manifest/Strict] Blocked network download in offline mode!\n"
+            f"  Resource: {name}\n"
+            f"  Category: {category}\n"
+            f"  Expected path: {target_path}\n"
+            f"  Download URL: {manifest_url}\n"
+            f"  To fix: place the file at {target_path}\n"
+            f"  Or add to manifest:\n"
+            f'  "{name}": {{\n'
+            f'    "category": "{category}",\n'
+            f'    "url": "{manifest_url}",\n'
+            f'    "required": false,\n'
+            f'    "description": "",\n'
+            f'    "file_name": "{os.path.basename(target_path)}"\n'
+            f"  }}"
+        )
+        return msg
+
+    def verify_hash(self, file_path: str, item: Optional[ResourceItem] = None) -> bool:
+        if not self.check_hash:
+            return True
+
+        lookup = item or self.lookup_by_path(file_path)
+        if lookup is None or lookup.sha256 is None:
+            return True
+
+        try:
+            actual = sha256_file(file_path)
+            if actual.lower() != lookup.sha256.lower():
+                print(f"[Manifest] Hash mismatch for {lookup.name}: expected {lookup.sha256[:16]}..., got {actual[:16]}...")
+                return False
+        except Exception as e:
+            print(f"[Manifest] Failed to verify hash for {file_path}: {e}")
+            return False
+
+        return True
+
+    def resolve_file_from_url(self, url: str, model_dir: str, file_name: Optional[str] = None) -> str:
+        resolved_dir, resolved_name, item = self.resolve_download(url, model_dir, file_name)
+        target_path = os.path.abspath(os.path.join(resolved_dir, resolved_name))
+
+        if os.path.exists(target_path):
+            if not self.verify_hash(target_path, item):
+                print(f"[Manifest] WARNING: Hash verification failed for {resolved_name}, file may be corrupted.")
+            return target_path
+
+        block_msg = self.check_before_download(url, target_path, item)
+        if block_msg:
+            print(block_msg)
+            raise ManifestResolutionError(block_msg, item=item, url=url)
+
+        return target_path
