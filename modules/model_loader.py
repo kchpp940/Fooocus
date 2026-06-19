@@ -3,7 +3,7 @@ from urllib.parse import urlparse
 from typing import Optional
 
 from modules.diagnostics import (
-    DiagnosticJob, DiagnosticJobError, DiagnosticStage,
+    DiagnosticJob, DiagnosticJobKind, DiagnosticJobError, DiagnosticStage,
     DiagnosticErrorCategory, LogLevel,
 )
 
@@ -88,4 +88,4 @@ def load_file_from_url_bootstrap(
         progress: bool = True,
         file_name: Optional[str] = None,
 ) -> str:
-    return load_file_from_url(url, model_dir=model_dir, progress=progress, file_name=file_name, job=DiagnosticJob())
+    return load_file_from_url(url, model_dir=model_dir, progress=progress, file_name=file_name, job=DiagnosticJob(kind=DiagnosticJobKind.STARTUP))

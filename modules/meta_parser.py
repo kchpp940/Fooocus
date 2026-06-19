@@ -15,7 +15,7 @@ from modules.flags import SAMPLERS, CIVITAI_NO_KARRAS
 from modules.hash_cache import sha256_from_cache
 from modules.util import quote, unquote, extract_styles_from_prompt, is_json, get_file_from_folder_list
 from modules.diagnostics import (
-    DiagnosticJob, DiagnosticJobError, DiagnosticStage,
+    DiagnosticJob, DiagnosticJobKind, DiagnosticJobError, DiagnosticStage,
     DiagnosticErrorCategory, LogLevel,
 )
 
@@ -670,7 +670,7 @@ def read_info_from_image(file, job: DiagnosticJob) -> tuple[str | None, Metadata
 
 
 def read_info_from_image_bootstrap(file) -> tuple[str | None, MetadataScheme | None]:
-    return read_info_from_image(file, DiagnosticJob())
+    return read_info_from_image(file, DiagnosticJob(kind=DiagnosticJobKind.HEALTHCHECK))
 
 
 def get_exif(metadata: str | None, metadata_scheme: str):

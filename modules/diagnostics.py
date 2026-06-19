@@ -19,6 +19,12 @@ class LogLevel(Enum):
     CRITICAL = "critical"
 
 
+class DiagnosticJobKind(Enum):
+    STARTUP = "startup"
+    REQUEST = "request"
+    HEALTHCHECK = "healthcheck"
+
+
 class DiagnosticStage(Enum):
     QUEUE_WAIT = "queue_wait"
     REQUEST_INIT = "request_init"
@@ -274,8 +280,10 @@ class DiagnosticScope:
 
 
 class DiagnosticJob:
-    def __init__(self, trace_id: Optional[str] = None):
+    def __init__(self, trace_id: Optional[str] = None,
+                 kind: DiagnosticJobKind = DiagnosticJobKind.REQUEST):
         self.trace_id: str = trace_id or str(uuid.uuid4())
+        self.kind: DiagnosticJobKind = kind
         self.created_at: float = time.time()
         self.status: str = "running"
 
@@ -292,7 +300,8 @@ class DiagnosticJob:
         self.output_files: List[str] = []
         self.models_loaded: List[str] = []
 
-        _register_job(self)
+        if kind == DiagnosticJobKind.REQUEST:
+            _register_job(self)
 
     # ---- scope context manager ----
 
@@ -343,6 +352,7 @@ class DiagnosticJob:
             "timestamp": ts,
             "level": level.value,
             "trace_id": self.trace_id,
+            "kind": self.kind.value,
             "stage": stage.value,
             "human_message": human_message,
         }
@@ -384,6 +394,7 @@ class DiagnosticJob:
             "timestamp": ts,
             "level": LogLevel.ERROR.value,
             "trace_id": self.trace_id,
+            "kind": self.kind.value,
             "stage": stage.value,
             "human_message": human_message,
             "category": category.value,
@@ -448,6 +459,7 @@ class DiagnosticJob:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "trace_id": self.trace_id,
+            "kind": self.kind.value,
             "status": self.status,
             "created_at": datetime.fromtimestamp(self.created_at).isoformat(),
             "total_duration_sec": round(time.time() - self.created_at, 3),
@@ -466,10 +478,19 @@ class DiagnosticJob:
         lines = [
             "=== Fooocus Diagnostic Summary ===",
             f"Trace ID: {self.trace_id}",
+            f"Kind: {self.kind.value}",
             f"Status: {self.status.upper()}",
             f"Created: {datetime.fromtimestamp(self.created_at).strftime('%Y-%m-%d %H:%M:%S')}",
             f"Duration: {round(time.time() - self.created_at, 2)}s",
         ]
+        if self.kind != DiagnosticJobKind.REQUEST:
+            lines.append("")
+            if self._errors:
+                lines.append(f"Errors ({len(self._errors)}):")
+                for i, err in enumerate(self._errors[:3], 1):
+                    lines.append(f"  [{i}] {err.get('category', 'unknown')}: {err.get('human_message', 'No description')}")
+            lines.append("==================================")
+            return "\n".join(lines)
         if self._current_stage:
             lines.append(f"Failed at stage: {self._current_stage}")
         if self._errors:
@@ -509,10 +530,20 @@ class DiagnosticJob:
         return "\n".join(lines)
 
     def to_public_error(self) -> Dict[str, Any]:
+        if self.kind != DiagnosticJobKind.REQUEST:
+            return {
+                "title": "系统错误",
+                "message": "系统初始化过程中发生错误，请检查日志。",
+                "trace_id": self.trace_id,
+                "kind": self.kind.value,
+                "show_diagnostics_button": False,
+                "diagnostics_summary": self.summary(),
+            }
         result: Dict[str, Any] = {
             "title": "生成遇到问题",
             "message": "处理您的请求时发生错误。",
             "trace_id": self.trace_id,
+            "kind": self.kind.value,
             "show_diagnostics_button": True,
             "diagnostics_summary": self.summary(),
         }

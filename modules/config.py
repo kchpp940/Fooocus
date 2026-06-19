@@ -12,7 +12,7 @@ from modules.model_loader import load_file_from_url
 from modules.extra_utils import makedirs_with_log, get_files_from_folder, try_eval_env_var
 from modules.flags import OutputFormat, Performance, MetadataScheme
 from modules.diagnostics import (
-    DiagnosticJob, DiagnosticJobError, DiagnosticStage,
+    DiagnosticJob, DiagnosticJobKind, DiagnosticJobError, DiagnosticStage,
     DiagnosticErrorCategory, LogLevel,
 )
 
@@ -1076,11 +1076,11 @@ def update_files(job: DiagnosticJob):
 
 
 def get_model_filenames_bootstrap(folder_paths, extensions=None, name_filter=None):
-    return get_model_filenames(folder_paths, extensions, name_filter, job=DiagnosticJob())
+    return get_model_filenames(folder_paths, extensions, name_filter, job=DiagnosticJob(kind=DiagnosticJobKind.STARTUP))
 
 
 def update_files_bootstrap():
-    return update_files(DiagnosticJob())
+    return update_files(DiagnosticJob(kind=DiagnosticJobKind.STARTUP))
 
 
 def downloading_inpaint_models(v):

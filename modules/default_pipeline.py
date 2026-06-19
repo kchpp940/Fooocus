@@ -14,7 +14,7 @@ from ldm_patched.modules.model_base import SDXL, SDXLRefiner
 from modules.sample_hijack import clip_separate
 from modules.util import get_file_from_folder_list, get_enabled_loras
 from modules.diagnostics import (
-    DiagnosticJob, DiagnosticJobError, DiagnosticStage,
+    DiagnosticJob, DiagnosticJobKind, DiagnosticJobError, DiagnosticStage,
     DiagnosticErrorCategory, LogLevel,
 )
 
@@ -56,7 +56,7 @@ def refresh_controlnets(model_paths, job: DiagnosticJob):
 
 
 def refresh_controlnets_bootstrap(model_paths):
-    return refresh_controlnets(model_paths, DiagnosticJob())
+    return refresh_controlnets(model_paths, DiagnosticJob(kind=DiagnosticJobKind.STARTUP))
 
 
 @torch.no_grad()
@@ -79,7 +79,7 @@ def assert_model_integrity(job: DiagnosticJob):
 
 
 def assert_model_integrity_bootstrap():
-    return assert_model_integrity(DiagnosticJob())
+    return assert_model_integrity(DiagnosticJob(kind=DiagnosticJobKind.STARTUP))
 
 
 @torch.no_grad()
@@ -131,7 +131,7 @@ def refresh_base_model(name, job: DiagnosticJob, vae_name=None):
 
 
 def refresh_base_model_bootstrap(name, vae_name=None):
-    return refresh_base_model(name, DiagnosticJob(), vae_name)
+    return refresh_base_model(name, DiagnosticJob(kind=DiagnosticJobKind.STARTUP), vae_name)
 
 
 @torch.no_grad()
@@ -184,7 +184,7 @@ def refresh_refiner_model(name, job: DiagnosticJob):
 
 
 def refresh_refiner_model_bootstrap(name):
-    return refresh_refiner_model(name, DiagnosticJob())
+    return refresh_refiner_model(name, DiagnosticJob(kind=DiagnosticJobKind.STARTUP))
 
 
 @torch.no_grad()
@@ -222,7 +222,7 @@ def refresh_loras(loras, *, base_model_additional_loras=None, job: DiagnosticJob
 
 
 def refresh_loras_bootstrap(loras, base_model_additional_loras=None):
-    return refresh_loras(loras, base_model_additional_loras=base_model_additional_loras, job=DiagnosticJob())
+    return refresh_loras(loras, base_model_additional_loras=base_model_additional_loras, job=DiagnosticJob(kind=DiagnosticJobKind.STARTUP))
 
 
 @torch.no_grad()
@@ -306,7 +306,7 @@ def clear_all_caches():
 def prepare_text_encoder(async_call=True):
     if async_call:
         pass
-    assert_model_integrity(DiagnosticJob())
+    assert_model_integrity(DiagnosticJob(kind=DiagnosticJobKind.STARTUP))
     ldm_patched.modules.model_management.load_models_gpu([final_clip.patcher, final_expansion.patcher])
     return
 
@@ -355,7 +355,7 @@ def refresh_everything_bootstrap(refiner_model_name, base_model_name, loras,
                               base_model_additional_loras=base_model_additional_loras,
                               use_synthetic_refiner=use_synthetic_refiner,
                               vae_name=vae_name,
-                              job=DiagnosticJob())
+                              job=DiagnosticJob(kind=DiagnosticJobKind.STARTUP))
 
 
 refresh_everything_bootstrap(

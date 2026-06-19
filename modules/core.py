@@ -19,7 +19,7 @@ from ldm_patched.contrib.external_freelunch import FreeU_V2
 from ldm_patched.modules.sample import prepare_mask
 from modules.lora import match_lora
 from modules.diagnostics import (
-    DiagnosticJob, DiagnosticJobError, DiagnosticStage,
+    DiagnosticJob, DiagnosticJobKind, DiagnosticJobError, DiagnosticStage,
     DiagnosticErrorCategory, LogLevel,
 )
 from modules.util import get_file_from_folder_list
@@ -175,7 +175,7 @@ class StableDiffusionModel:
     @torch.no_grad()
     @torch.inference_mode()
     def refresh_loras_bootstrap(self, loras):
-        return self.refresh_loras(loras, DiagnosticJob())
+        return self.refresh_loras(loras, DiagnosticJob(kind=DiagnosticJobKind.STARTUP))
 
 
 @torch.no_grad()

@@ -23,7 +23,7 @@ from modules.private_logger import get_current_html_path
 from modules.ui_gradio_extensions import reload_javascript
 from modules.auth import auth_enabled, check_auth
 from modules.util import is_json
-from modules.diagnostics import DiagnosticJob, DiagnosticStage, LogLevel, get_job
+from modules.diagnostics import DiagnosticJob, DiagnosticJobKind, DiagnosticStage, LogLevel, get_job
 
 
 def build_preset_data_from_ui(*args):
@@ -201,6 +201,7 @@ def generate_clicked(task: worker.AsyncTask):
                         'title': '生成遇到问题',
                         'message': '处理您的请求时发生错误。',
                         'trace_id': trace_id,
+                        'kind': 'unknown',
                         'show_diagnostics_button': False,
                         'diagnostics_summary': f'Trace ID: {trace_id}',
                     }
@@ -306,7 +307,7 @@ if isinstance(args_manager.args.preset, str):
 shared.gradio_root = gr.Blocks(title=title).queue()
 
 with shared.gradio_root:
-    currentTask = gr.State(worker.AsyncTask(args=[], job=DiagnosticJob()))
+    currentTask = gr.State(worker.AsyncTask(args=[], job=DiagnosticJob(kind=DiagnosticJobKind.STARTUP)))
     inpaint_engine_state = gr.State('empty')
     with gr.Row():
         with gr.Column(scale=2):
@@ -1262,7 +1263,7 @@ with shared.gradio_root:
             .then(fn=update_history_link, outputs=history_link) \
             .then(fn=lambda: None, _js='playNotification').then(fn=lambda: None, _js='refresh_grid_delayed')
 
-        reset_button.click(lambda: [worker.AsyncTask(args=[], job=DiagnosticJob()), False, gr.update(visible=True, interactive=True)] +
+        reset_button.click(lambda: [worker.AsyncTask(args=[], job=DiagnosticJob(kind=DiagnosticJobKind.STARTUP)), False, gr.update(visible=True, interactive=True)] +
                                    [gr.update(visible=False)] * 8 +
                                    [gr.update(visible=True, value=[])],
                            outputs=[currentTask, state_is_generating, generate_button,
