@@ -95,28 +95,73 @@ Examples:
 
 
 def _run_all(args) -> ToolResult:
-    from modules.tools.common import Severity
+    """聚合子命令：基于 preflight service 的统一分级 + validate-protocol 追加。
+
+    统一使用 preflight service 的 blocking / warning / info 三级判断，
+    与 launch.py 中的 preflight 共用同一套错误等级定义。
+    """
+    from modules.services.preflight import run_preflight, Severity as PreflightSeverity
+
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    output_json = getattr(args, "output_json", False)
+    verbose = getattr(args, "verbose", False)
+
+    # 核心：走统一的 preflight service
+    pf_result = run_preflight(
+        project_root=project_root,
+        check_env=True,
+        check_config=True,
+        check_resources=False,
+        strict=False,
+        skip_torch=getattr(args, "skip_torch", False),
+    )
 
     combined = ToolResult(tool_name="all")
-    commands = [
-        ("check-env", lambda: check_environment(args)),
-        ("check-config", lambda: check_configuration(args)),
-        ("validate-protocol", lambda: validate_protocol(args)),
-    ]
-    for name, runner in commands:
-        try:
-            sub_result = runner()
-            combined.data[f"{name}_exit_code"] = sub_result.exit_code.value
-            combined.data[f"{name}_errors"] = len(sub_result.errors)
-            combined.data[f"{name}_warnings"] = len(sub_result.warnings)
-            for c in sub_result.checks:
-                c.name = f"{name}/{c.name}"
-                combined.add_check(c)
-        except Exception as e:
+
+    # 将 preflight 检查项映射为 ToolResult 检查项
+    for pf_check in pf_result.checks:
+        if pf_check.severity == PreflightSeverity.BLOCKING:
             combined.add_error(
-                name=f"{name}/exception",
-                message=f"{name} raised an exception: {type(e).__name__}: {e}",
+                name=pf_check.name,
+                message=pf_check.message,
+                suggestion=pf_check.suggestion,
+                detail=pf_check.detail,
             )
+        elif pf_check.severity == PreflightSeverity.WARNING:
+            combined.add_warning(
+                name=pf_check.name,
+                message=pf_check.message,
+                suggestion=pf_check.suggestion,
+                detail=pf_check.detail,
+            )
+        else:
+            combined.add_info(
+                name=pf_check.name,
+                message=pf_check.message,
+                detail=pf_check.detail,
+            )
+
+    combined.data["preflight_max_severity"] = pf_result.max_severity.name.lower()
+    combined.data["preflight_blocking"] = pf_result.blocking_count
+    combined.data["preflight_warning"] = pf_result.warning_count
+    combined.data["preflight_info"] = pf_result.info_count
+
+    # 追加 validate-protocol（这部分相对独立，不在 preflight core 里）
+    try:
+        proto_result = validate_protocol(args)
+        combined.data["validate-protocol_exit_code"] = proto_result.exit_code.value
+        combined.data["validate-protocol_errors"] = len(proto_result.errors)
+        combined.data["validate-protocol_warnings"] = len(proto_result.warnings)
+        for c in proto_result.checks:
+            c.name = f"validate-protocol/{c.name}"
+            combined.add_check(c)
+    except Exception as e:
+        combined.add_error(
+            name="validate-protocol/exception",
+            message=f"validate-protocol raised an exception: {type(e).__name__}: {e}",
+        )
+
+    combined.compute_summary()
     return combined
 
 

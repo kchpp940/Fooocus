@@ -67,52 +67,91 @@ vae_approx_filenames = [
 ]
 
 
-def run_preflight_checks(project_root):
+def run_preflight_checks(project_root, strict=False):
     """
-    启动前预检：调用 service 层输出环境 + 配置摘要。
-    与 python -m modules.tools 使用完全相同的底层逻辑。
+    启动前预检：调用 service 层的统一 preflight 编排。
+    与 python -m modules.tools all 使用完全相同的底层逻辑和错误等级判断。
+
+    错误等级：
+      - BLOCKING (exit code 2)：Python 版本不兼容、核心依赖缺失、配置 JSON/schema 错误
+      - WARNING  (exit code 1)：目录不存在、可选依赖缺失、schema 未知 key、模型数为 0
+      - INFO     (exit code 0)：正常信息
+
+    strict=True 时，所有 WARNING 升级为 BLOCKING。
+
+    返回：退出码 (0/1/2)
     """
     try:
-        from modules.services.environment_inspector import run_environment_inspection
-        from modules.services.config_inspector import load_and_validate_config
+        from modules.services.preflight import run_preflight, Severity
 
-        print('[Preflight] Running environment & configuration preflight checks...')
+        print('[Preflight] Running preflight checks...')
+        print(f'[Preflight] Mode: {"strict" if strict else "normal"}')
+        print()
 
-        env = run_environment_inspection(project_root=project_root, skip_torch=False)
-        print(f"[Preflight] Python version: {env['python_version']} "
-              f"({'compatible' if env['python']['compatible'] else 'INCOMPATIBLE'})")
-        print(f"[Preflight] Platform: {env['platform']['system']} {env['platform']['machine']}")
+        pf_result = run_preflight(
+            project_root=project_root,
+            check_env=True,
+            check_config=True,
+            check_resources=False,
+            strict=strict,
+            skip_torch=False,
+        )
 
-        missing_core = []
-        for pkg, info in env.get("dependencies", {}).items():
-            if not info.get("optional", False) and not info.get("installed", False):
-                missing_core.append(pkg)
-        if missing_core:
-            print(f"[Preflight] WARNING: {len(missing_core)} core package(s) not yet installed: {', '.join(missing_core)}")
-            print('[Preflight]          They will be installed by prepare_environment() next.')
+        # 打印所有检查项（BLOCKING 红色风格，WARNING 黄色风格，INFO 普通）
+        blocking_items = [c for c in pf_result.checks if c.severity == Severity.BLOCKING]
+        warning_items = [c for c in pf_result.checks if c.severity == Severity.WARNING]
+        info_items = [c for c in pf_result.checks if c.severity == Severity.INFO]
+
+        if blocking_items:
+            print(f'[Preflight] BLOCKING issues ({len(blocking_items)}):')
+            for c in blocking_items:
+                print(f'  ✗ [BLOCKING] {c.name}: {c.message}')
+                if c.suggestion:
+                    print(f'      ↳ Suggestion: {c.suggestion}')
+            print()
+
+        if warning_items:
+            print(f'[Preflight] Warnings ({len(warning_items)}):')
+            for c in warning_items:
+                print(f'  ⚠ [WARNING] {c.name}: {c.message}')
+            print()
+
+        if info_items:
+            print(f'[Preflight] Info ({len(info_items)} items shown in verbose mode)')
+            # 默认只打印摘要，不刷屏
+
+        # 摘要
+        print(f'[Preflight] Summary: {pf_result.blocking_count} blocking, '
+              f'{pf_result.warning_count} warnings, {pf_result.info_count} info')
+
+        exit_code = pf_result.to_dict()["exit_code"]
+
+        if pf_result.blocking_count > 0:
+            print(f'[Preflight] FAILED with {pf_result.blocking_count} blocking issue(s). '
+                  f'Exit code: {exit_code}')
+            print('[Preflight] Fix the blocking issues above before starting Fooocus.')
+            print('[Preflight] You can also run: python -m modules.tools all --json  for full details')
+        elif pf_result.warning_count > 0:
+            print(f'[Preflight] Passed with {pf_result.warning_count} warning(s). '
+                  f'Exit code: {exit_code}')
+            if strict:
+                print('[Preflight] Strict mode: warnings promoted to blocking. Startup aborted.')
+            else:
+                print('[Preflight] Startup will continue.')
         else:
-            print('[Preflight] All core dependencies appear installed.')
+            print(f'[Preflight] All checks passed. Exit code: {exit_code}')
 
-        cfg = load_and_validate_config(project_root=project_root)
-        cfg_status = 'loaded' if cfg['config']['loaded'] else 'not found (will use defaults)'
-        print(f"[Preflight] Config file: {cfg_status}")
-        if cfg['config']['loaded']:
-            schema_issues = cfg['schema']['issues_count'] if cfg['schema'].get('available') else 'N/A'
-            print(f"[Preflight] Schema validation issues: {schema_issues}")
-
-        missing_dirs = 0
-        for key, info in cfg.get('paths', {}).get('by_key', {}).items():
-            missing_dirs += len(info.get('missing', []))
-        if missing_dirs > 0:
-            print(f"[Preflight] NOTE: {missing_dirs} model directory path(s) do not exist yet (will be created as needed).")
-
-        print('[Preflight] Preflight checks complete.')
         print()
+        return exit_code
+
     except Exception as e:
-        # preflight 失败不应该阻止启动，只打印警告
-        print(f'[Preflight] WARNING: Preflight checks encountered an error: {e}')
+        # preflight 本身异常不应该阻止启动（除非 strict 模式）
+        print(f'[Preflight] WARNING: Preflight checks encountered an internal error: {e}')
         print('[Preflight]          Startup will continue normally.')
+        import traceback
+        traceback.print_exc()
         print()
+        return 1
 
 
 def ini_args():
@@ -121,9 +160,15 @@ def ini_args():
 
 
 prepare_environment()
-run_preflight_checks(root)
 build_launcher()
 args = ini_args()
+
+# 启动前预检：blocking 级错误直接退出
+preflight_strict = bool(getattr(args, 'preflight_strict', False)) or os.environ.get('FOOOCUS_PREFLIGHT_STRICT', '0') == '1'
+preflight_exit_code = run_preflight_checks(root, strict=preflight_strict)
+if preflight_exit_code >= 2:
+    print(f'[Preflight] Aborting startup due to blocking preflight issues (exit code {preflight_exit_code}).')
+    sys.exit(preflight_exit_code)
 
 if args.gpu_device_id is not None:
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu_device_id)
