@@ -747,3 +747,389 @@ class ManifestResolver:
             raise ManifestResolutionError(block_msg, item=item, url=url)
 
         return target_path
+
+
+@dataclass
+class ActiveResourcePlan:
+    manifest: Manifest
+    active_resources: Dict[str, ResourceItem] = field(default_factory=dict)
+    base_resources: Dict[str, ResourceItem] = field(default_factory=dict)
+    optional_feature_resources: Dict[str, List[ResourceItem]] = field(default_factory=dict)
+
+    @property
+    def all_active(self) -> Dict[str, ResourceItem]:
+        result = dict(self.base_resources)
+        result.update(self.active_resources)
+        for feature_resources in self.optional_feature_resources.values():
+            for item in feature_resources:
+                result[item.name] = item
+        return result
+
+    def mark_required(self, names: List[str]):
+        for name in names:
+            if name in self.manifest.resources:
+                self.manifest.resources[name].required = True
+            elif name in self.active_resources:
+                self.active_resources[name].required = True
+
+    def get_missing_required(self, models_root: str) -> List[ResourceItem]:
+        missing = []
+        for item in self.all_active.values():
+            if not item.required:
+                continue
+            path = resolve_resource_path(item, models_root)
+            if not os.path.exists(path):
+                missing.append(item)
+        return missing
+
+
+def build_active_resource_plan(
+    manifest: Manifest,
+    base_model: str = "",
+    refiner_model: str = "",
+    loras: Optional[List[Tuple[str, float]]] = None,
+    performance: str = "Speed",
+    inpaint_engine: Optional[str] = None,
+    styles: Optional[List[str]] = None,
+    enable_upscale: bool = False,
+    enable_controlnet: bool = False,
+    enable_ip_adapter: bool = False,
+    enable_sam: bool = False,
+    sam_model: str = "vit_b",
+    enable_safety_checker: bool = False,
+) -> ActiveResourcePlan:
+    plan = ActiveResourcePlan(manifest=manifest)
+    models_root = ""
+
+    def _find_in_manifest(**kwargs) -> Optional[ResourceItem]:
+        if 'filename' in kwargs:
+            fn = kwargs['filename']
+            for item in manifest.resources.values():
+                if item.get_filename() == fn:
+                    return item
+        if 'name' in kwargs:
+            return manifest.resources.get(kwargs['name'])
+        if 'category' in kwargs:
+            cat = kwargs['category']
+            items = manifest.get_resources_by_category(cat)
+            if items:
+                return items[0]
+        return None
+
+    def _add_base(name: str, item: ResourceItem):
+        plan.base_resources[name] = item
+
+    def _add_active(name: str, item: ResourceItem):
+        plan.active_resources[name] = item
+
+    def _add_feature(feature: str, item: ResourceItem):
+        if feature not in plan.optional_feature_resources:
+            plan.optional_feature_resources[feature] = []
+        plan.optional_feature_resources[feature].append(item)
+
+    def _ensure_manifest_item(name: str, category: ResourceCategory, url: str = "", filename: Optional[str] = None, description: str = "") -> ResourceItem:
+        if name in manifest.resources:
+            return manifest.resources[name]
+        item = ResourceItem(
+            name=name,
+            category=category,
+            url=url,
+            required=False,
+            description=description,
+            file_name=filename,
+        )
+        manifest.add_resource(item)
+        return item
+
+    if base_model and base_model != "None":
+        item = _find_in_manifest(filename=base_model)
+        if item is None:
+            item = _ensure_manifest_item(
+                name=f"checkpoint:{base_model}",
+                category=ResourceCategory.CHECKPOINTS,
+                filename=base_model,
+                description=f"Base checkpoint: {base_model}",
+            )
+        item.required = True
+        _add_base("base_model", item)
+
+    if refiner_model and refiner_model != "None":
+        item = _find_in_manifest(filename=refiner_model)
+        if item is None:
+            item = _ensure_manifest_item(
+                name=f"refiner:{refiner_model}",
+                category=ResourceCategory.CHECKPOINTS,
+                filename=refiner_model,
+                description=f"Refiner checkpoint: {refiner_model}",
+            )
+        item.required = True
+        _add_base("refiner_model", item)
+
+    if loras:
+        for i, (lora_name, weight) in enumerate(loras):
+            if not lora_name or lora_name == "None":
+                continue
+            item = _find_in_manifest(filename=lora_name)
+            if item is None:
+                item = _ensure_manifest_item(
+                    name=f"lora:{lora_name}",
+                    category=ResourceCategory.LORAS,
+                    filename=lora_name,
+                    description=f"LoRA: {lora_name} (weight={weight})",
+                )
+            item.required = True
+            _add_active(f"lora_{i}_{lora_name}", item)
+
+    perf_lora_filename = None
+    perf_name = None
+    try:
+        from modules.flags import PerformanceLoRA
+        perf_map = {
+            'Quality': None,
+            'Speed': None,
+            'Extreme Speed': PerformanceLoRA.EXTREME_SPEED.value,
+            'Lightning': PerformanceLoRA.LIGHTNING.value,
+            'Hyper-SD': PerformanceLoRA.HYPER_SD.value,
+        }
+        perf_lora_filename = perf_map.get(performance)
+        if performance in perf_map and perf_lora_filename:
+            perf_name = performance.lower().replace(' ', '_').replace('-', '_')
+    except Exception:
+        pass
+
+    if perf_lora_filename:
+        item = _find_in_manifest(filename=perf_lora_filename)
+        if item is None:
+            item = _ensure_manifest_item(
+                name=f"performance_lora:{perf_name}",
+                category=ResourceCategory.LORAS,
+                filename=perf_lora_filename,
+                description=f"Performance LoRA: {performance}",
+            )
+        item.required = True
+        _add_active(f"performance_lora", item)
+
+    vae_approx_items = manifest.get_resources_by_category(ResourceCategory.VAE_APPROX)
+    for item in vae_approx_items:
+        item.required = True
+        _add_base(f"vae_approx:{item.name}", item)
+
+    expansion_item = _find_in_manifest(name="fooocus_expansion")
+    if expansion_item:
+        has_expansion_style = False
+        if styles:
+            for s in styles:
+                if "Fooocus" in s or "V2" in s or "fooocus" in s.lower():
+                    has_expansion_style = True
+                    break
+        expansion_item.required = has_expansion_style
+        _add_base("fooocus_expansion", expansion_item)
+
+    if inpaint_engine:
+        head_item = _find_in_manifest(name="fooocus_inpaint_head")
+        if head_item:
+            head_item.required = True
+            _add_feature("inpaint", head_item)
+
+        patch_name = f"fooocus_inpaint_patch_{inpaint_engine}"
+        patch_item = _find_in_manifest(name=patch_name)
+        if patch_item:
+            patch_item.required = True
+            _add_feature("inpaint", patch_item)
+
+    if enable_controlnet:
+        canny_item = _find_in_manifest(name="control_lora_canny_rank128")
+        if canny_item:
+            canny_item.required = True
+            _add_feature("controlnet", canny_item)
+        cpds_item = _find_in_manifest(name="fooocus_xl_cpds_128")
+        if cpds_item:
+            cpds_item.required = True
+            _add_feature("controlnet", cpds_item)
+
+    if enable_ip_adapter:
+        clip_vision_item = _find_in_manifest(name="clip_vision_vit_h")
+        if clip_vision_item:
+            clip_vision_item.required = True
+            _add_feature("ip_adapter", clip_vision_item)
+        ip_neg_item = _find_in_manifest(name="fooocus_ip_negative")
+        if ip_neg_item:
+            ip_neg_item.required = True
+            _add_feature("ip_adapter", ip_neg_item)
+        ip_plus_item = _find_in_manifest(name="ip_adapter_plus_sdxl_vit_h")
+        if ip_plus_item:
+            ip_plus_item.required = True
+            _add_feature("ip_adapter", ip_plus_item)
+
+    if enable_sam:
+        sam_name_map = {
+            "vit_b": "sam_vit_b",
+            "vit_l": "sam_vit_l",
+            "vit_h": "sam_vit_h",
+        }
+        sam_key = sam_name_map.get(sam_model, "sam_vit_b")
+        sam_item = _find_in_manifest(name=sam_key)
+        if sam_item:
+            sam_item.required = True
+            _add_feature("sam", sam_item)
+
+    if enable_safety_checker:
+        sc_item = _find_in_manifest(name="safety_checker")
+        if sc_item:
+            sc_item.required = True
+            _add_feature("safety_checker", sc_item)
+
+    if enable_upscale:
+        up_item = _find_in_manifest(name="fooocus_upscaler")
+        if up_item:
+            up_item.required = True
+            _add_feature("upscale", up_item)
+
+    return plan
+
+
+def check_active_resources(
+    plan: ActiveResourcePlan,
+    models_root: str,
+    check_hash: bool = False,
+    check_optional_features: bool = False,
+) -> CheckResult:
+    result = CheckResult()
+    ctx = get_current_context()
+
+    items_to_check = list(plan.base_resources.values()) + list(plan.active_resources.values())
+    if check_optional_features:
+        for feature_items in plan.optional_feature_resources.values():
+            items_to_check.extend(feature_items)
+
+    if not items_to_check:
+        print("[Manifest] No active resources to check.")
+        return result
+
+    log_info(
+        DiagnosticStage.RESOURCE_SCAN,
+        f"开始校验活动资源计划 (共 {len(items_to_check)} 个)",
+        ctx=ctx,
+        extra_data={"resources_total": len(items_to_check)},
+    )
+
+    for item in items_to_check:
+        file_path = resolve_resource_path(item, models_root)
+
+        if not os.path.exists(file_path):
+            if item.required:
+                result.missing_required.append(item)
+                log_warning(
+                    DiagnosticStage.RESOURCE_SCAN,
+                    f"必需资源缺失: {item.name}",
+                    extra_data={
+                        "resource_name": item.name,
+                        "category": item.category.value,
+                        "expected_path": file_path,
+                        "download_url": item.url,
+                    },
+                )
+            else:
+                result.missing_optional.append(item)
+            continue
+
+        if check_hash and item.sha256:
+            try:
+                actual_hash = sha256_file(file_path)
+                if actual_hash.lower() != item.sha256.lower():
+                    result.hash_mismatch.append((item, item.sha256, actual_hash))
+                    log_warning(
+                        DiagnosticStage.RESOURCE_SCAN,
+                        f"活动资源 hash 不匹配: {item.name}",
+                        extra_data={
+                            "resource_name": item.name,
+                            "expected_sha256": item.sha256,
+                            "actual_sha256": actual_hash,
+                            "file_path": file_path,
+                        },
+                    )
+                    continue
+            except Exception as e:
+                result.errors.append(f"Failed to hash {file_path}: {e}")
+
+        result.present.append(item)
+
+    log_info(
+        DiagnosticStage.RESOURCE_SCAN,
+        f"活动资源校验完成: {result.summary()}",
+        ctx=ctx,
+        extra_data={
+            "present_count": len(result.present),
+            "missing_required_count": len(result.missing_required),
+            "missing_optional_count": len(result.missing_optional),
+            "hash_mismatch_count": len(result.hash_mismatch),
+        },
+    )
+
+    return result
+
+
+def print_active_resource_report(
+    result: CheckResult,
+    plan: ActiveResourcePlan,
+    models_root: str,
+) -> bool:
+    print()
+    print("=" * 70)
+    print("  Active Resource Plan Check")
+    print("=" * 70)
+
+    print(f"\n  Base resources ({len(plan.base_resources)}):")
+    for name, item in plan.base_resources.items():
+        path = resolve_resource_path(item, models_root)
+        status = "OK" if os.path.exists(path) else "MISSING"
+        marker = "[OK]" if status == "OK" else "[!!]" if item.required else "[--]"
+        print(f"    {marker} {name}: {item.get_filename()}")
+
+    if plan.active_resources:
+        print(f"\n  Active resources ({len(plan.active_resources)}):")
+        for name, item in plan.active_resources.items():
+            path = resolve_resource_path(item, models_root)
+            status = "OK" if os.path.exists(path) else "MISSING"
+            marker = "[OK]" if status == "OK" else "[!!]" if item.required else "[--]"
+            print(f"    {marker} {name}: {item.get_filename()}")
+
+    if plan.optional_feature_resources:
+        print(f"\n  Optional feature resources:")
+        for feature, items in plan.optional_feature_resources.items():
+            print(f"    [{feature}] ({len(items)}):")
+            for item in items:
+                path = resolve_resource_path(item, models_root)
+                status = "OK" if os.path.exists(path) else "MISSING"
+                marker = "[OK]" if status == "OK" else "[!!]" if item.required else "[--]"
+                print(f"        {marker} {item.name}")
+
+    if result.missing_required:
+        print(f"\n  Missing Required ({len(result.missing_required)}):")
+        for item in result.missing_required:
+            path = resolve_resource_path(item, models_root)
+            print(f"    [!!] {item.name} ({item.category.value})")
+            if item.description:
+                print(f"         {item.description}")
+            print(f"         Expected: {path}")
+            if item.url:
+                print(f"         Download: {item.url}")
+
+    if result.hash_mismatch:
+        print(f"\n  Hash Mismatch ({len(result.hash_mismatch)}):")
+        for item, expected, actual in result.hash_mismatch:
+            print(f"    [!!] {item.name}")
+            print(f"         Expected: {expected}")
+            print(f"         Actual:   {actual}")
+
+    print()
+    print("=" * 70)
+
+    if result.is_ok:
+        print("  Status: PASSED - All active required resources are present.")
+        print("=" * 70)
+        return True
+    else:
+        print("  Status: FAILED - Missing active required resources!")
+        print("=" * 70)
+        return False
