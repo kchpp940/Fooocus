@@ -1,7 +1,7 @@
 import json
 import re
 from abc import ABC, abstractmethod
-from contextlib import nullcontext
+
 from pathlib import Path
 
 import gradio as gr
@@ -609,8 +609,8 @@ def get_metadata_parser(metadata_scheme: MetadataScheme) -> MetadataParser:
             raise NotImplementedError
 
 
-def read_info_from_image(file, job: DiagnosticJob = None) -> tuple[str | None, MetadataScheme | None]:
-    _scope = job.scope(DiagnosticStage.METADATA_PARSE, DiagnosticErrorCategory.METADATA_PARSE_FAILED) if job is not None else nullcontext()
+def read_info_from_image(file, job: DiagnosticJob) -> tuple[str | None, MetadataScheme | None]:
+    _scope = job.scope(DiagnosticStage.METADATA_PARSE, DiagnosticErrorCategory.METADATA_PARSE_FAILED)
     with _scope:
         try:
             items = (file.info or {}).copy()
@@ -648,28 +648,29 @@ def read_info_from_image(file, job: DiagnosticJob = None) -> tuple[str | None, M
                     scheme_determined = True
 
             if not scheme_determined and parameters is None:
-                if job is not None:
-                    job.record_event(LogLevel.WARNING, DiagnosticStage.METADATA_PARSE, "图像中未找到可识别的元数据")
+                job.record_event(LogLevel.WARNING, DiagnosticStage.METADATA_PARSE, "图像中未找到可识别的元数据")
             elif scheme_determined:
-                if job is not None:
-                    job.record_event(
-                        LogLevel.INFO, DiagnosticStage.METADATA_PARSE,
-                        f"元数据解析成功，格式: {metadata_scheme.value if metadata_scheme else 'unknown'}",
-                        extra_data={
-                            "scheme": metadata_scheme.value if metadata_scheme else None,
-                            "has_parameters": parameters is not None,
-                        },
-                    )
+                job.record_event(
+                    LogLevel.INFO, DiagnosticStage.METADATA_PARSE,
+                    f"元数据解析成功，格式: {metadata_scheme.value if metadata_scheme else 'unknown'}",
+                    extra_data={
+                        "scheme": metadata_scheme.value if metadata_scheme else None,
+                        "has_parameters": parameters is not None,
+                    },
+                )
 
             return parameters, metadata_scheme
         except Exception as e:
-            if job is not None:
-                job.record_error(
-                    DiagnosticStage.METADATA_PARSE, "图像元数据读取失败",
-                    category=DiagnosticErrorCategory.METADATA_PARSE_FAILED,
-                    exception=e,
-                )
+            job.record_error(
+                DiagnosticStage.METADATA_PARSE, "图像元数据读取失败",
+                category=DiagnosticErrorCategory.METADATA_PARSE_FAILED,
+                exception=e,
+            )
             return None, None
+
+
+def read_info_from_image_bootstrap(file) -> tuple[str | None, MetadataScheme | None]:
+    return read_info_from_image(file, DiagnosticJob())
 
 
 def get_exif(metadata: str | None, metadata_scheme: str):

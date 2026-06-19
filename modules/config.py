@@ -2,7 +2,6 @@ import os
 import json
 import math
 import numbers
-import contextlib
 
 import args_manager
 import tempfile
@@ -1023,7 +1022,7 @@ vae_filenames = []
 wildcard_filenames = []
 
 
-def get_model_filenames(folder_paths, extensions=None, name_filter=None, job: DiagnosticJob = None):
+def get_model_filenames(folder_paths, extensions=None, name_filter=None, *, job: DiagnosticJob):
     if extensions is None:
         extensions = ['.pth', '.ckpt', '.bin', '.safetensors', '.fooocus.patch']
     files = []
@@ -1034,49 +1033,54 @@ def get_model_filenames(folder_paths, extensions=None, name_filter=None, job: Di
         try:
             files += get_files_from_folder(folder, extensions, name_filter)
         except Exception as e:
-            if job:
-                job.record_event(
-                    LogLevel.WARNING,
-                    DiagnosticStage.RESOURCE_SCAN,
-                    f"扫描模型目录失败: {os.path.basename(folder) if folder else folder}",
-                    extra_data={"folder_path": folder, "error": str(e)},
-                )
+            job.record_event(
+                LogLevel.WARNING,
+                DiagnosticStage.RESOURCE_SCAN,
+                f"扫描模型目录失败: {os.path.basename(folder) if folder else folder}",
+                extra_data={"folder_path": folder, "error": str(e)},
+            )
             print(f"Warning: failed to scan folder {folder}: {str(e)}")
 
     return files
 
 
-def update_files(job: DiagnosticJob = None):
+def update_files(job: DiagnosticJob):
     global model_filenames, lora_filenames, vae_filenames, wildcard_filenames, available_presets
     try:
-        with job.scope(DiagnosticStage.RESOURCE_SCAN) if job else contextlib.nullcontext():
+        with job.scope(DiagnosticStage.RESOURCE_SCAN):
             model_filenames = get_model_filenames(paths_checkpoints, job=job)
             lora_filenames = get_model_filenames(paths_loras, job=job)
             vae_filenames = get_model_filenames(path_vae, job=job)
             wildcard_filenames = get_files_from_folder(path_wildcards, ['.txt'])
             available_presets = get_presets()
-            if job:
-                job.record_event(
-                    LogLevel.INFO,
-                    DiagnosticStage.RESOURCE_SCAN,
-                    f"资源扫描完成: {len(model_filenames)} 个模型, {len(lora_filenames)} 个LoRA, {len(vae_filenames)} 个VAE",
-                    extra_data={
-                        "checkpoints_count": len(model_filenames),
-                        "loras_count": len(lora_filenames),
-                        "vaes_count": len(vae_filenames),
-                        "wildcards_count": len(wildcard_filenames),
-                    },
-                )
-    except Exception as e:
-        if job:
-            job.record_error(
+            job.record_event(
+                LogLevel.INFO,
                 DiagnosticStage.RESOURCE_SCAN,
-                "资源扫描失败",
-                category=DiagnosticErrorCategory.RESOURCE_SCAN_FAILED,
-                exception=e,
+                f"资源扫描完成: {len(model_filenames)} 个模型, {len(lora_filenames)} 个LoRA, {len(vae_filenames)} 个VAE",
+                extra_data={
+                    "checkpoints_count": len(model_filenames),
+                    "loras_count": len(lora_filenames),
+                    "vaes_count": len(vae_filenames),
+                    "wildcards_count": len(wildcard_filenames),
+                },
             )
+    except Exception as e:
+        job.record_error(
+            DiagnosticStage.RESOURCE_SCAN,
+            "资源扫描失败",
+            category=DiagnosticErrorCategory.RESOURCE_SCAN_FAILED,
+            exception=e,
+        )
         raise
     return
+
+
+def get_model_filenames_bootstrap(folder_paths, extensions=None, name_filter=None):
+    return get_model_filenames(folder_paths, extensions, name_filter, job=DiagnosticJob())
+
+
+def update_files_bootstrap():
+    return update_files(DiagnosticJob())
 
 
 def downloading_inpaint_models(v):
@@ -1254,3 +1258,6 @@ def downloading_sam_vit_h():
         file_name='sam_vit_h_4b8939.pth'
     )
     return os.path.join(path_sam, 'sam_vit_h_4b8939.pth')
+
+
+update_files_bootstrap()

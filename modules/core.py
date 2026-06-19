@@ -28,12 +28,6 @@ from modules.config import path_embeddings
 from ldm_patched.contrib.external_model_advanced import ModelSamplingDiscrete, ModelSamplingContinuousEDM
 
 
-class _null_scope:
-    def __enter__(self):
-        return self
-    def __exit__(self, *args):
-        return False
-
 opEmptyLatentImage = EmptyLatentImage()
 opVAEDecode = VAEDecode()
 opVAEEncode = VAEEncode()
@@ -70,7 +64,7 @@ class StableDiffusionModel:
 
     @torch.no_grad()
     @torch.inference_mode()
-    def refresh_loras(self, loras, job: DiagnosticJob = None):
+    def refresh_loras(self, loras, job: DiagnosticJob):
         assert isinstance(loras, list)
 
         if self.visited_loras == str(loras):
@@ -102,7 +96,7 @@ class StableDiffusionModel:
 
             loras_to_load.append((lora_filename, weight))
 
-        if loras_not_found and job:
+        if loras_not_found:
             job.record_event(
                 LogLevel.WARNING,
                 DiagnosticStage.LORA_LOAD,
@@ -114,35 +108,33 @@ class StableDiffusionModel:
         self.clip_with_lora = self.clip.clone() if self.clip is not None else None
 
         for lora_filename, weight in loras_to_load:
-            with job.scope(DiagnosticStage.LORA_LOAD, DiagnosticErrorCategory.LORA_LOAD_FAILED) if job else _null_scope():
+            with job.scope(DiagnosticStage.LORA_LOAD, DiagnosticErrorCategory.LORA_LOAD_FAILED):
                 lora_unmatch = ldm_patched.modules.utils.load_torch_file(lora_filename, safe_load=False)
                 lora_unet, lora_unmatch = match_lora(lora_unmatch, self.lora_key_map_unet)
                 lora_clip, lora_unmatch = match_lora(lora_unmatch, self.lora_key_map_clip)
 
                 if len(lora_unmatch) > 12:
-                    if job:
-                        job.record_event(
-                            LogLevel.WARNING,
-                            DiagnosticStage.LORA_LOAD,
-                            f"LoRA 模型不匹配，跳过: {os.path.basename(lora_filename)}",
-                            extra_data={
-                                "lora_file": lora_filename,
-                                "unmatched_keys_count": len(lora_unmatch),
-                            },
-                        )
+                    job.record_event(
+                        LogLevel.WARNING,
+                        DiagnosticStage.LORA_LOAD,
+                        f"LoRA 模型不匹配，跳过: {os.path.basename(lora_filename)}",
+                        extra_data={
+                            "lora_file": lora_filename,
+                            "unmatched_keys_count": len(lora_unmatch),
+                        },
+                    )
                     continue
 
                 if len(lora_unmatch) > 0:
-                    if job:
-                        job.record_event(
-                            LogLevel.WARNING,
-                            DiagnosticStage.LORA_LOAD,
-                            f"LoRA 部分键未匹配: {os.path.basename(lora_filename)}",
-                            extra_data={
-                                "lora_file": lora_filename,
-                                "unmatched_keys": list(lora_unmatch.keys())[:10],
-                            },
-                        )
+                    job.record_event(
+                        LogLevel.WARNING,
+                        DiagnosticStage.LORA_LOAD,
+                        f"LoRA 部分键未匹配: {os.path.basename(lora_filename)}",
+                        extra_data={
+                            "lora_file": lora_filename,
+                            "unmatched_keys": list(lora_unmatch.keys())[:10],
+                        },
+                    )
                     print(f'Loaded LoRA [{lora_filename}] for model [{self.filename}] '
                           f'with unmatched keys {list(lora_unmatch.keys())}')
 
@@ -167,19 +159,23 @@ class StableDiffusionModel:
                         if item not in loaded_keys:
                             print("CLIP LoRA key skipped: ", item)
 
-                if job:
-                    job.add_model_loaded(lora_filename)
-                    job.record_event(
-                        LogLevel.INFO,
-                        DiagnosticStage.LORA_LOAD,
-                        f"LoRA 加载完成: {os.path.basename(lora_filename)}",
-                        extra_data={
-                            "lora_file": lora_filename,
-                            "weight": weight,
-                            "unet_keys_loaded": unet_keys_loaded,
-                            "clip_keys_loaded": clip_keys_loaded,
-                        },
-                    )
+                job.add_model_loaded(lora_filename)
+                job.record_event(
+                    LogLevel.INFO,
+                    DiagnosticStage.LORA_LOAD,
+                    f"LoRA 加载完成: {os.path.basename(lora_filename)}",
+                    extra_data={
+                        "lora_file": lora_filename,
+                        "weight": weight,
+                        "unet_keys_loaded": unet_keys_loaded,
+                        "clip_keys_loaded": clip_keys_loaded,
+                    },
+                )
+
+    @torch.no_grad()
+    @torch.inference_mode()
+    def refresh_loras_bootstrap(self, loras):
+        return self.refresh_loras(loras, DiagnosticJob())
 
 
 @torch.no_grad()

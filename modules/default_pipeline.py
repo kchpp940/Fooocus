@@ -55,6 +55,10 @@ def refresh_controlnets(model_paths, job: DiagnosticJob):
     return
 
 
+def refresh_controlnets_bootstrap(model_paths):
+    return refresh_controlnets(model_paths, DiagnosticJob())
+
+
 @torch.no_grad()
 @torch.inference_mode()
 def assert_model_integrity(job: DiagnosticJob):
@@ -72,6 +76,10 @@ def assert_model_integrity(job: DiagnosticJob):
         raise NotImplementedError(error_message)
 
     return True
+
+
+def assert_model_integrity_bootstrap():
+    return assert_model_integrity(DiagnosticJob())
 
 
 @torch.no_grad()
@@ -120,6 +128,10 @@ def refresh_base_model(name, job: DiagnosticJob, vae_name=None):
     print(f'Base model loaded: {model_base.filename}')
     print(f'VAE loaded: {model_base.vae_filename}')
     return
+
+
+def refresh_base_model_bootstrap(name, vae_name=None):
+    return refresh_base_model(name, DiagnosticJob(), vae_name)
 
 
 @torch.no_grad()
@@ -171,6 +183,10 @@ def refresh_refiner_model(name, job: DiagnosticJob):
     return
 
 
+def refresh_refiner_model_bootstrap(name):
+    return refresh_refiner_model(name, DiagnosticJob())
+
+
 @torch.no_grad()
 @torch.inference_mode()
 def synthesize_refiner_model():
@@ -193,7 +209,7 @@ def synthesize_refiner_model():
 
 @torch.no_grad()
 @torch.inference_mode()
-def refresh_loras(loras, base_model_additional_loras=None, job: DiagnosticJob = None):
+def refresh_loras(loras, *, base_model_additional_loras=None, job: DiagnosticJob):
     global model_base, model_refiner
 
     if not isinstance(base_model_additional_loras, list):
@@ -203,6 +219,10 @@ def refresh_loras(loras, base_model_additional_loras=None, job: DiagnosticJob = 
     model_refiner.refresh_loras(loras, job=job)
 
     return
+
+
+def refresh_loras_bootstrap(loras, base_model_additional_loras=None):
+    return refresh_loras(loras, base_model_additional_loras=base_model_additional_loras, job=DiagnosticJob())
 
 
 @torch.no_grad()
@@ -294,11 +314,8 @@ def prepare_text_encoder(async_call=True):
 @torch.no_grad()
 @torch.inference_mode()
 def refresh_everything(refiner_model_name, base_model_name, loras,
-                       base_model_additional_loras=None, use_synthetic_refiner=False, vae_name=None, job: DiagnosticJob = None):
+                       *, base_model_additional_loras=None, use_synthetic_refiner=False, vae_name=None, job: DiagnosticJob):
     global final_unet, final_clip, final_vae, final_refiner_unet, final_refiner_vae, final_expansion
-
-    if job is None:
-        job = DiagnosticJob()
 
     final_unet = None
     final_clip = None
@@ -332,7 +349,16 @@ def refresh_everything(refiner_model_name, base_model_name, loras,
     return
 
 
-refresh_everything(
+def refresh_everything_bootstrap(refiner_model_name, base_model_name, loras,
+                                 base_model_additional_loras=None, use_synthetic_refiner=False, vae_name=None):
+    return refresh_everything(refiner_model_name, base_model_name, loras,
+                              base_model_additional_loras=base_model_additional_loras,
+                              use_synthetic_refiner=use_synthetic_refiner,
+                              vae_name=vae_name,
+                              job=DiagnosticJob())
+
+
+refresh_everything_bootstrap(
     refiner_model_name=modules.config.default_refiner_model_name,
     base_model_name=modules.config.default_base_model_name,
     loras=get_enabled_loras(modules.config.default_loras),

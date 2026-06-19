@@ -14,13 +14,6 @@ from modules.diagnostics import (
 inpaint_head_model = None
 
 
-class _null_scope:
-    def __enter__(self):
-        return self
-    def __exit__(self, *args):
-        return False
-
-
 class InpaintHead(torch.nn.Module):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -159,20 +152,19 @@ def fooocus_fill(image, mask):
 
 
 class InpaintWorker:
-    def __init__(self, image, mask, use_fill=True, k=0.618, job: DiagnosticJob = None):
-        with job.scope(DiagnosticStage.INPAINT_PREPROCESS, DiagnosticErrorCategory.INPAINT_PREPROCESS_FAILED) if job else _null_scope():
-            if job:
-                job.record_event(
-                    LogLevel.INFO,
-                    DiagnosticStage.INPAINT_PREPROCESS,
-                    "开始图像修复预处理",
-                    extra_data={
-                        "image_shape": image.shape if hasattr(image, 'shape') else None,
-                        "mask_shape": mask.shape if hasattr(mask, 'shape') else None,
-                        "use_fill": use_fill,
-                        "k": k,
-                    },
-                )
+    def __init__(self, image, mask, use_fill=True, k=0.618, *, job: DiagnosticJob):
+        with job.scope(DiagnosticStage.INPAINT_PREPROCESS, DiagnosticErrorCategory.INPAINT_PREPROCESS_FAILED):
+            job.record_event(
+                LogLevel.INFO,
+                DiagnosticStage.INPAINT_PREPROCESS,
+                "开始图像修复预处理",
+                extra_data={
+                    "image_shape": image.shape if hasattr(image, 'shape') else None,
+                    "mask_shape": mask.shape if hasattr(mask, 'shape') else None,
+                    "use_fill": use_fill,
+                    "k": k,
+                },
+            )
 
             a, b, c, d = compute_initial_abcd(mask > 0)
             a, b, c, d = solve_abcd(mask, a, b, c, d, k=k)
@@ -209,16 +201,15 @@ class InpaintWorker:
             self.latent_mask = None
             self.inpaint_head_feature = None
 
-            if job:
-                job.record_event(
-                    LogLevel.INFO,
-                    DiagnosticStage.INPAINT_PREPROCESS,
-                    f"图像修复预处理完成，感兴趣区域: {self.interested_area}",
-                    extra_data={
-                        "interested_area": self.interested_area,
-                        "output_shape": self.interested_image.shape,
-                    },
-                )
+            job.record_event(
+                LogLevel.INFO,
+                DiagnosticStage.INPAINT_PREPROCESS,
+                f"图像修复预处理完成，感兴趣区域: {self.interested_area}",
+                extra_data={
+                    "interested_area": self.interested_area,
+                    "output_shape": self.interested_image.shape,
+                },
+            )
         return
 
     def load_latent(self, latent_fill, latent_mask, latent_swap=None):
@@ -227,29 +218,27 @@ class InpaintWorker:
         self.latent_after_swap = latent_swap
         return
 
-    def patch(self, inpaint_head_model_path, inpaint_latent, inpaint_latent_mask, model, job: DiagnosticJob = None):
+    def patch(self, inpaint_head_model_path, inpaint_latent, inpaint_latent_mask, model, *, job: DiagnosticJob):
         global inpaint_head_model
 
-        with job.scope(DiagnosticStage.MODEL_LOAD, DiagnosticErrorCategory.MODEL_LOAD_FAILED) if job else _null_scope():
+        with job.scope(DiagnosticStage.MODEL_LOAD, DiagnosticErrorCategory.MODEL_LOAD_FAILED):
             if inpaint_head_model is None:
-                if job:
-                    job.record_event(
-                        LogLevel.INFO,
-                        DiagnosticStage.MODEL_LOAD,
-                        "开始加载 Inpaint Head 模型",
-                        extra_data={"model_path": inpaint_head_model_path},
-                    )
+                job.record_event(
+                    LogLevel.INFO,
+                    DiagnosticStage.MODEL_LOAD,
+                    "开始加载 Inpaint Head 模型",
+                    extra_data={"model_path": inpaint_head_model_path},
+                )
                 inpaint_head_model = InpaintHead()
                 sd = torch.load(inpaint_head_model_path, map_location='cpu', weights_only=True)
                 inpaint_head_model.load_state_dict(sd)
-                if job:
-                    job.add_model_loaded(inpaint_head_model_path)
-                    job.record_event(
-                        LogLevel.INFO,
-                        DiagnosticStage.MODEL_LOAD,
-                        "Inpaint Head 模型加载完成",
-                        extra_data={"model_path": inpaint_head_model_path},
-                    )
+                job.add_model_loaded(inpaint_head_model_path)
+                job.record_event(
+                    LogLevel.INFO,
+                    DiagnosticStage.MODEL_LOAD,
+                    "Inpaint Head 模型加载完成",
+                    extra_data={"model_path": inpaint_head_model_path},
+                )
 
             feed = torch.cat([
                 inpaint_latent_mask,

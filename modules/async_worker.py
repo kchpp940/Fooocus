@@ -13,11 +13,14 @@ patch_all()
 
 
 class AsyncTask:
-    def __init__(self, args):
+    def __init__(self, args, job: DiagnosticJob):
         from modules.flags import Performance, MetadataScheme, ip_list, disabled
         from modules.util import get_enabled_loras
         from modules.config import default_max_lora_number
         import args_manager
+
+        if not isinstance(job, DiagnosticJob):
+            raise TypeError("AsyncTask requires a DiagnosticJob instance")
 
         self.args = args.copy()
         self.yields = []
@@ -25,7 +28,7 @@ class AsyncTask:
         self.last_stop = False
         self.processing = False
 
-        self.job: DiagnosticJob | None = None
+        self.job: DiagnosticJob = job
 
         self.performance_loras = []
 
@@ -1025,7 +1028,7 @@ def worker():
                     progressbar(async_task, current_progress, 'Checking for NSFW content ...')
                     img = default_censor(img)
                 progressbar(async_task, current_progress, f'Saving image {current_task_id + 1}/{total_count} to system ...')
-                uov_image_path = log(img, d, output_format=async_task.output_format, persist_image=persist_image)
+                uov_image_path = log(img, d, output_format=async_task.output_format, persist_image=persist_image, job=async_task.job)
                 yield_result(async_task, uov_image_path, current_progress, async_task.black_out_nsfw, False,
                              do_not_show_finished_images=not show_intermediate_results or async_task.disable_intermediate_results)
                 return current_progress, img, prompt, negative_prompt
@@ -1109,10 +1112,8 @@ def worker():
         preparation_start_time = time.perf_counter()
         async_task.processing = True
 
-        job = DiagnosticJob()
-        async_task.job = job
-
-        with job.scope(DiagnosticStage.REQUEST_INIT):
+        job = async_task.job
+        with job.scope(DiagnosticStage.REQUEST_INIT, DiagnosticErrorCategory.UNKNOWN_ERROR):
             job.record_event(
                 LogLevel.INFO,
                 DiagnosticStage.REQUEST_INIT,
@@ -1250,7 +1251,7 @@ def worker():
                     progressbar(async_task, 100, 'Checking for NSFW content ...')
                     async_task.uov_input_image = default_censor(async_task.uov_input_image)
                 progressbar(async_task, 100, 'Saving image to system ...')
-                uov_input_image_path = log(async_task.uov_input_image, d, output_format=async_task.output_format)
+                uov_input_image_path = log(async_task.uov_input_image, d, output_format=async_task.output_format, job=async_task.job)
                 yield_result(async_task, uov_input_image_path, 100, async_task.black_out_nsfw, False,
                              do_not_show_finished_images=True)
                 return
@@ -1539,35 +1540,33 @@ def worker():
                 if task.generate_image_grid:
                     build_image_wall(task)
                 job = task.job
-                if job:
-                    with job.scope(DiagnosticStage.CLEANUP):
-                        job.mark_success()
-                        job.record_event(
-                            LogLevel.INFO,
-                            DiagnosticStage.CLEANUP,
-                            f"任务完成，生成 {len(task.results)} 张图像",
-                            extra_data={
-                                "output_count": len(task.results),
-                                "output_files": task.results,
-                            },
-                        )
+                with job.scope(DiagnosticStage.CLEANUP):
+                    job.mark_success()
+                    job.record_event(
+                        LogLevel.INFO,
+                        DiagnosticStage.CLEANUP,
+                        f"任务完成，生成 {len(task.results)} 张图像",
+                        extra_data={
+                            "output_count": len(task.results),
+                            "output_files": task.results,
+                        },
+                    )
                 task.yields.append(['finish', task.results])
                 pipeline.prepare_text_encoder(async_call=True)
             except DiagnosticJobError as de:
                 job = task.job
-                if job:
-                    job.mark_failed()
+                job.mark_failed()
                 task.yields.append(['finish', task.results])
                 task.yields.append(['error', {
-                    'trace_id': job.trace_id if job else None,
+                    'trace_id': job.trace_id,
                     'human_message': de.human_message,
                     'category': de.category.value,
-                    'diagnostic_summary': job.summary() if job else str(de),
+                    'diagnostic_summary': job.summary(),
                 }])
             except Exception as e:
                 job = task.job
                 error_stage = DiagnosticStage.UNKNOWN
-                if job and job._current_stage:
+                if job._current_stage:
                     try:
                         error_stage = DiagnosticStage(job._current_stage)
                     except ValueError:
@@ -1578,20 +1577,19 @@ def worker():
                 human_msg = "生成过程中发生未知错误"
                 if category == DiagnosticErrorCategory.GPU_OUT_OF_MEMORY:
                     human_msg = "显存不足，无法继续生成"
-                if job:
-                    job.record_error(
-                        error_stage,
-                        human_msg,
-                        category=category,
-                        exception=e,
-                    )
+                job.record_error(
+                    error_stage,
+                    human_msg,
+                    category=category,
+                    exception=e,
+                )
                 traceback.print_exc()
                 task.yields.append(['finish', task.results])
                 task.yields.append(['error', {
-                    'trace_id': job.trace_id if job else None,
+                    'trace_id': job.trace_id,
                     'human_message': human_msg,
                     'category': category.value,
-                    'diagnostic_summary': job.summary() if job else f"Error: {str(e)}",
+                    'diagnostic_summary': job.summary(),
                 }])
             finally:
                 if pid in modules.patch.patch_settings:

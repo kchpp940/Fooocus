@@ -20,6 +20,7 @@ class LogLevel(Enum):
 
 
 class DiagnosticStage(Enum):
+    QUEUE_WAIT = "queue_wait"
     REQUEST_INIT = "request_init"
     RESOURCE_SCAN = "resource_scan"
     MODEL_LOAD = "model_load"
@@ -279,6 +280,7 @@ class DiagnosticJob:
         self.status: str = "running"
 
         self._stages: Dict[str, Dict[str, Any]] = {}
+        self._stage_history: List[str] = []
         self._current_stage: Optional[str] = None
         self._current_stage_start: Optional[float] = None
 
@@ -310,6 +312,8 @@ class DiagnosticJob:
             }
         self._current_stage = stage_name
         self._current_stage_start = time.time()
+        if stage_name not in self._stages:
+            self._stage_history.append(stage_name)
         self._stages[stage_name] = {
             "status": "in_progress",
             "started_at": self._current_stage_start,
@@ -493,12 +497,14 @@ class DiagnosticJob:
                 lines.append(f"  - {os.path.basename(m) if _SENSITIVE_DATA_REDACTED else m}")
         if self._stages:
             lines.append("")
-            lines.append("Stage Timings:")
-            for stage, info in self._stages.items():
+            lines.append("Stage Timeline (execution order):")
+            stage_order = self._stage_history if self._stage_history else list(self._stages.keys())
+            for i, stage in enumerate(stage_order, 1):
+                info = self._stages.get(stage, {})
                 dur = info.get("duration_sec", "?")
                 st = info.get("status", "?")
                 dur_str = f"{dur:.2f}s" if isinstance(dur, float) else str(dur)
-                lines.append(f"  {stage}: {dur_str} [{st}]")
+                lines.append(f"  [{i}] {stage}: {dur_str} [{st}]")
         lines.append("==================================")
         return "\n".join(lines)
 
