@@ -3,6 +3,7 @@ import sys
 import tarfile
 import tempfile
 import shutil
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Optional
@@ -12,6 +13,13 @@ if _root not in sys.path:
     sys.path.insert(0, _root)
 
 from modules.tools.common import ToolResult
+from modules.services.config_inspector import (
+    resolve_effective_paths,
+    load_config_overrides,
+    get_user_data_dir,
+    get_builtin_presets_dir,
+    get_user_presets_dir,
+)
 
 
 def add_package_logs_args(parser) -> None:
@@ -138,25 +146,19 @@ def package_logs(args: Any) -> ToolResult:
 
     source_paths: List[tuple] = []
 
-    user_data_dir = os.environ.get("FOOOCUS_USER_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".fooocus")
-    config_path = os.environ.get("config_path") or os.path.join(root, "config.txt")
-    outputs_dir = os.path.join(root, "outputs")
-    temp_dir = os.path.join(tempfile.gettempdir(), "fooocus")
-    presets_dir = os.path.join(root, "presets")
-    user_presets_dir = os.path.join(user_data_dir, "user_presets")
+    user_data_dir = get_user_data_dir(root)
+    config_overrides = load_config_overrides(project_root=root)["data"]
+    paths_info = resolve_effective_paths(config_overrides, project_root=root)
 
-    cfg_override = {}
-    if os.path.isfile(config_path):
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                cfg_override = json.load(f)
-        except Exception:
-            pass
-    if isinstance(cfg_override.get("path_outputs"), str):
-        outputs_dir = os.path.abspath(cfg_override["path_outputs"])
-    if isinstance(cfg_override.get("temp_path"), str):
-        temp_dir = os.path.abspath(cfg_override["temp_path"])
-    config_path = os.path.abspath(config_path)
+    config_path = load_config_overrides(project_root=root)["path"]
+    outputs_dir = (
+        paths_info["by_key"]["path_outputs"]["effective"][0]
+        if paths_info["by_key"].get("path_outputs", {}).get("effective")
+        else os.path.join(root, "outputs")
+    )
+    temp_dir = paths_info["temp_path"]["effective"]
+    presets_dir = get_builtin_presets_dir(root)
+    user_presets_dir = get_user_presets_dir(root)
 
     candidate_files = [
         (config_path, "config.txt"),

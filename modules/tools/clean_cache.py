@@ -2,6 +2,7 @@ import os
 import sys
 import shutil
 import tempfile
+import json
 from typing import Any
 
 _root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -9,6 +10,10 @@ if _root not in sys.path:
     sys.path.insert(0, _root)
 
 from modules.tools.common import ToolResult
+from modules.services.config_inspector import (
+    resolve_effective_paths,
+    load_config_overrides,
+)
 
 
 def add_clean_cache_args(parser) -> None:
@@ -204,20 +209,15 @@ def clean_cache(args: Any) -> ToolResult:
     }
 
     hash_cache_path = os.path.join(_root, "hash_cache.txt")
-    outputs_dir = os.path.join(_root, "outputs")
-    temp_dir = os.path.join(tempfile.gettempdir(), "fooocus")
 
-    config_path = os.path.join(_root, "config.txt")
-    if os.path.isfile(config_path):
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            if isinstance(cfg.get("path_outputs"), str):
-                outputs_dir = os.path.abspath(cfg["path_outputs"])
-            if isinstance(cfg.get("temp_path"), str):
-                temp_dir = os.path.abspath(cfg["temp_path"])
-        except Exception:
-            pass
+    cfg_override = load_config_overrides(project_root=_root)["data"]
+    paths_info = resolve_effective_paths(cfg_override, project_root=_root)
+    outputs_dir = (
+        paths_info["by_key"]["path_outputs"]["effective"][0]
+        if paths_info["by_key"].get("path_outputs", {}).get("effective")
+        else os.path.join(_root, "outputs")
+    )
+    temp_dir = paths_info["temp_path"]["effective"]
 
     if not dry_run and not force:
         actions = []
