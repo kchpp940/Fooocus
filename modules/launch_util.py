@@ -6,9 +6,11 @@ import subprocess
 import sys
 import re
 import logging
-import importlib.metadata
-import packaging.version
-from packaging.requirements import Requirement
+
+from modules.services.environment_inspector import (
+    is_package_installed,
+    check_requirements_strict,
+)
 
 logging.getLogger("torch.distributed.nn").setLevel(logging.ERROR)  # sshh...
 logging.getLogger("xformers").addFilter(lambda record: 'A matching Triton is not available' not in record.getMessage())
@@ -24,12 +26,8 @@ script_path = os.path.dirname(modules_path)
 
 
 def is_installed(package):
-    try:
-        spec = importlib.util.find_spec(package)
-    except ModuleNotFoundError:
-        return False
-
-    return spec is not None
+    """Wrapper 保持 API 兼容；底层使用 modules.services.environment_inspector.is_package_installed。"""
+    return is_package_installed(package)
 
 
 def run(command, desc=None, errdesc=None, custom_env=None, live: bool = default_command_live) -> str:
@@ -76,28 +74,28 @@ def run_pip(command, desc=None, live=default_command_live):
 
 
 def requirements_met(requirements_file):
-    with open(requirements_file, "r", encoding="utf8") as file:
-        for line in file:
-            line = line.strip()
-            if line == "" or line.startswith('#'):
-                continue
-
-            requirement = Requirement(line)
-            package = requirement.name
-
-            try:
-                version_installed = importlib.metadata.version(package)
-                installed_version = packaging.version.parse(version_installed)
-
-                # Check if the installed version satisfies the requirement
-                if installed_version not in requirement.specifier:
-                    print(f"Version mismatch for {package}: Installed version {version_installed} does not meet requirement {requirement}")
-                    return False
-            except Exception as e:
-                print(f"Error checking version for {package}: {e}")
-                return False
-
-    return True
+    """Wrapper 保持 API 兼容；底层使用 modules.services.environment_inspector.check_requirements_strict。
+    保持原有行为：遇到不满足的包就打印并返回 False。
+    """
+    result = check_requirements_strict(requirements_file)
+    if not result.get("found", False):
+        return False
+    for issue in result.get("issues", []):
+        status = issue.get("status", "")
+        if status == "ok":
+            continue
+        package = issue.get("package", "?")
+        detail = issue.get("detail", "")
+        if status == "version_mismatch":
+            print(f"Version mismatch for {package}: {detail}")
+            return False
+        elif status == "missing":
+            print(f"Missing package: {package} — {detail}")
+            return False
+        elif status == "error":
+            print(f"Error checking {package}: {detail}")
+            return False
+    return result.get("all_met", False)
 
 
 def delete_folder_content(folder, prefix=None):

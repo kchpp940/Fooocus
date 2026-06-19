@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import platform
 import re
@@ -252,4 +253,154 @@ def run_environment_inspection(
         "platform": platform_info,
         "dependencies": deps,
         "requirements_file": req_info,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 与 launch_util 行为兼容的底层检查（find_spec 方式 + packaging 版本比较）
+# ---------------------------------------------------------------------------
+
+def is_package_installed(package_name: str) -> bool:
+    """
+    使用 importlib.util.find_spec 检测包是否可导入。
+    与 modules.launch_util.is_installed 行为完全一致，速度快但不执行模块初始化。
+    """
+    try:
+        spec = importlib.util.find_spec(package_name)
+    except ModuleNotFoundError:
+        return False
+    return spec is not None
+
+
+def _get_installed_version(package_name: str) -> Optional[str]:
+    """
+    通过 importlib.metadata 获取已安装包的版本号。
+    返回 None 表示未安装或无法获取版本。
+    """
+    try:
+        import importlib.metadata
+        return importlib.metadata.version(package_name)
+    except Exception:
+        return None
+
+
+def check_requirements_strict(
+    requirements_file: str,
+) -> Dict[str, Any]:
+    """
+    使用 packaging 库严格检查 requirements 文件中的每个包是否安装且版本符合 specifier。
+    行为与 modules.launch_util.requirements_met 一致。
+
+    返回：
+      {
+        'found': bool,
+        'path': str,
+        'all_met': bool,
+        'checked_count': int,
+        'issues': [{'line': str, 'package': str, 'status': 'ok|missing|version_mismatch|error', 'detail': str}],
+      }
+    """
+    if not requirements_file or not os.path.isfile(requirements_file):
+        return {
+            "found": False,
+            "path": requirements_file,
+            "all_met": False,
+            "checked_count": 0,
+            "issues": [],
+        }
+
+    # 惰性导入 packaging，避免在没有 packaging 的环境里报错
+    try:
+        from packaging.requirements import Requirement
+        from packaging.version import parse as parse_version
+    except Exception:
+        # 如果 packaging 不可用，fallback 到简单检查
+        simple = check_requirements_file(requirements_file)
+        return {
+            "found": True,
+            "path": requirements_file,
+            "all_met": simple["total_missing"] == 0,
+            "checked_count": simple["count"],
+            "issues": [
+                {"line": m, "package": m, "status": "missing", "detail": "package not importable"}
+                for m in simple["missing"]
+            ],
+            "fallback_reason": "packaging library not available; using simple import check",
+        }
+
+    issues: List[Dict[str, Any]] = []
+    all_met = True
+    checked = 0
+
+    try:
+        with open(requirements_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        return {
+            "found": True,
+            "path": requirements_file,
+            "all_met": False,
+            "checked_count": 0,
+            "issues": [{"line": "", "package": "", "status": "error", "detail": "could not read file"}],
+        }
+
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            requirement = Requirement(line)
+        except Exception as e:
+            issues.append({"line": line, "package": "", "status": "error", "detail": f"could not parse: {e}"})
+            all_met = False
+            continue
+
+        package = requirement.name
+        checked += 1
+        try:
+            installed_version_str = _get_installed_version(package)
+        except Exception as e:
+            issues.append({"line": line, "package": package, "status": "error", "detail": str(e)})
+            all_met = False
+            continue
+
+        if installed_version_str is None:
+            issues.append({"line": line, "package": package, "status": "missing", "detail": "not installed"})
+            all_met = False
+            continue
+
+        try:
+            installed_version = parse_version(installed_version_str)
+        except Exception as e:
+            issues.append({"line": line, "package": package, "status": "error",
+                           "detail": f"could not parse installed version {installed_version_str}: {e}"})
+            all_met = False
+            continue
+
+        if installed_version not in requirement.specifier:
+            issues.append({
+                "line": line,
+                "package": package,
+                "status": "version_mismatch",
+                "detail": f"installed {installed_version_str} does not satisfy {requirement.specifier}",
+                "installed_version": installed_version_str,
+                "required_spec": str(requirement.specifier),
+            })
+            all_met = False
+        else:
+            issues.append({
+                "line": line,
+                "package": package,
+                "status": "ok",
+                "detail": f"{installed_version_str} satisfies {requirement.specifier}",
+                "installed_version": installed_version_str,
+                "required_spec": str(requirement.specifier),
+            })
+
+    return {
+        "found": True,
+        "path": requirements_file,
+        "all_met": all_met,
+        "checked_count": checked,
+        "issues": issues,
     }

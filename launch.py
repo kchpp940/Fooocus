@@ -67,12 +67,61 @@ vae_approx_filenames = [
 ]
 
 
+def run_preflight_checks(project_root):
+    """
+    启动前预检：调用 service 层输出环境 + 配置摘要。
+    与 python -m modules.tools 使用完全相同的底层逻辑。
+    """
+    try:
+        from modules.services.environment_inspector import run_environment_inspection
+        from modules.services.config_inspector import load_and_validate_config
+
+        print('[Preflight] Running environment & configuration preflight checks...')
+
+        env = run_environment_inspection(project_root=project_root, skip_torch=False)
+        print(f"[Preflight] Python version: {env['python_version']} "
+              f"({'compatible' if env['python']['compatible'] else 'INCOMPATIBLE'})")
+        print(f"[Preflight] Platform: {env['platform']['system']} {env['platform']['machine']}")
+
+        missing_core = []
+        for pkg, info in env.get("dependencies", {}).items():
+            if not info.get("optional", False) and not info.get("installed", False):
+                missing_core.append(pkg)
+        if missing_core:
+            print(f"[Preflight] WARNING: {len(missing_core)} core package(s) not yet installed: {', '.join(missing_core)}")
+            print('[Preflight]          They will be installed by prepare_environment() next.')
+        else:
+            print('[Preflight] All core dependencies appear installed.')
+
+        cfg = load_and_validate_config(project_root=project_root)
+        cfg_status = 'loaded' if cfg['config']['loaded'] else 'not found (will use defaults)'
+        print(f"[Preflight] Config file: {cfg_status}")
+        if cfg['config']['loaded']:
+            schema_issues = cfg['schema']['issues_count'] if cfg['schema'].get('available') else 'N/A'
+            print(f"[Preflight] Schema validation issues: {schema_issues}")
+
+        missing_dirs = 0
+        for key, info in cfg.get('paths', {}).get('by_key', {}).items():
+            missing_dirs += len(info.get('missing', []))
+        if missing_dirs > 0:
+            print(f"[Preflight] NOTE: {missing_dirs} model directory path(s) do not exist yet (will be created as needed).")
+
+        print('[Preflight] Preflight checks complete.')
+        print()
+    except Exception as e:
+        # preflight 失败不应该阻止启动，只打印警告
+        print(f'[Preflight] WARNING: Preflight checks encountered an error: {e}')
+        print('[Preflight]          Startup will continue normally.')
+        print()
+
+
 def ini_args():
     from args_manager import args
     return args
 
 
 prepare_environment()
+run_preflight_checks(root)
 build_launcher()
 args = ini_args()
 

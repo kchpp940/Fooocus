@@ -165,24 +165,27 @@ def add_user_prefix(preset_name):
 
 
 def get_builtin_presets():
-    preset_folder = get_builtin_presets_dir()
-    if not os.path.exists(preset_folder):
-        return []
-    return [f[:-5] for f in os.listdir(preset_folder) if f.endswith('.json')]
+    """Wrapper 保持 API 兼容；底层使用 modules.services.config_inspector.list_builtin_presets。"""
+    from modules.services.config_inspector import list_builtin_presets
+    return list_builtin_presets(_root_dir)
 
 
 def get_user_presets():
-    preset_folder = get_user_presets_dir()
-    if not os.path.exists(preset_folder):
-        return []
-    return [add_user_prefix(f[:-5]) for f in os.listdir(preset_folder) if f.endswith('.json')]
+    """Wrapper 保持 API 兼容；底层使用 modules.services.config_inspector.list_user_presets。
+    保留原有副作用：确保 user_presets 目录存在。
+    """
+    # 保留原有副作用：自动创建目录
+    _ = get_user_presets_dir()
+    from modules.services.config_inspector import list_user_presets
+    return list_user_presets(_root_dir)
 
 
 def get_presets():
-    presets = ['initial']
-    builtin = get_builtin_presets()
-    user = get_user_presets()
-    return presets + builtin + user
+    """Wrapper 保持 API 兼容；底层使用 modules.services.config_inspector.list_all_presets。"""
+    from modules.services.config_inspector import list_all_presets
+    # 确保目录副作用
+    _ = get_user_presets_dir()
+    return list_all_presets(_root_dir)
 
 
 def update_presets():
@@ -191,12 +194,18 @@ def update_presets():
 
 
 def try_get_preset_content(preset):
+    """Wrapper 保持 API 兼容；底层使用 modules.services.config_inspector.load_preset_content。
+    保留原有副作用：打印加载成功/失败信息。
+    """
+    from modules.services.config_inspector import load_preset_content, is_user_preset, strip_user_prefix
+
     if not isinstance(preset, str):
         return {}
 
     if preset == 'initial':
         return {}
 
+    # 重建路径用于打印（service 层内部也会做同样的路径计算）
     if is_user_preset(preset):
         preset_name = strip_user_prefix(preset)
         preset_path = os.path.join(get_user_presets_dir(), f'{preset_name}.json')
@@ -204,13 +213,16 @@ def try_get_preset_content(preset):
         preset_path = os.path.join(get_builtin_presets_dir(), f'{preset}.json')
 
     try:
-        if os.path.exists(preset_path):
-            with open(preset_path, "r", encoding="utf-8") as json_file:
-                json_content = json.load(json_file)
-                print(f'Loaded preset: {preset_path}')
-                return json_content
+        content = load_preset_content(preset, _root_dir)
+        if isinstance(content, dict) and content:
+            print(f'Loaded preset: {preset_path}')
+            return content
+        elif content == {} and os.path.isfile(preset_path):
+            # 文件存在但内容是空 dict
+            print(f'Loaded preset: {preset_path}')
+            return {}
         else:
-            raise FileNotFoundError
+            raise FileNotFoundError(f'Preset not found: {preset}')
     except Exception as e:
         print(f'Load preset [{preset_path}] failed')
         print(e)

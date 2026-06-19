@@ -10,22 +10,16 @@ def makedirs_with_log(path):
 
 
 def get_files_from_folder(folder_path, extensions=None, name_filter=None):
+    """Wrapper 保持 API 兼容；底层使用 modules.services.resource_scanner.scan_directory。
+    保持原有行为：目录不存在时抛出 ValueError。
+
+    注意：这里使用惰性导入以避免循环依赖
+    （config_schema → extra_utils → resource_scanner → config_inspector → config_schema）。
+    """
     if not os.path.isdir(folder_path):
         raise ValueError("Folder path is not a valid directory.")
-
-    filenames = []
-
-    for root, _, files in os.walk(folder_path, topdown=False):
-        relative_path = os.path.relpath(root, folder_path)
-        if relative_path == ".":
-            relative_path = ""
-        for filename in sorted(files, key=lambda s: s.casefold()):
-            _, file_extension = os.path.splitext(filename)
-            if (extensions is None or file_extension.lower() in extensions) and (name_filter is None or name_filter in _):
-                path = os.path.join(relative_path, filename)
-                filenames.append(path)
-
-    return filenames
+    from modules.services.resource_scanner import scan_directory
+    return scan_directory(folder_path, extensions=extensions, name_filter=name_filter)
 
 
 def try_eval_env_var(value: str, expected_type=None):

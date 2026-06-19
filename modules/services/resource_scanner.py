@@ -29,28 +29,38 @@ WILDCARD_EXTS = [".txt"]
 def scan_directory(
     folder: str,
     extensions: Optional[List[str]] = None,
+    name_filter: Optional[str] = None,
 ) -> List[str]:
     """
-    扫描单个目录，返回匹配扩展名的文件名（不含路径），按大小写不敏感排序。
+    递归扫描目录，返回匹配扩展名的文件相对路径（相对于 folder）。
+    与 modules/extra_utils.py:get_files_from_folder 行为完全一致：
+      - 递归遍历子目录 (os.walk)
+      - 按大小写不敏感排序文件名
+      - name_filter 匹配文件名（不含扩展名）是否包含子串
     空目录或不存在返回 []。
     """
     if not folder or not os.path.isdir(folder):
         return []
     if extensions is None:
         extensions = DEFAULT_MODEL_EXTS
-    lower_exts = tuple(ext.lower() for ext in extensions)
+    lower_exts = {ext.lower() for ext in extensions}
     found: List[str] = []
+
     try:
-        for name in os.listdir(folder):
-            full = os.path.join(folder, name)
-            if not os.path.isfile(full):
-                continue
-            if name.lower().endswith(lower_exts):
-                found.append(name)
+        for root, _, files in os.walk(folder, topdown=False):
+            relative_dir = os.path.relpath(root, folder)
+            if relative_dir == ".":
+                relative_dir = ""
+            for filename in sorted(files, key=lambda s: s.casefold()):
+                _, file_ext = os.path.splitext(filename)
+                ext_ok = not extensions or file_ext.lower() in lower_exts
+                name_ok = name_filter is None or name_filter in os.path.splitext(filename)[0]
+                if ext_ok and name_ok:
+                    rel_path = os.path.join(relative_dir, filename) if relative_dir else filename
+                    found.append(rel_path)
     except Exception:
         return []
-    # 保持 modules/config.py 的顺序：大小写不敏感排序
-    found.sort(key=lambda x: x.lower())
+
     return found
 
 
